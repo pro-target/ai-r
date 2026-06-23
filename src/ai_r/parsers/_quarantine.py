@@ -13,7 +13,7 @@ written we log to stderr and move on, because the alternative
 
 Output layout::
 
-    <AI_READER_HOME>/quarantine/<agent>/<uuid>.badlines.jsonl
+    <AI_R_HOME>/quarantine/<agent>/<uuid>.badlines.jsonl
 
 Each line is a JSON object with the keys ``detected_at``, ``line_no``,
 ``reason`` and ``raw`` — mirroring the Kairo ``FileQuarantineSink``
@@ -38,10 +38,10 @@ QUARANTINE_REASON_UNSUPPORTED_TYPE = "unsupported_record_type"
 def _resolve_base(base_dir: Optional[str]) -> Path:
     if base_dir:
         return Path(base_dir).expanduser()
-    env_home = os.environ.get("AI_READER_HOME")
+    env_home = os.environ.get("AI_R_HOME")
     if env_home:
         return Path(env_home).expanduser()
-    return Path("~/.ai-reader").expanduser()
+    return Path("~/.ai-r").expanduser()
 
 
 class QuarantineSink:
@@ -58,7 +58,7 @@ class QuarantineSink:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             print(
-                f"ai_reader: quarantine dir create failed: {exc}",
+                f"ai-r: quarantine dir create failed: {exc}",
                 file=sys.stderr,
             )
 
@@ -83,7 +83,7 @@ class QuarantineSink:
             self._count += 1
         except OSError as exc:
             print(
-                f"ai_reader: quarantine write failed: {exc}",
+                f"ai-r: quarantine write failed: {exc}",
                 file=sys.stderr,
             )
 

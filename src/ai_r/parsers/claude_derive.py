@@ -1,7 +1,7 @@
 """Heuristic derivation helpers for Claude sessions.
 
 Two pure helpers that operate on the :class:`Message` list produced by
-:func:`ai_reader.parsers.claude.read_messages` (or any equivalent):
+:func:`ai_r.parsers.claude.read_messages` (or any equivalent):
 
 * :func:`extract_decisions` — pull decision phrases from assistant
   messages, filtered by tech-specificity tokens so an engineer

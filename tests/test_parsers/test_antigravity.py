@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, antigravity
-from ai_reader.parsers.antigravity import (
+from ai_r.parsers import AgentName, antigravity
+from ai_r.parsers.antigravity import (
     _extract_title_from_markdown,
     _extract_title_from_overview,
     _is_valid_uuid,
@@ -164,8 +164,8 @@ def test_resolve_brain_roots_explicit(tmp_path: Path) -> None:
     assert roots == [tmp_path]
 
 
-def test_resolve_brain_roots_uses_ai_reader_home(tmp_path: Path) -> None:
-    # _isolate_ai_reader_home fixture points AI_READER_HOME at tmp_path.
+def test_resolve_brain_roots_uses_ai_r_home(tmp_path: Path) -> None:
+    # _isolate_ai_r_home fixture points AI_R_HOME at tmp_path.
     roots = _resolve_brain_roots()
     # We only assert the function returns a list (real shape depends on
     # the fixture tree, which always creates antigravity dirs).

@@ -11,12 +11,12 @@ from typing import Any, Tuple
 
 import pytest
 
-from ai_reader import cli as cli_module
-from ai_reader.exporters.rounds import session_to_rounds
-from ai_reader.parsers.models import AgentName, Message, Session
+from ai_r import cli as cli_module
+from ai_r.exporters.rounds import session_to_rounds
+from ai_r.parsers.models import AgentName, Message, Session
 
 
-_ENV_KEYS = ("AI_READER_HOME", "OPENCODE_DB")
+_ENV_KEYS = ("AI_R_HOME", "OPENCODE_DB")
 
 
 def _run_inproc(
@@ -90,7 +90,7 @@ def test_session_to_rounds_with_messages() -> None:
                 {
                     "name": "Read",
                     "input": json.dumps(
-                        {"file_path": "src/ai_reader/parsers/claude.py"}
+                        {"file_path": "src/ai_r/parsers/claude.py"}
                     ),
                 },
             ),
@@ -110,7 +110,7 @@ def test_session_to_rounds_with_messages() -> None:
                     "name": "Edit",
                     "input": json.dumps(
                         {
-                            "file_path": "src/ai_reader/parsers/claude.py",
+                            "file_path": "src/ai_r/parsers/claude.py",
                             "old_string": "x",
                             "new_string": "y",
                         }
@@ -133,7 +133,7 @@ def test_session_to_rounds_with_messages() -> None:
     assert "### Status" in out
     assert "in-progress" in out
     assert "### Files touched" in out
-    assert "`src/ai_reader/parsers/claude.py`" in out
+    assert "`src/ai_r/parsers/claude.py`" in out
     assert "### Decisions" in out
     assert "### Open" in out
     assert "Run the tests please" in out
@@ -167,7 +167,7 @@ def test_cli_export_rounds_stdout(tmp_sessions_dir: Path) -> None:
 
     rc, out, err = _run_inproc(
         ["export", "rounds", uuid],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     assert "# Session:" in out
@@ -274,7 +274,7 @@ def test_cli_export_rounds_output_writes_file(
     out_file = tmp_path / "rounds.md"
     rc, _stdout, stderr = _run_inproc(
         ["export", "rounds", uuid, "--output", str(out_file)],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, stderr
     assert out_file.exists()

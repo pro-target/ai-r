@@ -2,9 +2,9 @@
 
 Runnable templates that audit a past agent session for dry-run,
 completeness, and quality signals.  They use the public
-`ai_reader.parsers.<agent>.read_messages` API (see
-[`src/ai_reader/parsers/__init__.py`](../../src/ai_reader/parsers/__init__.py))
-which returns structured [`Message`](../../src/ai_reader/parsers/models.py)
+`ai_r.parsers.<agent>.read_messages` API (see
+[`src/ai_r/parsers/__init__.py`](../../src/ai_r/parsers/__init__.py))
+which returns structured [`Message`](../../src/ai_r/parsers/models.py)
 objects preserving `tool_use` and `tool_result` blocks.
 
 These recipes mirror the behavioural-audit half of `git-auditor`'s
@@ -13,7 +13,7 @@ These recipes mirror the behavioural-audit half of `git-auditor`'s
 lines ~393-477): (a) grep the session action log for test-runner commands
 to confirm tests ran, and (b) check that changed files appear in the
 agent's reasoning.  The difference is that here the audit runs through
-the clean `ai-reader` library instead of shelling out to the legacy
+the clean `ai-r` library instead of shelling out to the legacy
 `agent-audit.py` wrapper.
 
 ## Why the Python API, not MCP

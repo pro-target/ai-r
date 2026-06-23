@@ -2,7 +2,7 @@
 
 Why subprocess and not ``cli.main(argv)`` directly?  The CLI is the
 executable surface that ships to operators, so testing the *real*
-binary entry point — ``python -m ai_reader.cli`` — catches issues
+binary entry point — ``python -m ai_r.cli`` — catches issues
 that in-process testing would miss: missing ``__future__`` imports,
 ``sys.path`` munging, ``argparse`` quirks, the works.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader import cli as cli_module
+from ai_r import cli as cli_module
 
 
 # ---------------------------------------------------------------------------
@@ -32,17 +32,17 @@ def _run_cli(
     env: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess:
-    """Invoke ``python -m ai_reader.cli`` with the given args.
+    """Invoke ``python -m ai_r.cli`` with the given args.
 
-    The autouse ``_isolate_ai_reader_home`` fixture sets
-    ``AI_READER_HOME`` in the *test* process; the subprocess would
+    The autouse ``_isolate_ai_r_home`` fixture sets
+    ``AI_R_HOME`` in the *test* process; the subprocess would
     inherit it and look at an empty fake tree.  We explicitly strip
     the variable from the child environment unless the caller asked
     for it.
     """
-    cmd = [sys.executable, "-m", "ai_reader.cli", *args]
+    cmd = [sys.executable, "-m", "ai_r.cli", *args]
     full_env = os.environ.copy()
-    full_env.pop("AI_READER_HOME", None)
+    full_env.pop("AI_R_HOME", None)
     full_env.pop("OPENCODE_DB", None)
     if env:
         full_env.update(env)
@@ -89,7 +89,7 @@ def _write_claude_session(home: Path, uuid: str, title: str) -> None:
 
 
 _ENV_KEYS = (
-    "AI_READER_HOME",
+    "AI_R_HOME",
     "OPENCODE_DB",
 )
 
@@ -128,20 +128,20 @@ def _run_inproc(
 def test_cli_version() -> None:
     p = _run_cli("--version")
     assert p.returncode == 0, p.stderr
-    assert "ai-reader" in p.stdout
+    assert "ai-r" in p.stdout
     assert "0.1.0" in p.stdout
 
 
 def test_module_invocation() -> None:
-    """``python -m ai_reader --version`` exits 0 (module entry point works)."""
+    """``python -m ai_r --version`` exits 0 (module entry point works)."""
     p = subprocess.run(
-        [sys.executable, "-m", "ai_reader", "--version"],
+        [sys.executable, "-m", "ai_r", "--version"],
         capture_output=True,
         text=True,
         timeout=30.0,
     )
     assert p.returncode == 0, p.stderr
-    assert "ai-reader" in p.stdout
+    assert "ai-r" in p.stdout
 
 
 def test_cli_help() -> None:
@@ -183,10 +183,10 @@ def test_cli_list_json() -> None:
 
 
 def test_cli_list_empty() -> None:
-    """No sessions in AI_READER_HOME -> stderr message, exit 0."""
+    """No sessions in AI_R_HOME -> stderr message, exit 0."""
     rc, out, err = _run_inproc(
         ["list", "--agent", "claude"],
-        env={"AI_READER_HOME": "/nonexistent"},
+        env={"AI_R_HOME": "/nonexistent"},
     )
     assert rc == 0
     assert "no sessions found" in err.lower()
@@ -249,7 +249,7 @@ def test_cli_read_unique_short_claude_uuid(
 
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", "46d7b4fc"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
 
     assert rc == 0, err
@@ -265,7 +265,7 @@ def test_cli_read_unique_short_claude_uuid_without_agent(
 
     rc, out, err = _run_inproc(
         ["read", "46d7b4fc"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
 
     assert rc == 0, err
@@ -283,7 +283,7 @@ def test_cli_read_ambiguous_short_claude_uuid(
 
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", "46d7b4fc"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
 
     assert rc == 2
@@ -303,7 +303,7 @@ def test_cli_read_missing_short_claude_uuid(
 
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", "00000000"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
 
     assert rc == 3
@@ -477,7 +477,7 @@ def test_cli_list_limit_truncates(
         )
     rc, out, err = _run_inproc(
         ["list", "--agent", "claude", "--limit", "2", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -496,7 +496,7 @@ def test_cli_list_days_filter(
     _make_claude_session(tmp_sessions_dir, "old-1", old_iso, title="old")
     rc, out, err = _run_inproc(
         ["list", "--agent", "claude", "--days", "7", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -529,7 +529,7 @@ def test_cli_list_from_to_date_filter(
             "2026-06-30",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -545,7 +545,7 @@ def test_cli_list_bad_date_exits_1(
     """Invalid ``--from-date`` -> exit 1 with a stderr message."""
     rc, out, err = _run_inproc(
         ["list", "--agent", "claude", "--from-date", "not-a-date"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 1
     assert "invalid --from-date" in err.lower()
@@ -560,7 +560,7 @@ def test_cli_list_all_flag_accepted(
     )
     rc, out, err = _run_inproc(
         ["list", "--agent", "claude", "--all", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -579,7 +579,7 @@ def test_cli_search_limit_and_days(
         )
     rc, out, err = _run_inproc(
         ["search", "searchme", "--agent", "claude", "--limit", "1", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     assert len(json.loads(out)) == 1
@@ -598,7 +598,7 @@ def test_cli_read_messages_human(
     uuid = fake_claude_session_with_tools.stem
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", uuid, "--messages"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     assert uuid in out
@@ -614,7 +614,7 @@ def test_cli_read_messages_json(
     uuid = fake_claude_session_with_tools.stem
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", uuid, "--messages", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -630,7 +630,7 @@ def test_cli_read_messages_missing_session(
     """``read --messages`` on a missing uuid still exits 3 (metadata path)."""
     rc, out, err = _run_inproc(
         ["read", "--agent", "claude", "no-such-session", "--messages"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 3
     assert "not found" in err.lower()
@@ -690,7 +690,7 @@ def test_cli_search_scope_body_finds_session(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -714,7 +714,7 @@ def test_cli_search_scope_body_no_results(
             "--agent",
             "claude",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     assert "no sessions match" in err.lower()
@@ -739,7 +739,7 @@ def test_cli_search_operator_or(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -766,7 +766,7 @@ def test_cli_search_operator_not(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -794,7 +794,7 @@ def test_cli_search_negative_prefix(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -825,7 +825,7 @@ def test_cli_search_limit_body(
             "2",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -838,7 +838,7 @@ def test_cli_search_invalid_scope(
     """``--scope bogus`` -> exit 1 with a stderr message."""
     rc, out, err = _run_inproc(
         ["search", "anything", "--scope", "bogus", "--agent", "claude"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 1
     assert "unknown --scope" in err.lower()
@@ -850,7 +850,7 @@ def test_cli_search_invalid_operator(
     """``--operator xor`` -> exit 1."""
     rc, out, err = _run_inproc(
         ["search", "anything", "--operator", "xor", "--agent", "claude"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 1
     assert "unknown --operator" in err.lower()
@@ -862,7 +862,7 @@ def test_cli_search_invalid_limit(
     """``--limit -1`` -> exit 1."""
     rc, out, err = _run_inproc(
         ["search", "anything", "--limit", "-1", "--agent", "claude"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 1
     assert "--limit" in err.lower()
@@ -893,7 +893,7 @@ def test_cli_search_body_with_date_filter(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -936,7 +936,7 @@ def test_cli_search_backward_compat(
     )
     rc, out, err = _run_inproc(
         ["search", "claude", "--agent", "claude", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -963,7 +963,7 @@ def test_cli_search_short_op_alias(
             "claude",
             "--json",
         ],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -1096,12 +1096,12 @@ def test_cli_find_file_edits_basic(
         edit_path="/tmp/cli-basic/README.md",
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir",
+        "ai_r.parsers.claude._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
     )
     rc, out, err = _run_inproc(
         ["find-file-edits", "README.md"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     assert "README.md" in out
@@ -1120,12 +1120,12 @@ def test_cli_find_file_edits_json(
         edit_path="/tmp/cli-json/src.py",
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir",
+        "ai_r.parsers.claude._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
     )
     rc, out, err = _run_inproc(
         ["find-file-edits", "src.py", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -1144,7 +1144,7 @@ def test_cli_find_file_edits_invalid_bound(
     """Garbage ``--since`` -> exit 2 with a stderr message."""
     rc, out, err = _run_inproc(
         ["find-file-edits", "anything", "--since", "not-a-date"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 2
     assert "iso 8601" in err.lower() or "iso" in err.lower()
@@ -1163,16 +1163,16 @@ def test_cli_find_file_edits_cross_agent(
         user_text="pi edit", edit_path="/tmp/cli-x/shared.py",
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir",
+        "ai_r.parsers.claude._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir",
+        "ai_r.parsers.pi._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".pi" / "agent" / "sessions")),
     )
     rc, out, err = _run_inproc(
         ["find-file-edits", "shared.py", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -1193,16 +1193,16 @@ def test_cli_find_file_edits_agent_filter(
         user_text="pi edit", edit_path="/tmp/cli-f/shared.py",
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir",
+        "ai_r.parsers.claude._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir",
+        "ai_r.parsers.pi._resolve_base_dir",
         lambda bd=None: Path(str(tmp_sessions_dir / ".pi" / "agent" / "sessions")),
     )
     rc, out, err = _run_inproc(
         ["find-file-edits", "shared.py", "--agent", "claude", "--json"],
-        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 0, err
     payload = json.loads(out)

@@ -28,8 +28,8 @@ Title resolution order used by :func:`extract_title` and
 
 The base directory can be overridden for tests by passing ``base_dir``
 explicitly to the module-level functions.  When unset, the directory
-is read from the ``AI_READER_HOME`` environment variable (used as
-``$AI_READER_HOME/.claude/projects``), falling back to
+is read from the ``AI_R_HOME`` environment variable (used as
+``$AI_R_HOME/.claude/projects``), falling back to
 ``~/.claude/projects``.
 """
 
@@ -53,12 +53,12 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     Lookup order:
 
     1. Explicit ``base_dir`` argument.
-    2. ``$AI_READER_HOME/.claude/projects``.
+    2. ``$AI_R_HOME/.claude/projects``.
     3. ``~/.claude/projects``.
     """
     if base_dir:
         return Path(base_dir).expanduser()
-    env_home = os.environ.get("AI_READER_HOME")
+    env_home = os.environ.get("AI_R_HOME")
     if env_home:
         return Path(env_home).expanduser() / ".claude" / "projects"
     return Path("~/.claude/projects").expanduser()

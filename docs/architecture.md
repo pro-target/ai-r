@@ -1,20 +1,20 @@
 # Architecture
 
-`ai-reader` is a 2-layer package. Each layer has exactly one
+`ai-r` is a 2-layer package. Each layer has exactly one
 responsibility and depends only on the layer below it.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 1: Public API                                          │
-│   • ai-reader CLI  (src/ai_reader/cli.py)                    │
-│   • ai-reader-mcp  (src/ai_reader/mcp_server.py)             │
-│   • Python SDK     (importable: ai_reader.parsers)           │
+│   • ai-r CLI  (src/ai_r/cli.py)                    │
+│   • ai-r-mcp  (src/ai_r/mcp_server.py)             │
+│   • Python SDK     (importable: ai_r.parsers)           │
 └──────────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 2: Core parsers                                        │
-│   src/ai_reader/parsers/                                     │
+│   src/ai_r/parsers/                                     │
 │   • claude.py     — JSONL                                    │
 │   • codex.py      — JSONL                                    │
 │   • opencode.py   — SQLite (with snap/flatpak detection)     │
@@ -25,7 +25,7 @@ responsibility and depends only on the layer below it.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-`ai-reader` is a **read-only** session reader. There is no access
+`ai-r` is a **read-only** session reader. There is no access
 layer in front of the parsers: any caller that can reach the CLI,
 the MCP server, or the Python package can read any session. Treat
 the host's session directories as trusted-and-local — the tool does
@@ -37,13 +37,13 @@ session content is a separate concern: see
 
 Three entry points:
 
-### `ai-reader` (CLI)
+### `ai-r` (CLI)
 Thin wrapper over the parsers. Exits with distinct codes:
 - `0` — success
 - `1` — usage / argument error
 - `3` — `FileNotFoundError` (session missing)
 
-### `ai-reader-mcp` (MCP server)
+### `ai-r-mcp` (MCP server)
 Stdio JSON-RPC. Four tools: `list_sessions`, `read_session`,
 `search_sessions`, and `find_file_edits`. `list_sessions` and
 `read_session` are paginated (`limit`/`offset`, `limit=0` = uncapped)
@@ -54,7 +54,7 @@ structured errors to raised exceptions); a missing session returns
 returns `{"error": "invalid_argument", ...}`.
 
 ### Python SDK
-`ai_reader.parsers.*` is importable. See [README.md](../README.md#usage)
+`ai_r.parsers.*` is importable. See [README.md](../README.md#usage)
 for the canonical example.
 
 ## Layer 2 — Parsers
@@ -69,7 +69,7 @@ def session_exists(uuid: str, base_dir: str | None = None) -> bool: ...
 ```
 
 `base_dir` is the testing hook — when omitted, parsers honour
-`$AI_READER_HOME` (treated as the user's `$HOME`) and fall back to
+`$AI_R_HOME` (treated as the user's `$HOME`) and fall back to
 `~`. **This is the only side-effecting test seam**; do not add
 others.
 
@@ -84,7 +84,7 @@ Path resolution per agent:
 | Pi | `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` |
 
 The `Session` model is shared; see
-[`src/ai_reader/parsers/models.py`](../src/ai_reader/parsers/models.py).
+[`src/ai_r/parsers/models.py`](../src/ai_r/parsers/models.py).
 
 ### UUID validation
 
@@ -98,7 +98,7 @@ scoped to a single session identifier — no path traversal.
 ### ADR: access-control removal (`ee72961`)
 
 Commit `ee72961` ("Refactor CLI tests to remove subagent environment
-dependencies") removed the entire `src/ai_reader/access/` module
+dependencies") removed the entire `src/ai_r/access/` module
 (406 LOC: guard / detector / models / proc / `__init__`),
 `tests/test_access/` (613 LOC, 5 files), `docs/access-control.md`,
 `examples/custom_detector.py`, and the `is_caller_subagent` gate in

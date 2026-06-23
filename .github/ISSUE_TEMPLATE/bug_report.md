@@ -32,7 +32,7 @@ paste error here
 
 ## Environment
 
-- ai-reader version: `ai-reader --version` →
+- ai-r version: `ai-r --version` →
 - Python: `python3 --version` →
 - OS: (Ubuntu 22.04 / macOS 14 / …)
 - Agent(s) involved: (claude / codex / opencode / antigravity / all)
@@ -40,7 +40,7 @@ paste error here
 ## Diagnostics
 
 - Agent(s) whose sessions you were reading: (claude / codex / opencode / antigravity / pi / all)
-- Output of `ai-reader list --agent <name> --json` if relevant.
+- Output of `ai-r list --agent <name> --json` if relevant.
 - If a specific call failed, the `uuid` and the exact MCP/CLI call.
 
 ## Logs / context

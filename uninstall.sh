@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ai-reader uninstaller
+# ai-r uninstaller
 #
 # Removes:
-#   - ~/.local/bin/ai-reader, ~/.local/bin/ai-reader-mcp  (symlinks)
-#   - ai-reader entries from 4 agent MCP configs
-#   - /opt/ai-reader or ~/.local/share/ai-reader  (only with --purge)
+#   - ~/.local/bin/ai-r, ~/.local/bin/ai-r-mcp  (symlinks)
+#   - ai-r entries from 4 agent MCP configs
+#   - /opt/ai-r or ~/.local/share/ai-r  (only with --purge)
 #
-# Always preserves ~/dev/ai-reader/ — re-clone to install again.
+# Always preserves ~/dev/ai-r/ — re-clone to install again.
 #
 # Usage:
 #   bash uninstall.sh           # remove symlinks + config entries
@@ -21,14 +21,14 @@ PURGE=0
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<EOF
-ai-reader uninstaller
+ai-r uninstaller
 
 Usage:
   bash uninstall.sh           Remove symlinks + 4 agent config entries
-  bash uninstall.sh --purge   Also remove /opt/ai-reader or ~/.local/share/ai-reader
+  bash uninstall.sh --purge   Also remove /opt/ai-r or ~/.local/share/ai-r
   bash uninstall.sh --help    Show this help
 
-Note: ~/dev/ai-reader (the source repo) is NEVER touched.
+Note: ~/dev/ai-r (the source repo) is NEVER touched.
 EOF
     exit 0
 fi
@@ -49,7 +49,7 @@ BOLD='\033[1m'
 
 # --- remove symlinks ---
 hdr "Removing symlinks in $BIN_DIR"
-for name in ai-reader ai-reader-mcp; do
+for name in ai-r ai-r-mcp; do
     target="$BIN_DIR/$name"
     if [[ -L "$target" ]]; then
         rm -f "$target"
@@ -62,37 +62,37 @@ for name in ai-reader ai-reader-mcp; do
 done
 
 # --- remove config entries ---
-hdr "Removing ai-reader entries from 4 agent configs"
+hdr "Removing ai-r entries from 4 agent configs"
 
 # Claude — canonical user config is ~/.claude.json; also clean the legacy
 # ~/.claude/settings.json location in case an older installer wrote there.
 for file in "$HOME/.claude.json" "$HOME/.claude/settings.json"; do
     if [[ -f "$file" ]] && command -v jq >/dev/null 2>&1; then
-        if jq -e '.mcpServers."ai-reader"' "$file" >/dev/null 2>&1; then
+        if jq -e '.mcpServers."ai-r"' "$file" >/dev/null 2>&1; then
             tmp="$(mktemp)"
-            jq 'del(.mcpServers."ai-reader")' "$file" > "$tmp"
+            jq 'del(.mcpServers."ai-r")' "$file" > "$tmp"
             mv "$tmp" "$file"
-            log "Claude:    removed mcpServers.ai-reader ($file)"
+            log "Claude:    removed mcpServers.ai-r ($file)"
         fi
     fi
 done
 [[ -f "$HOME/.claude.json" ]] || warn "Claude config not found: ~/.claude.json"
 command -v jq >/dev/null 2>&1 || warn "jq not found — skipping Claude cleanup"
 
-# Codex (TOML: remove [mcp_servers.ai-reader] block + immediate comments)
+# Codex (TOML: remove [mcp_servers.ai-r] block + immediate comments)
 file="$HOME/.codex/config.toml"
 if [[ -f "$file" ]]; then
-    if grep -Eq '^\[mcp_servers\.ai-reader\]' "$file"; then
+    if grep -Eq '^\[mcp_servers\.ai-r\]' "$file"; then
         python3 - "$file" <<'PY'
 import re, sys
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
-# Remove the ai-reader block (header line, all following non-blank, non-section lines)
+# Remove the ai-r block (header line, all following non-blank, non-section lines)
 lines = text.splitlines(keepends=True)
 out, skip = [], False
 for line in lines:
-    if re.match(r'^\s*\[mcp_servers\.ai-reader\]\s*$', line):
+    if re.match(r'^\s*\[mcp_servers\.ai-r\]\s*$', line):
         skip = True
         continue
     if skip:
@@ -102,20 +102,20 @@ for line in lines:
         # else: drop the line (still inside the block)
         continue
     out.append(line)
-# Also drop the "# Added by ai-reader installer" comment line if present
-out = [l for l in out if "Added by ai-reader installer" not in l]
+# Also drop the "# Added by ai-r installer" comment line if present
+out = [l for l in out if "Added by ai-r installer" not in l]
 with open(path, "w", encoding="utf-8") as f:
     f.write("".join(out))
 PY
-        log "Codex:     removed [mcp_servers.ai-reader]"
+        log "Codex:     removed [mcp_servers.ai-r]"
     else
-        log "Codex:     ai-reader not present"
+        log "Codex:     ai-r not present"
     fi
 else
     warn "Codex config not found: $file"
 fi
 
-# OpenCode (JSONC: remove mcp.ai-reader)
+# OpenCode (JSONC: remove mcp.ai-r)
 file="$HOME/.config/opencode/opencode.jsonc"
 if [[ -f "$file" ]] && command -v python3 >/dev/null 2>&1; then
     python3 - "$file" <<'PY'
@@ -132,8 +132,8 @@ def strip_comments(s):
 clean = strip_comments(text)
 data = json.loads(clean) if clean.strip() else {}
 mcp = data.get("mcp") or {}
-if "ai-reader" in mcp:
-    del mcp["ai-reader"]
+if "ai-r" in mcp:
+    del mcp["ai-r"]
     if not mcp:
         data.pop("mcp", None)
     out = json.dumps(data, indent=2, ensure_ascii=False)
@@ -146,7 +146,7 @@ if "ai-reader" in mcp:
 else:
     print("absent", file=sys.stderr)
 PY
-    log "OpenCode:  removed mcp.ai-reader (if present)"
+    log "OpenCode:  removed mcp.ai-r (if present)"
 else
     [[ -f "$file" ]] || warn "OpenCode config not found: $file"
     command -v python3 >/dev/null 2>&1 || warn "python3 not found — skipping OpenCode patch"
@@ -155,13 +155,13 @@ fi
 # Antigravity
 file="$HOME/.gemini/antigravity/mcp_config.json"
 if [[ -f "$file" ]] && command -v jq >/dev/null 2>&1; then
-    if jq -e '.mcpServers."ai-reader"' "$file" >/dev/null 2>&1; then
+    if jq -e '.mcpServers."ai-r"' "$file" >/dev/null 2>&1; then
         tmp="$(mktemp)"
-        jq 'del(.mcpServers."ai-reader")' "$file" > "$tmp"
+        jq 'del(.mcpServers."ai-r")' "$file" > "$tmp"
         mv "$tmp" "$file"
-        log "Antigravity: removed mcpServers.ai-reader"
+        log "Antigravity: removed mcpServers.ai-r"
     else
-        log "Antigravity: ai-reader not present"
+        log "Antigravity: ai-r not present"
     fi
 else
     [[ -f "$file" ]] || warn "Antigravity config not found: $file"
@@ -171,7 +171,7 @@ fi
 # --- optionally purge install dir ---
 if [[ "$PURGE" == "1" ]]; then
     hdr "Purging install dirs (--purge)"
-    for d in /opt/ai-reader "$HOME/.local/share/ai-reader"; do
+    for d in /opt/ai-r "$HOME/.local/share/ai-r"; do
         if [[ -d "$d" ]]; then
             if [[ -L "$d" ]]; then
                 # dev-mode symlink

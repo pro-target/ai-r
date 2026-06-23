@@ -15,7 +15,7 @@ this file.
 | pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
 | antigravity  | optional       | optional            | Real-data smoke skips when absent.     |
 
-Status confirmed 2026-06-21 via `ai-reader list` / `ai-reader read
+Status confirmed 2026-06-21 via `ai-r list` / `ai-r read
 --messages` against real session stores.
 
 ### Antigravity (optional real-data smoke)
@@ -45,7 +45,7 @@ old parser read only `message.data`).
 
 ## Search behaviour
 
-`search_sessions` (MCP) and `ai-reader search` (CLI) are the public
+`search_sessions` (MCP) and `ai-r search` (CLI) are the public
 search entry points. The MCP tool exposes three knobs that
 backward-compat callers can leave at their defaults:
 
@@ -76,15 +76,15 @@ sibling app would need) as a worked example.
 ## Overview: three steps
 
 1. Add a value to `AgentName`.
-2. Implement a parser module under `src/ai_reader/parsers/`.
-3. Re-export the module from `src/ai_reader/parsers/__init__.py`.
+2. Implement a parser module under `src/ai_r/parsers/`.
+3. Re-export the module from `src/ai_r/parsers/__init__.py`.
 4. Add tests with fixtures.
 
 Total: ~150 lines of code + tests.
 
 ## Step 1 — extend `AgentName`
 
-`src/ai_reader/parsers/models.py`:
+`src/ai_r/parsers/models.py`:
 
 ```python
 class AgentName(str, Enum):
@@ -100,7 +100,7 @@ keep it UPPER_SNAKE.
 
 ## Step 2 — implement the parser
 
-Create `src/ai_reader/parsers/gemini_cli.py`. Every parser must
+Create `src/ai_r/parsers/gemini_cli.py`. Every parser must
 export exactly four functions:
 
 ```python
@@ -122,7 +122,7 @@ __all__ = ["list_sessions", "read_session", "search", "session_exists"]
 
 def _home() -> Path:
     import os
-    base = os.environ.get("AI_READER_HOME") or str(Path.home())
+    base = os.environ.get("AI_R_HOME") or str(Path.home())
     return Path(base) / ".gemini" / "gemini-cli" / "sessions"
 
 
@@ -189,7 +189,7 @@ def _build_session(entry: Path, messages: Path) -> Session:
 - **Never raise on a missing root.** `list_sessions()` returns `[]`
   when the storage path doesn't exist. Only `read_session()` raises
   `FileNotFoundError` (and only for a specific uuid).
-- **Use `AI_READER_HOME` for tests.** The package honours this env
+- **Use `AI_R_HOME` for tests.** The package honours this env
   var; set it in `conftest.py` to point at a fixture root.
 - **Truncate titles to 100 chars** and collapse newlines to spaces
   — the table formatter relies on it.
@@ -201,7 +201,7 @@ def _build_session(entry: Path, messages: Path) -> Session:
 
 ## Step 3 — re-export
 
-`src/ai_reader/parsers/__init__.py`:
+`src/ai_r/parsers/__init__.py`:
 
 ```python
 from . import antigravity, claude, codex, gemini_cli, opencode
@@ -214,7 +214,7 @@ from . import antigravity, claude, codex, gemini_cli, opencode
 
 The CLI and MCP both dispatch via a `_PARSERS` dict. Find and update:
 
-`src/ai_reader/cli.py`:
+`src/ai_r/cli.py`:
 
 ```python
 _PARSERS = {
@@ -226,7 +226,7 @@ _PARSERS = {
 }
 ```
 
-`src/ai_reader/mcp_server.py`: same change in its `_PARSERS` dict
+`src/ai_r/mcp_server.py`: same change in its `_PARSERS` dict
 and the `_AGENT_NAMES_LOWER` map.
 
 ## Step 5 — tests
@@ -240,8 +240,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName
-from ai_reader.parsers import gemini_cli
+from ai_r.parsers import AgentName
+from ai_r.parsers import gemini_cli
 
 
 @pytest.fixture
@@ -253,7 +253,7 @@ def fake_home(tmp_path, monkeypatch):
         {"role": "user", "content": "hello world"}
         {"role": "assistant", "content": "hi"}
     """))
-    monkeypatch.setenv("AI_READER_HOME", str(tmp_path))
+    monkeypatch.setenv("AI_R_HOME", str(tmp_path))
     return root
 
 
@@ -288,7 +288,7 @@ def test_session_exists(fake_home):
 ```
 
 Use the existing `tests/conftest.py` helpers if it provides
-`tmp_ai_reader_home` — keep fixtures consistent.
+`tmp_ai_r_home` — keep fixtures consistent.
 
 ## Step 6 — update docs
 
@@ -303,7 +303,7 @@ Use the existing `tests/conftest.py` helpers if it provides
 - [ ] Parser is pure (no network, no global state)
 - [ ] `list_sessions()` returns `[]` on missing root, never raises
 - [ ] `read_session()` raises `FileNotFoundError` for unknown uuid
-- [ ] All four functions honour `base_dir` and `$AI_READER_HOME`
+- [ ] All four functions honour `base_dir` and `$AI_R_HOME`
 - [ ] Tests cover: happy path, missing root, missing uuid, search
 - [ ] Title truncated to 100 chars, newlines collapsed
 - [ ] `AgentName` extended; `parsers/__init__.py` updated

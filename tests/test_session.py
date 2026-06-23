@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader import cli as cli_module
-from ai_reader.parsers.models import AgentName
-from ai_reader.session import (
+from ai_r import cli as cli_module
+from ai_r.parsers.models import AgentName
+from ai_r.session import (
     AmbiguousSessionError,
     SessionCandidate,
     _is_valid_session_id,
@@ -47,10 +47,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def identity_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Path:
-    """Point ``AI_READER_SESSION_IDENTITY_DIR`` at a fresh tmp directory."""
+    """Point ``AI_R_SESSION_IDENTITY_DIR`` at a fresh tmp directory."""
     base = tmp_path / "session-identity"
     base.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AI_READER_SESSION_IDENTITY_DIR", str(base))
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(base))
     return base
 
 
@@ -418,7 +418,7 @@ def test_cli_detect_session_warns_on_multiple(
 # ---------------------------------------------------------------------------
 # Regression lock + identity-resolution gaps (audit 2026-06-21)
 #
-# The authorization gate (src/ai_reader/access/, guard.py) was removed
+# The authorization gate (src/ai_r/access/, guard.py) was removed
 # intentionally — a public single-user tool reads its owner's own sessions.
 # These tests lock that decision and cover previously-untested branches of
 # the session identity cascade (AI_SESSION_OUTPUT modes, sidecar parsing,
@@ -431,9 +431,9 @@ def test_no_authorization_gate_parent_reads_sessions(
 ) -> None:
     """Regression lock: no authorization gate; parent reads own sessions.
 
-    Asserts (1) the deleted ``ai_reader.access`` module stays gone, (2) a
+    Asserts (1) the deleted ``ai_r.access`` module stays gone, (2) a
     process with no sub-agent env markers reads its session without
-    ``PermissionError``, and (3) no symbol in ``ai_reader.session``
+    ``PermissionError``, and (3) no symbol in ``ai_r.session``
     enforces sub-agent authorization.  Locks the approved public-repo
     decision from commit ee72961.
     """
@@ -441,7 +441,7 @@ def test_no_authorization_gate_parent_reads_sessions(
 
     # (1) The access module is deleted — do not silently reintroduce it.
     with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("ai_reader.access")
+        importlib.import_module("ai_r.access")
 
     # (2) Parent (no subagent markers) reads its own session: no gate.
     sid = "abcdef01-2345-6789-abcd-ef0123456789"
@@ -452,7 +452,7 @@ def test_no_authorization_gate_parent_reads_sessions(
     assert resolved[2] is AgentName.CLAUDE
 
     # (3) Static lock: session.py carries no authorization primitive.
-    import ai_reader.session as session_mod
+    import ai_r.session as session_mod
 
     source = inspect.getsource(session_mod)
     assert "PermissionError" not in source
@@ -529,7 +529,7 @@ def test_detect_session_candidates_env_shadows_flag_file(
 
 def test_read_self_malformed_returns_none(tmp_path: Path) -> None:
     """``.self`` with too few fields / non-integer PID yields None."""
-    from ai_reader.session import _read_self
+    from ai_r.session import _read_self
 
     flag_dir = tmp_path / "opencode"
     flag_dir.mkdir(parents=True, exist_ok=True)
@@ -546,7 +546,7 @@ def test_read_self_malformed_returns_none(tmp_path: Path) -> None:
 
 def test_read_self_symlink_rejected(tmp_path: Path) -> None:
     """A symlinked ``.self`` sidecar is rejected (symmetry with ``current``)."""
-    from ai_reader.session import _read_self
+    from ai_r.session import _read_self
 
     flag_dir = tmp_path / "opencode"
     flag_dir.mkdir(parents=True, exist_ok=True)
@@ -559,7 +559,7 @@ def test_read_self_symlink_rejected(tmp_path: Path) -> None:
 
 def test_read_fingerprint_malformed_and_symlink(tmp_path: Path) -> None:
     """``.fingerprint`` with too few fields / empty hash / symlink → None."""
-    from ai_reader.session import _read_fingerprint
+    from ai_r.session import _read_fingerprint
 
     flag_dir = tmp_path / "opencode"
     flag_dir.mkdir(parents=True, exist_ok=True)

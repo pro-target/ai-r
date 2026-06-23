@@ -1,6 +1,6 @@
-# ai-reader
+# ai-r
 
-[![CI](https://github.com/pro-target/ai-reader/workflows/CI/badge.svg)](https://github.com/pro-target/ai-reader/actions)
+[![CI](https://github.com/pro-target/ai-r/workflows/CI/badge.svg)](https://github.com/pro-target/ai-r/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
@@ -10,10 +10,10 @@
 
 Every AI agent stores its conversation logs on disk in a different
 place and format — JSONL for Claude and Codex, SQLite for OpenCode,
-brain directories for Antigravity, project JSONL files for Pi. `ai-reader` gives you one read-only
+brain directories for Antigravity, project JSONL files for Pi. `ai-r` gives you one read-only
 interface across all of them.
 
-`ai-reader` is a **reader**, not a guard. Any caller that can reach the
+`ai-r` is a **reader**, not a guard. Any caller that can reach the
 CLI, the MCP server, or the package can read any session. There is no
 access-control layer in front of the parsers.
 
@@ -55,8 +55,8 @@ Prerequisites: Python 3.11+ with either `venv` (`python3-venv`) or `pip`
 Antigravity MCP configs — the others need no `jq`).
 
 ```bash
-git clone https://github.com/pro-target/ai-reader.git ~/dev/ai-reader
-cd ~/dev/ai-reader && bash install.sh
+git clone https://github.com/pro-target/ai-r.git ~/dev/ai-r
+cd ~/dev/ai-r && bash install.sh
 ```
 
 That's it. The installer:
@@ -80,9 +80,9 @@ That's it. The installer:
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 1: Public API (3 surfaces)                             │
-│   • ai-reader CLI (argparse)                                 │
-│   • ai-reader-mcp (MCP server, stdio JSON-RPC)               │
-│   • from ai_reader.parsers import ...  (Python SDK)          │
+│   • ai-r CLI (argparse)                                 │
+│   • ai-r-mcp (MCP server, stdio JSON-RPC)               │
+│   • from ai_r.parsers import ...  (Python SDK)          │
 └──────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 2: Core (parsers/, models)                             │
@@ -93,7 +93,7 @@ That's it. The installer:
 
 ## Design boundaries
 
-`ai-reader` is the public core: parsers, typed messages, CLI, and MCP. Workflow-specific reviewers, summaries, and audits live outside this repo and consume the parser API (`read_messages`).
+`ai-r` is the public core: parsers, typed messages, CLI, and MCP. Workflow-specific reviewers, summaries, and audits live outside this repo and consume the parser API (`read_messages`).
 
 Session content is **untrusted** — a reader's caller (auditor, summarizer, replay agent) must treat it as data, not instructions. See [Security — untrusted session content](docs/security.md).
 
@@ -123,28 +123,28 @@ The MCP server is auto-registered in your agent's config. Tools available:
 
 ```bash
 # list / read / search
-ai-reader list --agent pi
-ai-reader read --agent pi <session-uuid>
-ai-reader search "refactor"
-ai-reader search "pwa manifest" --scope body --operator and --agent claude
+ai-r list --agent pi
+ai-r read --agent pi <session-uuid>
+ai-r search "refactor"
+ai-r search "pwa manifest" --scope body --operator and --agent claude
 
 # who edited a file, across all agents, optionally time-boxed
-ai-reader find-file-edits src/auth.py --since 2026-06-01 --until 2026-06-30
-ai-reader find-file-edits "config" --agent claude --limit 20
+ai-r find-file-edits src/auth.py --since 2026-06-01 --until 2026-06-30
+ai-r find-file-edits "config" --agent claude --limit 20
 
 # which agent / session am I in (scripts, orchestration, self-resume)
-ai-reader detect-agent --quiet          # → e.g. "claude"
-ai-reader detect-session --json         # → candidate session UUIDs
+ai-r detect-agent --quiet          # → e.g. "claude"
+ai-r detect-session --json         # → candidate session UUIDs
 
 # render a session as a CHANGELOG round (handoff doc / replay)
-ai-reader export rounds <session-uuid> --include-round --output round.md
+ai-r export rounds <session-uuid> --include-round --output round.md
 ```
 
 Add `--json` to most subcommands for machine-readable output.
 
 ### Search operators
 
-`search_sessions` (MCP) and `ai-reader search` (CLI) share the same
+`search_sessions` (MCP) and `ai-r search` (CLI) share the same
 query grammar. Default behaviour (`scope="title"`, `operator="AND"`,
 `limit=50`) is unchanged from the previous title-only substring search.
 
@@ -196,22 +196,22 @@ search_sessions(
 
 ```bash
 # title-only (legacy, still default)
-ai-reader search "refactor"
+ai-r search "refactor"
 
 # body search, all terms must appear, exclude claude
-ai-reader search "pwa manifest -claude" --scope body --operator and
+ai-r search "pwa manifest -claude" --scope body --operator and
 
 # body search, any term, max 5 results
-ai-reader search "pwa OR manifest" --scope body --operator or --limit 5
+ai-r search "pwa OR manifest" --scope body --operator or --limit 5
 
 # everything containing neither of these terms
-ai-reader search "auth login" --scope body --operator not
+ai-r search "auth login" --scope body --operator not
 ```
 
 ### As a Python SDK
 
 ```python
-from ai_reader.parsers import AgentName, claude
+from ai_r.parsers import AgentName, claude
 
 for session in claude.list_sessions():
     print(session.uuid, session.title)
@@ -224,13 +224,13 @@ See [docs/architecture.md](./docs/architecture.md) for the full layering.
 
 ## MCP registration
 
-`ai-reader-mcp` is a stdio MCP server. Register it once per host tool.
+`ai-r-mcp` is a stdio MCP server. Register it once per host tool.
 Replace `USER` with your username (or drop the absolute path if
-`ai-reader-mcp` is on your `PATH`). **Restart the host tool after editing
+`ai-r-mcp` is on your `PATH`). **Restart the host tool after editing
 its config** — none of them pick up MCP changes live.
 
-The snippets below use `/home/USER/.local/bin/ai-reader-mcp`. Adjust the
-path if your install lives elsewhere (`which ai-reader-mcp` tells you).
+The snippets below use `/home/USER/.local/bin/ai-r-mcp`. Adjust the
+path if your install lives elsewhere (`which ai-r-mcp` tells you).
 
 ### Claude Code
 
@@ -239,9 +239,9 @@ Edit `~/.claude.json` (top-level `mcpServers` object):
 ```json
 {
   "mcpServers": {
-    "ai-reader": {
+    "ai-r": {
       "type": "stdio",
-      "command": "/home/USER/.local/bin/ai-reader-mcp",
+      "command": "/home/USER/.local/bin/ai-r-mcp",
       "args": [],
       "env": {}
     }
@@ -257,8 +257,8 @@ For a single-project registration, commit a `.mcp.json` at the repo root
 Edit `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.ai-reader]
-command = "/home/USER/.local/bin/ai-reader-mcp"
+[mcp_servers.ai-r]
+command = "/home/USER/.local/bin/ai-r-mcp"
 args = []
 ```
 
@@ -269,8 +269,8 @@ Edit `~/.gemini/settings.json` (`mcpServers` object):
 ```json
 {
   "mcpServers": {
-    "ai-reader": {
-      "command": "/home/USER/.local/bin/ai-reader-mcp",
+    "ai-r": {
+      "command": "/home/USER/.local/bin/ai-r-mcp",
       "args": [],
       "timeout": 60
     }
@@ -288,9 +288,9 @@ and the env key is `"environment"`.
 ```json
 {
   "mcp": {
-    "ai-reader": {
+    "ai-r": {
       "type": "local",
-      "command": ["/home/USER/.local/bin/ai-reader-mcp"],
+      "command": ["/home/USER/.local/bin/ai-r-mcp"],
       "enabled": true
     }
   }
@@ -306,8 +306,8 @@ under `~/.gemini/antigravity/`.
 ```json
 {
   "mcpServers": {
-    "ai-reader": {
-      "command": "/home/USER/.local/bin/ai-reader-mcp",
+    "ai-r": {
+      "command": "/home/USER/.local/bin/ai-r-mcp",
       "args": []
     }
   }
@@ -318,20 +318,20 @@ under `~/.gemini/antigravity/`.
 
 Pi (`@earendil-works/pi-coding-agent`) has **no MCP-server config** to edit.
 It uses an extension/skill model (`pi install <source>`, `pi config`), not an
-`mcpServers` map, so `ai-reader-mcp` cannot be registered as an in-process
+`mcpServers` map, so `ai-r-mcp` cannot be registered as an in-process
 MCP tool inside Pi (and spawning it in-process would violate Pi's design
 contract). Instead, `install/agent-configs.sh` drops a read-only **CLI skill**
-into `~/.agents/skills/ai-reader/` — a directory Pi already scans. The skill
-teaches the model to call the `ai-reader` CLI from a Pi bash session, with no
-MCP spawn involved. Pi sessions are also fully readable *by* `ai-reader` via
-the CLI (`ai-reader list --agent pi`, `ai-reader read …`) or the Python SDK;
-both read the `~/.pi/agent/sessions/` files directly. For a `/ai-reader` slash
+into `~/.agents/skills/ai-r/` — a directory Pi already scans. The skill
+teaches the model to call the `ai-r` CLI from a Pi bash session, with no
+MCP spawn involved. Pi sessions are also fully readable *by* `ai-r` via
+the CLI (`ai-r list --agent pi`, `ai-r read …`) or the Python SDK;
+both read the `~/.pi/agent/sessions/` files directly. For a `/ai-r` slash
 command, set `enableSkillCommands: true` in `~/.pi/agent/settings.json` (the
 skill's text works even with the default `false`).
 
 ### Notes
 
-- `ai-reader-mcp` must be on `PATH`, or use the absolute path as above.
+- `ai-r-mcp` must be on `PATH`, or use the absolute path as above.
 - JSON config patching uses `jq`. If `jq` is missing, the Codex, OpenCode,
   and Pi registrations still complete; the Claude and Antigravity configs
   are skipped — install `jq` or register them by hand with the snippets
@@ -343,16 +343,16 @@ skill's text works even with the default `false`).
 ## Development
 
 ```bash
-git clone https://github.com/pro-target/ai-reader.git
-cd ai-reader
+git clone https://github.com/pro-target/ai-r.git
+cd ai-r
 pip install -e ".[dev]"
-pytest --cov=src/ai_reader
+pytest --cov=src/ai_r
 ```
 
 - 350+ tests, ≥80% coverage required by CI
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
-- `src/ai_reader/validators/` and `src/ai_reader/templates/` are optional
+- `src/ai_r/validators/` and `src/ai_r/templates/` are optional
   standalone helpers (session-note markdown validation), not part of the
   CLI or MCP surface.
 

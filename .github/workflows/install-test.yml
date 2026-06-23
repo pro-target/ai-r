@@ -40,8 +40,8 @@ jobs:
           # The user-mode fallback kicks in when sudo NOPASSWD isn't configured.
           bash install.sh auto
           echo "---- verifying ----"
-          ~/.local/bin/ai-reader --version
-          ls -l ~/.local/bin/ai-reader-mcp
+          ~/.local/bin/ai-r --version
+          ls -l ~/.local/bin/ai-r-mcp
 
       - name: Run install.sh (opt mode — sudo NOPASSWD)
         env:
@@ -51,8 +51,8 @@ jobs:
           chmod 0440 /etc/sudoers.d/ci
           bash install.sh opt
           echo "---- verifying ----"
-          /opt/ai-reader/.venv/bin/ai-reader --version
-          ls -l /opt/ai-reader/.venv/bin/ai-reader-mcp
+          /opt/ai-r/.venv/bin/ai-r --version
+          ls -l /opt/ai-r/.venv/bin/ai-r-mcp
 
       - name: Re-run install.sh (idempotency check)
         run: |

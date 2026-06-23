@@ -1,4 +1,4 @@
-"""MCP server entry point for ai-reader.
+"""MCP server entry point for ai-r.
 
 Exposes three tools over the Model Context Protocol:
 
@@ -28,15 +28,15 @@ if str(_SRC) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from ai_reader import __version__  # noqa: E402
-from ai_reader.find_file_edits import (  # noqa: E402
+from ai_r import __version__  # noqa: E402
+from ai_r.find_file_edits import (  # noqa: E402
     PARSERS as _PARSERS,
     coerce_agent as _coerce_agent,
     find_file_edits as _find_file_edits_core,
     iso as _iso,
     target_agents as _target_agents,
 )
-from ai_reader.parsers import Session  # noqa: E402
+from ai_r.parsers import Session  # noqa: E402
 
 __all__ = ["mcp", "main"]
 
@@ -46,9 +46,9 @@ _LIST_LIMIT_DEFAULT = 100
 
 
 mcp = FastMCP(
-    name="ai-reader",
+    name="ai-r",
     instructions=(
-        "ai-reader: read Claude, Codex, OpenCode, Antigravity and Pi session "
+        "ai-r: read Claude, Codex, OpenCode, Antigravity and Pi session "
         f"files. Server version: {__version__}."
     ),
 )
@@ -70,7 +70,7 @@ def _codex_text(parts: object) -> str:
 
     .. deprecated::
         Kept as a thin backcompat helper for existing callers/tests; the
-        canonical path is :func:`ai_reader.parsers.codex.read_messages`.
+        canonical path is :func:`ai_r.parsers.codex.read_messages`.
     """
     if isinstance(parts, str):
         return parts
@@ -91,7 +91,7 @@ def _pi_text(parts: object) -> str:
 
     .. deprecated::
         Kept as a thin backcompat helper for existing callers/tests; the
-        canonical path is :func:`ai_reader.parsers.pi.read_messages`.
+        canonical path is :func:`ai_r.parsers.pi.read_messages`.
     """
     if isinstance(parts, str):
         return parts
@@ -153,7 +153,7 @@ def _extract_messages(
     Single dispatcher covering ALL supported agents
     (claude/codex/opencode/pi/antigravity): resolves the owning parser
     from :data:`_PARSERS`, calls its public ``read_messages(session.uuid)``,
-    projects each :class:`~ai_reader.parsers.models.Message` to a
+    projects each :class:`~ai_r.parsers.models.Message` to a
     ``{role, content}`` dict, then applies ``[offset:offset+limit]``.
     Only ``user``/``assistant`` roles surface (historical MCP shape);
     ``tool`` messages are dropped before pagination, so ``offset``/``limit``
@@ -321,7 +321,7 @@ def find_file_edits(
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
 
-    Thin wrapper over :func:`ai_reader.find_file_edits.find_file_edits`
+    Thin wrapper over :func:`ai_r.find_file_edits.find_file_edits`
     that translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the
     MCP client expects.
@@ -562,7 +562,7 @@ def _extract_snippet(haystack: str, terms: list[str], max_len: int = 200) -> str
 
 
 def main() -> int:
-    """Entry point for the ``ai-reader-mcp`` console script."""
+    """Entry point for the ``ai-r-mcp`` console script."""
     mcp.run(transport="stdio")
     return 0
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# ai-reader installer
+# ai-r installer
 #
 # Usage:
 #   bash install.sh           # auto-detect mode (opt if sudo NOPASSWD, else user)
-#   bash install.sh opt       # system-wide install to /opt/ai-reader (requires sudo)
-#   bash install.sh user      # per-user install to ~/.local/share/ai-reader
+#   bash install.sh opt       # system-wide install to /opt/ai-r (requires sudo)
+#   bash install.sh user      # per-user install to ~/.local/share/ai-r
 #   INSTALL_MODE=opt bash install.sh
 #
 # Idempotent: re-running does not break existing installs and does not duplicate
@@ -13,8 +13,8 @@
 # Environment variables:
 #   INSTALL_MODE   opt | user | auto (default)
 #   PYTHON         python interpreter to use (default: python3)
-#   AI_READER_CMD  override the absolute path of ai-reader-mcp to register in
-#                  the agent MCP configs (default: ~/.local/bin/ai-reader-mcp)
+#   AI_R_CMD  override the absolute path of ai-r-mcp to register in
+#                  the agent MCP configs (default: ~/.local/bin/ai-r-mcp)
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
 
 set -euo pipefail
@@ -67,17 +67,17 @@ detect_mode() {
     esac
 }
 
-hdr "ai-reader installer"
+hdr "ai-r installer"
 log "Repo:    $REPO_DIR"
 log "Python:  $($PYTHON --version 2>&1)"
 
 MODE="$(detect_mode)"
 if [[ "$MODE" == "opt" ]]; then
-    INSTALL_DIR="/opt/ai-reader"
+    INSTALL_DIR="/opt/ai-r"
     USE_SUDO=1
     log "Mode:    system-wide ($INSTALL_DIR, requires sudo)"
 else
-    INSTALL_DIR="${HOME}/.local/share/ai-reader"
+    INSTALL_DIR="${HOME}/.local/share/ai-r"
     USE_SUDO=0
     log "Mode:    user-local ($INSTALL_DIR, no sudo)"
 fi
@@ -135,8 +135,8 @@ if [[ "$USE_VENV" == "1" ]]; then
     else
         log "Reusing existing venv: $VENV_DIR"
     fi
-    VENV_PYTHON_BIN="$VENV_DIR/bin/ai-reader"
-    VENV_MCP_BIN="$VENV_DIR/bin/ai-reader-mcp"
+    VENV_PYTHON_BIN="$VENV_DIR/bin/ai-r"
+    VENV_MCP_BIN="$VENV_DIR/bin/ai-r-mcp"
     PIP_TARGET="$VENV_DIR/bin/pip"
 else
     if "$PYTHON" -m pip --version >/dev/null 2>&1; then
@@ -149,11 +149,11 @@ else
         die "pip not found. Install python3-venv (preferred) or python3-pip, then rerun install.sh"
     fi
     if [[ "$USE_SUDO" == "1" ]]; then
-        VENV_PYTHON_BIN="/usr/local/bin/ai-reader"
-        VENV_MCP_BIN="/usr/local/bin/ai-reader-mcp"
+        VENV_PYTHON_BIN="/usr/local/bin/ai-r"
+        VENV_MCP_BIN="/usr/local/bin/ai-r-mcp"
     else
-        VENV_PYTHON_BIN="$HOME/.local/bin/ai-reader"
-        VENV_MCP_BIN="$HOME/.local/bin/ai-reader-mcp"
+        VENV_PYTHON_BIN="$HOME/.local/bin/ai-r"
+        VENV_MCP_BIN="$HOME/.local/bin/ai-r-mcp"
     fi
 fi
 
@@ -186,8 +186,8 @@ if [[ "$USE_VENV" == "1" ]]; then
             die "expected entry point missing: $VENV_MCP_BIN (pip install failed?)"
         fi
     fi
-    run ln -sf "$VENV_PYTHON_BIN" "$BIN_DIR/ai-reader"
-    run ln -sf "$VENV_MCP_BIN"   "$BIN_DIR/ai-reader-mcp"
+    run ln -sf "$VENV_PYTHON_BIN" "$BIN_DIR/ai-r"
+    run ln -sf "$VENV_MCP_BIN"   "$BIN_DIR/ai-r-mcp"
 else
     # in break-system-packages mode, files are placed by pip in BIN_DIR (or /usr/local/bin)
     if [[ "$DRY_RUN" != "1" ]]; then
@@ -199,18 +199,18 @@ else
     fi
     # If pip wrote to /usr/local/bin, also expose a user-mode symlink so `which` finds it
     if [[ "$USE_SUDO" == "1" ]]; then
-        run ln -sf "$VENV_PYTHON_BIN" "$BIN_DIR/ai-reader"
-        run ln -sf "$VENV_MCP_BIN"   "$BIN_DIR/ai-reader-mcp"
+        run ln -sf "$VENV_PYTHON_BIN" "$BIN_DIR/ai-r"
+        run ln -sf "$VENV_MCP_BIN"   "$BIN_DIR/ai-r-mcp"
     fi
 fi
 log "Symlinks:"
-log "  $BIN_DIR/ai-reader      → $VENV_PYTHON_BIN"
-log "  $BIN_DIR/ai-reader-mcp  → $VENV_MCP_BIN"
+log "  $BIN_DIR/ai-r      → $VENV_PYTHON_BIN"
+log "  $BIN_DIR/ai-r-mcp  → $VENV_MCP_BIN"
 
 # --- 6. patch 4 agent configs ---
 hdr "Step 5/6: patch 4 agent MCP configs"
 if [[ -f "$REPO_DIR/install/agent-configs.sh" ]]; then
-    AI_READER_CMD="${AI_READER_CMD:-$BIN_DIR/ai-reader-mcp}" \
+    AI_R_CMD="${AI_R_CMD:-$BIN_DIR/ai-r-mcp}" \
         run bash "$REPO_DIR/install/agent-configs.sh" \
         || warn "agent-configs.sh returned non-zero (some patches may have failed)"
 else
@@ -220,27 +220,27 @@ fi
 # --- 7. smoke test ---
 hdr "Step 6/6: smoke test"
 if [[ "$DRY_RUN" == "1" ]]; then
-    log "[dry-run] would run: $BIN_DIR/ai-reader --version"
-    log "[dry-run] would run: $BIN_DIR/ai-reader-mcp --version || true"
+    log "[dry-run] would run: $BIN_DIR/ai-r --version"
+    log "[dry-run] would run: $BIN_DIR/ai-r-mcp --version || true"
 else
-    if "$BIN_DIR/ai-reader" --version 2>&1; then
-        log "ai-reader: OK"
+    if "$BIN_DIR/ai-r" --version 2>&1; then
+        log "ai-r: OK"
     else
-        warn "ai-reader --version failed (entry point not on PATH yet?)"
+        warn "ai-r --version failed (entry point not on PATH yet?)"
         warn "try:  export PATH=\"$BIN_DIR:\$PATH\""
     fi
-    # ai-reader-mcp is a stdio JSON-RPC server with no --version/--help,
+    # ai-r-mcp is a stdio JSON-RPC server with no --version/--help,
     # so verify it imports and starts by feeding it EOF (/dev/null) under a
     # timeout. Exit 0 (clean EOF) or 124 (timed out — happily serving) both
     # mean it started; any other exit means an import/startup error.
-    if timeout 5 "$BIN_DIR/ai-reader-mcp" </dev/null >/dev/null 2>&1; then
-        log "ai-reader-mcp: importable"
+    if timeout 5 "$BIN_DIR/ai-r-mcp" </dev/null >/dev/null 2>&1; then
+        log "ai-r-mcp: importable"
     else
         rc=$?
         if [[ "$rc" -eq 124 ]]; then
-            log "ai-reader-mcp: importable (started, then timed out as expected)"
+            log "ai-r-mcp: importable (started, then timed out as expected)"
         else
-            warn "ai-reader-mcp: failed to start (exit $rc)"
+            warn "ai-r-mcp: failed to start (exit $rc)"
             warn "try:  export PATH=\"$BIN_DIR:\$PATH\""
         fi
     fi
@@ -249,15 +249,15 @@ fi
 # --- done ---
 hdr "Install complete"
 cat <<EOF
-${GREEN}✓${NC} ai-reader installed in ${BOLD}$MODE${NC} mode
+${GREEN}✓${NC} ai-r installed in ${BOLD}$MODE${NC} mode
 
 Quick test:
-    $BIN_DIR/ai-reader list --agent claude
+    $BIN_DIR/ai-r list --agent claude
 
 MCP server (for your agents):
-    command: $BIN_DIR/ai-reader-mcp
+    command: $BIN_DIR/ai-r-mcp
 
-If 'ai-reader' is not found, add ~/.local/bin to PATH:
+If 'ai-r' is not found, add ~/.local/bin to PATH:
     export PATH="\$HOME/.local/bin:\$PATH"
 
 To uninstall:

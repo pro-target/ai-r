@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time-boxed with `since`/`until` (ISO 8601). Raises the MCP tool count
   from 3 to 4 (`list_sessions`, `read_session`, `search_sessions`,
   `find_file_edits`). See [docs/architecture.md](./docs/architecture.md).
-- **CLI `ai-reader find-file-edits`**: mirrors the MCP tool with
+- **CLI `ai-r find-file-edits`**: mirrors the MCP tool with
   `--agent`, `--since`, `--until`, `--limit`.
 - **MCP `search_sessions`**: extended with `scope`, `operator`, `limit`
   parameters and a Google-style `-term` negative prefix in the query.
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Quoted phrases (`"exact phrase"`) are supported via `shlex.split`.
   - When a `body`/`all` search hits, the result includes a `snippet`
     field with the first matching excerpt (up to 200 chars).
-- **CLI `ai-reader search`**: mirrors the new parameters as
+- **CLI `ai-r search`**: mirrors the new parameters as
   `--scope {title,body,all}` and `--operator {and,or,not}` (alias
   `--op`). Validation of `--limit` matches the MCP tool. Date
   filters (`--days`/`--from-date`/`--to-date`) compose with the
@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **codex**: `AI_READER_DEDUP_KEY_LEN` is now re-read from the environment on
+- **codex**: `AI_R_DEDUP_KEY_LEN` is now re-read from the environment on
   every dedup-key call. Previously the value was captured at import time, so
   any runtime change to the environment (operator re-export, test using
   `monkeypatch.setenv` after import, long-running service restart) was
@@ -69,8 +69,8 @@ First public alpha release.
   - `antigravity` — brain directories at `~/.gemini/antigravity/brain/` and `~/.gemini/antigravity-cli/brain/`
   - `pi` — JSONL at `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`
 - **`Session` data model** with `uuid`, `agent`, `title`, `date`, `path`, `message_count`, `parent_uuid`, `extra`
-- **CLI** (`ai-reader`): `list`, `read`, `search` subcommands with `--agent` filter and `--json` output
-- **MCP server** (`ai-reader-mcp`): 3 tools — `list_sessions`, `read_session`, `search_sessions`
+- **CLI** (`ai-r`): `list`, `read`, `search` subcommands with `--agent` filter and `--json` output
+- **MCP server** (`ai-r-mcp`): 3 tools — `list_sessions`, `read_session`, `search_sessions`
 - **install.sh**: idempotent, dual-mode (system-wide with sudo, or per-user), venv or `--break-system-packages` fallback
 - **agent-configs.sh**: patches agent MCP configs (claude, codex, opencode, antigravity)
 - **uninstall.sh**: clean removal of binaries and MCP entries
@@ -81,4 +81,4 @@ First public alpha release.
 ### Notes
 
 - This is an **alpha**. APIs may change before `0.2.0`.
-- `ai-reader` is a reader, not a guard. Any caller that can reach the CLI, the MCP server, or the package can read any session. See [docs/architecture.md](./docs/architecture.md).
+- `ai-r` is a reader, not a guard. Any caller that can reach the CLI, the MCP server, or the package can read any session. See [docs/architecture.md](./docs/architecture.md).

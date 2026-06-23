@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from ai_reader.agents import detect_agent, detect_agent_strict
-from ai_reader.parsers.models import AgentName
+from ai_r.agents import detect_agent, detect_agent_strict
+from ai_r.parsers.models import AgentName
 
 
 _DETECT_VARS = (
@@ -47,7 +47,7 @@ def test_detect_agent_strict_raises_when_missing(
     _clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "ai_reader.agents.detect_agent", lambda: None
+        "ai_r.agents.detect_agent", lambda: None
     )
     with pytest.raises(RuntimeError):
         detect_agent_strict()

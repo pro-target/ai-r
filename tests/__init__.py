@@ -1,1 +1,1 @@
-"""Tests for ai-reader."""
+"""Tests for ai-r."""

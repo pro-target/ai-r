@@ -6,7 +6,7 @@ assistant's output (``text`` or any ``tool_use`` input).  Mirrors the
 plan-alignment half of ``git-auditor``'s ``scout_behavioral_audit``
 (``~/.agents/skills/git-auditor/scripts/context_auditor.py``, lines
 ~460-477), which asks "do the changed files appear in the agent's
-reasoning?" — here done via the public ``ai_reader.read_messages`` API.
+reasoning?" — here done via the public ``ai_r.read_messages`` API.
 
 The file list comes from repeated ``--file`` flags or from
 ``--from-git`` (runs ``git diff --cached --name-only``).
@@ -32,14 +32,14 @@ import subprocess
 import sys
 from typing import Callable, Dict, List
 
-from ai_reader.parsers import (
+from ai_r.parsers import (
     antigravity,
     claude,
     codex,
     opencode,
     pi,
 )
-from ai_reader.parsers.models import Message
+from ai_r.parsers.models import Message
 
 
 PARSERS: Dict[str, Callable] = {

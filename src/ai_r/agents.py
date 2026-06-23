@@ -2,7 +2,7 @@
 
 Provides a small cascade for answering "which AI agent am I running
 inside?" without requiring callers to plumb the answer through
-explicit configuration.  Used by the ``ai-reader detect-agent`` CLI
+explicit configuration.  Used by the ``ai-r detect-agent`` CLI
 subcommand and as a default for tools that want to scope themselves
 to a single host.
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
-from ai_reader.parsers.models import AgentName
+from ai_r.parsers.models import AgentName
 
 __all__ = ["detect_agent", "detect_agent_strict"]
 

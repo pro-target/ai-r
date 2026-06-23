@@ -1,8 +1,8 @@
-"""Shared pytest fixtures for ai-reader tests.
+"""Shared pytest fixtures for ai-r tests.
 
 Fixtures are deterministic: every fixture that touches the filesystem
 creates a temporary directory and never writes outside ``tmp_path`` or
-``AI_READER_HOME`` (the latter only when explicitly overridden).
+``AI_R_HOME`` (the latter only when explicitly overridden).
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ pytest_plugins: list[str] = []
 
 
 @pytest.fixture(autouse=True)
-def _isolate_ai_reader_home(
+def _isolate_ai_r_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[None]:
     """Force parsers to look at a per-test temp directory tree.
@@ -35,10 +35,10 @@ def _isolate_ai_reader_home(
     ``~/.local/share/opencode`` and ``~/.gemini`` directories exist on
     this host.  We *want* a few integration tests to hit them
     (read-only), but the default behaviour for most tests must be
-    hermetic.  By setting ``AI_READER_HOME`` to a fresh temp dir the
+    hermetic.  By setting ``AI_R_HOME`` to a fresh temp dir the
     parsers fall back to it and find nothing.
     """
-    monkeypatch.setenv("AI_READER_HOME", str(tmp_path / "fake_home"))
+    monkeypatch.setenv("AI_R_HOME", str(tmp_path / "fake_home"))
     # OpenCode honours a separate env var.  Wipe it to avoid leaking the
     # real DB into parser-discovery tests.
     monkeypatch.delenv("OPENCODE_DB", raising=False)
@@ -60,7 +60,7 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 @pytest.fixture
 def tmp_sessions_dir(tmp_path: Path) -> Path:
-    """A fresh root directory that mimics ``AI_READER_HOME``.
+    """A fresh root directory that mimics ``AI_R_HOME``.
 
     Sub-directories matching the parser layout are created but left
     empty unless the requesting test populates them.

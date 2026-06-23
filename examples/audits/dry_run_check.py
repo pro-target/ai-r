@@ -5,7 +5,7 @@ Scans every ``Message``'s ``tool_use`` entries (``name`` + ``input``) and
 ``text`` for test-runner command patterns.  Mirrors the regex set used by
 ``git-auditor``'s ``scout_behavioral_audit``
 (``~/.agents/skills/git-auditor/scripts/context_auditor.py``, lines
-~393-477), but goes through the clean public ``ai_reader.read_messages``
+~393-477), but goes through the clean public ``ai_r.read_messages``
 API instead of shelling out to the legacy ``agent-audit.py`` wrapper.
 
 Usage::
@@ -26,14 +26,14 @@ import re
 import sys
 from typing import Callable, Dict, List
 
-from ai_reader.parsers import (
+from ai_r.parsers import (
     antigravity,
     claude,
     codex,
     opencode,
     pi,
 )
-from ai_reader.parsers.models import Message
+from ai_r.parsers.models import Message
 
 
 # agent name (lowercase) -> module exposing read_messages(uuid, base_dir=None)

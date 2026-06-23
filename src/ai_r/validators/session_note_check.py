@@ -1,7 +1,7 @@
 """Session-note template validator.
 
 The canonical session-note template lives in
-``src/ai_reader/templates/session_note.md``.  The required-sections list
+``src/ai_r/templates/session_note.md``.  The required-sections list
 is read from that template at runtime so the prompt and the validator
 cannot drift apart — adding or removing a required section in the
 template is the only edit needed.
@@ -11,8 +11,8 @@ Layer 4 — session_id authenticity
 
 When a note carries a ``## Session`` section with a ``Session ID:``
 line, the validator re-derives the running session_id from the cascade
-(see :mod:`ai_reader.session`) and reports any mismatch.  The cascade
-returns a *list* of :class:`~ai_reader.session.SessionCandidate` so the
+(see :mod:`ai_r.session`) and reports any mismatch.  The cascade
+returns a *list* of :class:`~ai_r.session.SessionCandidate` so the
 validator can match against any one of them — the typical use case
 involves a single running agent, but parallel sessions (e.g. a
 side-by-side ``codex`` + ``claude`` invocation) are first-class.
@@ -33,8 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ai_reader.parsers.models import AgentName
-from ai_reader.session import (
+from ai_r.parsers.models import AgentName
+from ai_r.session import (
     SessionCandidate,
     _is_valid_session_id,
     detect_session_candidates,
@@ -207,7 +207,7 @@ class SessionNoteValidationResult:
         Empty when ``identity_ok`` is True.  Missing-section issues
         live in ``missing_sections`` instead.
     candidates:
-        Full :class:`~ai_reader.session.SessionCandidate` list from
+        Full :class:`~ai_r.session.SessionCandidate` list from
         the detection cascade — for caller introspection (rendering,
         fingerprint lookup, etc.).
     ambiguous:

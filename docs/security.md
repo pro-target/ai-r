@@ -1,6 +1,6 @@
 # Security: untrusted session content
 
-`ai-reader` is a **read-only** session reader. It has no write surface
+`ai-r` is a **read-only** session reader. It has no write surface
 and no access-control layer (see
 [Architecture -> read-only](architecture.md)). The security concern
 is not *who may read* a session -- it is *what the reader's caller does
@@ -33,9 +33,9 @@ every supported agent (Claude, Codex, OpenCode, Antigravity, Pi)
 routinely contain fetches, tool outputs, and cross-agent text -- all
 untrusted.
 
-## What `ai-reader` does (and does not)
+## What `ai-r` does (and does not)
 
-`ai-reader` is the parser layer. It **does not** sanitize, classify,
+`ai-r` is the parser layer. It **does not** sanitize, classify,
 or redact instruction-shaped content -- doing so would silently destroy
 session fidelity, which defeats the purpose of a reader. Session text
 is returned verbatim.

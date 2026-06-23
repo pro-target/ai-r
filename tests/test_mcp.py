@@ -23,7 +23,7 @@ import pytest
 
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from ai_reader.mcp_server import (
+from ai_r.mcp_server import (
     _build_haystack,
     _codex_text,
     _coerce_agent,
@@ -42,7 +42,7 @@ from ai_reader.mcp_server import (
     read_session,
     search_sessions,
 )
-from ai_reader.parsers import AgentName
+from ai_r.parsers import AgentName
 
 
 # ---------------------------------------------------------------------------
@@ -130,17 +130,17 @@ def test_mcp_read_session_existing() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
-    # The autouse ``_isolate_ai_reader_home`` fixture points
-    # ``AI_READER_HOME`` at an empty fake tree, so the Claude parser
+    # The autouse ``_isolate_ai_r_home`` fixture points
+    # ``AI_R_HOME`` at an empty fake tree, so the Claude parser
     # would not find the real session.  Unset it for the duration of
     # this test.
-    saved_home = os.environ.get("AI_READER_HOME")
-    os.environ.pop("AI_READER_HOME", None)
+    saved_home = os.environ.get("AI_R_HOME")
+    os.environ.pop("AI_R_HOME", None)
     try:
         texts = _run(_call("read_session", {"uuid": uuid, "agent": "claude"}))
     finally:
         if saved_home is not None:
-            os.environ["AI_READER_HOME"] = saved_home
+            os.environ["AI_R_HOME"] = saved_home
 
     payload = json.loads(texts[0])
     assert payload["uuid"] == uuid
@@ -189,7 +189,7 @@ def test_mcp_search_empty_query() -> None:
 
 
 def test_mcp_server_name() -> None:
-    assert mcp.name == "ai-reader"
+    assert mcp.name == "ai-r"
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ def test_target_agents_single() -> None:
 
 
 def test_session_summary_projects_fields() -> None:
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
     s = Session(
         uuid="abc",
         agent=AgentName.CLAUDE,
@@ -280,11 +280,11 @@ def test_extract_messages_dispatches_to_claude(
     fake_claude_session: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dispatcher routes Claude sessions through read_messages(uuid)."""
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     base = fake_claude_session.parent.parent  # .../projects (parent of proj-a)
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: base
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: base
     )
     s = Session(
         uuid="test-claude-1",
@@ -301,11 +301,11 @@ def test_extract_messages_dispatches_to_codex(
     fake_codex_session: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dispatcher routes Codex sessions through read_messages(uuid)."""
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     base = fake_codex_session.parent.parent.parent  # .../sessions
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [base]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [base]
     )
     s = Session(
         uuid="test-codex-1",
@@ -324,11 +324,11 @@ def test_extract_messages_dispatches_to_pi(
     fake_pi_session: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dispatcher routes Pi sessions through read_messages(uuid)."""
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     base = fake_pi_session.parent  # .../sessions/--tmp-work--
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: base
+        "ai_r.parsers.pi._resolve_base_dir", lambda bd=None: base
     )
     s = Session(
         uuid="test-pi-1",
@@ -348,7 +348,7 @@ def test_extract_messages_dispatches_to_opencode(
 ) -> None:
     """OpenCode dispatches via the parser registry; {role, content} only."""
     monkeypatch.setenv("OPENCODE_DB", str(fake_opencode_db_with_tools))
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     s = Session(
         uuid="oc-tools-1",
@@ -371,11 +371,11 @@ def test_extract_messages_dispatches_to_antigravity(
 ) -> None:
     """Antigravity dispatches via the parser registry; {role, content} only.
 
-    The autouse ``_isolate_ai_reader_home`` fixture points
-    ``AI_READER_HOME`` at the same fake tree ``fake_antigravity_brain``
+    The autouse ``_isolate_ai_r_home`` fixture points
+    ``AI_R_HOME`` at the same fake tree ``fake_antigravity_brain``
     builds under, so the parser's ``read_messages`` finds the brain.
     """
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     s = Session(
         uuid="test-ag-1",
@@ -398,7 +398,7 @@ def test_extract_messages_all_agents_dispatch() -> None:
     agents route through ``_PARSERS``.  A nonexistent uuid yields ``[]``
     via the try/except, not via a missing-parser branch.
     """
-    from ai_reader.parsers.models import Session
+    from ai_r.parsers.models import Session
 
     for agent in AgentName:
         s = Session(
@@ -451,7 +451,7 @@ def test_list_sessions_paginates_and_reports_total(
         )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
 
     first_page = list_sessions(agent="claude", limit=2, offset=0)
@@ -489,7 +489,7 @@ def test_list_sessions_limit_zero_is_uncapped(
         )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
 
     result = list_sessions(agent="claude", limit=0)
@@ -513,10 +513,10 @@ def test_read_session_unknown_agent_returns_error_dict() -> None:
 
 def test_read_session_not_found_returns_error_dict() -> None:
     """A nonexistent uuid -> ``not_found`` error dict."""
-    # Disable AI_READER_HOME so the parser looks at the real tree,
+    # Disable AI_R_HOME so the parser looks at the real tree,
     # then ask for a uuid that is not in it.
-    saved_home = os.environ.get("AI_READER_HOME")
-    os.environ.pop("AI_READER_HOME", None)
+    saved_home = os.environ.get("AI_R_HOME")
+    os.environ.pop("AI_R_HOME", None)
     try:
         result = read_session(
             uuid="definitely-not-a-real-uuid-xyzzy",
@@ -524,7 +524,7 @@ def test_read_session_not_found_returns_error_dict() -> None:
         )
     finally:
         if saved_home is not None:
-            os.environ["AI_READER_HOME"] = saved_home
+            os.environ["AI_R_HOME"] = saved_home
     assert isinstance(result, dict)
     assert result.get("error") == "not_found"
     assert result.get("agent") == "CLAUDE"
@@ -555,7 +555,7 @@ def test_read_session_returns_capped_role_content_list(
     echoes :data:`_MESSAGES_CAP` but is no longer a silent hard cap."""
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = read_session(uuid="test-claude-1", agent="claude")
     assert isinstance(result, dict)
@@ -579,7 +579,7 @@ def test_read_session_pagination_default_returns_all(
     """Default offset=0/limit=_MESSAGES_CAP returns the full list."""
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = read_session(uuid="test-claude-1", agent="claude")
     assert result["total"] == len(result["messages"])
@@ -592,7 +592,7 @@ def test_read_session_pagination_offset_limit_slice(
     """offset/limit slice the projected message list."""
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     # offset=1 skips the user message; limit=10 leaves the assistant msg.
     result = read_session(uuid="test-claude-1", agent="claude", offset=1, limit=10)
@@ -627,7 +627,7 @@ def test_read_session_pagination_limit_caps_at_more_than_100(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
 
     default_capped = read_session(uuid="big-1", agent="claude")
@@ -653,7 +653,7 @@ def test_read_session_pagination_negative_offset_rejected(
 ) -> None:
     base = str(fake_claude_session.parent.parent)
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = read_session(uuid="test-claude-1", agent="claude", offset=-1)
     assert result.get("error") == "invalid_argument"
@@ -710,7 +710,7 @@ def test_read_session_claude_tool_only_messages_not_blank(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
 
     result = read_session(uuid="tool-only-1", agent="claude")
@@ -731,7 +731,7 @@ def test_read_session_mcp_drops_tool_messages(
     output shape."""
     base = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.pi._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = read_session(uuid="test-pi-1", agent="pi")
     msgs = result["messages"]
@@ -743,7 +743,7 @@ def test_read_session_mcp_drops_tool_messages(
 
 def test_message_and_read_messages_reexported() -> None:
     """``Message`` and the per-parser ``read_messages`` are public API."""
-    from ai_reader.parsers import Message, antigravity, claude, codex, opencode, pi
+    from ai_r.parsers import Message, antigravity, claude, codex, opencode, pi
 
     sample = Message(role="user", text="hi")
     assert sample.role == "user"
@@ -754,7 +754,7 @@ def test_message_and_read_messages_reexported() -> None:
 
 
 def test_messages_cap_constant_unchanged() -> None:
-    from ai_reader.mcp_server import _MESSAGES_CAP
+    from ai_r.mcp_server import _MESSAGES_CAP
 
     assert _MESSAGES_CAP == 100
 
@@ -824,7 +824,7 @@ def test_search_sessions_backward_compat_title_only(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("claude")
     assert isinstance(result, list)
@@ -846,7 +846,7 @@ def test_search_sessions_body_and_match(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions(
         "pwa manifest", agent="claude", scope="body"
@@ -870,7 +870,7 @@ def test_search_sessions_body_or_match(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions(
         "pwa ipsum",
@@ -893,7 +893,7 @@ def test_search_sessions_body_not_match(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions(
         "pwa", agent="claude", scope="body", operator="NOT"
@@ -914,7 +914,7 @@ def test_search_sessions_body_negative_prefix(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     excluded = search_sessions(
         "pwa -manifest", agent="claude", scope="body"
@@ -941,7 +941,7 @@ def test_search_sessions_body_quoted_phrase(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions('"foo bar"', agent="claude", scope="body")
     matched = [s for s in result if s["uuid"] == "body-quote-1"]
@@ -964,7 +964,7 @@ def test_search_sessions_body_tool_use_match(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("pytest", agent="claude", scope="body")
     matched = [s for s in result if s["uuid"] == "body-tool-1"]
@@ -987,7 +987,7 @@ def test_search_sessions_limit(
         )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("limitcap", agent="claude", limit=2)
     assert len(result) <= 2
@@ -1026,7 +1026,7 @@ def test_search_sessions_snippet_truncated(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("needle", agent="claude", scope="body")
     matched = [s for s in result if s["uuid"] == "body-long-1"]
@@ -1085,7 +1085,7 @@ def test_match_negative_filter_in_all_operators() -> None:
 
 def test_build_haystack_includes_tool_use_and_result() -> None:
     """Haystack must contain text + tool_use input + tool_result content."""
-    from ai_reader.parsers.models import Message
+    from ai_r.parsers.models import Message
 
     msgs = [
         Message(
@@ -1323,7 +1323,7 @@ def test_find_file_edits_no_match_returns_empty(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="/definitely/not/a/real/path/zzz")
     assert result == {"records": [], "count": 0, "truncated": False}
@@ -1336,13 +1336,13 @@ def test_find_file_edits_claude_match(
     _write_claude_edit_session(
         tmp_sessions_dir, "cfe-1",
         user_text="Add the README header",
-        edit_path="/tmp/ai-reader/README.md",
+        edit_path="/tmp/ai-r/README.md",
         ts_user="2026-06-14T10:00:00Z",
         ts_edit="2026-06-14T10:00:05Z",
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="README.md")
     assert result["count"] >= 1
@@ -1350,7 +1350,7 @@ def test_find_file_edits_claude_match(
     hit = next(r for r in result["records"] if r["session_uuid"] == "cfe-1")
     assert hit["agent"] == "claude"
     assert hit["tool"] == "Edit"
-    assert hit["file"] == "/tmp/ai-reader/README.md"
+    assert hit["file"] == "/tmp/ai-r/README.md"
     assert hit["intent"] == "Add the README header"
     assert hit["assistant"] == "Editing now."
     assert hit["timestamp"] == "2026-06-14T10:00:05+00:00"
@@ -1373,10 +1373,10 @@ def test_find_file_edits_agent_filter(
     base_claude = str(tmp_sessions_dir / ".claude" / "projects")
     base_pi = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
+        "ai_r.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
     )
     claude_only = find_file_edits(path="agent-filter", agent="claude")
     assert {r["agent"] for r in claude_only["records"]} == {"claude"}
@@ -1398,7 +1398,7 @@ def test_find_file_edits_path_substring(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="README")
     uuids = [r["session_uuid"] for r in result["records"]]
@@ -1427,7 +1427,7 @@ def test_find_file_edits_since_until_filter(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(
         path="boundary",
@@ -1451,7 +1451,7 @@ def test_find_file_edits_limit_caps_results(
         )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="cap/file-", limit=2)
     assert len(result["records"]) == 2
@@ -1521,7 +1521,7 @@ def test_find_file_edits_intent_from_immediately_previous_user(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="intent/auth.py")
     assert result["count"] == 1
@@ -1549,10 +1549,10 @@ def test_find_file_edits_cross_agent_default(
     base_claude = str(tmp_sessions_dir / ".claude" / "projects")
     base_pi = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
     )
     monkeypatch.setattr(
-        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
+        "ai_r.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
     )
     result = find_file_edits(path="cross/shared")
     agents = {r["agent"] for r in result["records"]}
@@ -1570,7 +1570,7 @@ def test_find_file_edits_via_mcp_client(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     texts = _run(_call("find_file_edits", {"path": "mcp-via"}))
     payload = json.loads(texts[0])
@@ -1647,7 +1647,7 @@ def test_find_file_edits_codex_write_file(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-write", agent="codex")
     assert result["count"] == 1
@@ -1670,7 +1670,7 @@ def test_find_file_edits_codex_apply_patch(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-patch", agent="codex")
     assert result["count"] == 1
@@ -1692,7 +1692,7 @@ def test_find_file_edits_codex_unknown_tool_skipped(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="cxf-3", agent="codex")
     assert result["count"] == 0
@@ -1710,7 +1710,7 @@ def test_find_file_edits_codex_exec_command_redirect(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-sh", agent="codex")
     assert result["count"] == 1
@@ -1734,7 +1734,7 @@ def test_find_file_edits_codex_exec_command_append(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-sh2", agent="codex")
     assert result["count"] == 1
@@ -1754,7 +1754,7 @@ def test_find_file_edits_codex_exec_command_multi_redirect(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-sh3", agent="codex")
     files = sorted(r["file"] for r in result["records"])
@@ -1774,7 +1774,7 @@ def test_find_file_edits_codex_exec_command_quoted_gt_ignored(
     )
     base = str(tmp_sessions_dir / ".codex" / "sessions")
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+        "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
     result = find_file_edits(path="codex-sh4", agent="codex")
     assert result["count"] == 0
@@ -1918,11 +1918,11 @@ def test_find_file_edits_naive_ts_vs_aware_bound_no_crash(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     # Force the claude parser to produce a NAIVE datetime for both
     # sessions (the bug scenario: ISO without Z → no tzinfo).
-    import ai_reader.parsers.claude as claude_parser
+    import ai_r.parsers.claude as claude_parser
     real_parse = claude_parser._parse_iso_timestamp
 
     def _naive_parse(raw):
@@ -1953,7 +1953,7 @@ def test_find_file_edits_aware_bound_with_aware_record(
     )
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
-        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(
         path="aware",

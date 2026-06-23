@@ -161,7 +161,7 @@ def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
 
     try:
         h = hashlib.sha1(db_path.encode()).hexdigest()[:16]
-        tmp_path = f"/tmp/ai_reader_opencode_{h}.db"
+        tmp_path = f"/tmp/ai_r_opencode_{h}.db"
         shutil.copy2(db_path, tmp_path)
         conn = sqlite3.connect(tmp_path, timeout=30.0)
         conn.execute("PRAGMA busy_timeout = 30000")

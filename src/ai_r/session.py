@@ -1,7 +1,7 @@
 """Runtime session_id detection from env vars and per-session flag files.
 
 Mirrors the cascade in the agents sh layer's ``lib/detect-session.sh``.
-Used by the ``ai-reader detect-session`` CLI subcommand and by the
+Used by the ``ai-r detect-session`` CLI subcommand and by the
 ``session_note`` validator to re-derive the id and FAIL on mismatch.
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ai_reader.agents import detect_agent
-from ai_reader.parsers.models import AgentName
+from ai_r.agents import detect_agent
+from ai_r.parsers.models import AgentName
 
 __all__ = [
     "AmbiguousSessionError",
@@ -81,10 +81,10 @@ def _session_id_matches_agent(value: str, agent: AgentName) -> bool:
 def _identity_base() -> Path:
     """Resolve the directory holding per-agent flag files.
 
-    Honours ``AI_READER_SESSION_IDENTITY_DIR`` (empty string is treated
+    Honours ``AI_R_SESSION_IDENTITY_DIR`` (empty string is treated
     as unset and falls back to ``$HOME/.agents/.session-identity``).
     """
-    override = os.environ.get("AI_READER_SESSION_IDENTITY_DIR", "").strip()
+    override = os.environ.get("AI_R_SESSION_IDENTITY_DIR", "").strip()
     if override:
         return Path(override)
     return Path.home() / ".agents" / ".session-identity"
@@ -265,7 +265,7 @@ class SessionCandidate:
           ``"OPENCODE_SESSION_ID"`` (per-agent env var)
         * ``"ts_file:<agent>"`` (per-session file in the identity dir)
         * ``"flag/<agent>"`` (legacy ``current`` pointer, deprecated)
-        * ``"ai-reader-list"`` (heuristic last-resort)
+        * ``"ai-r-list"`` (heuristic last-resort)
 
     verified:
         ``True`` when the id passed charset + agent-shape validation
@@ -398,7 +398,7 @@ def _current_candidates(
     if out:
         warnings.warn(
             "current pointer is deprecated, use per-session files "
-            "(set AI_READER_SESSION_IDENTITY_DIR for sh-layer hook)",
+            "(set AI_R_SESSION_IDENTITY_DIR for sh-layer hook)",
             DeprecationWarning,
             stacklevel=3,
         )
@@ -406,18 +406,18 @@ def _current_candidates(
 
 
 def _aireader_list_candidate() -> Optional[SessionCandidate]:
-    """Step 5: last-resort heuristic — query ``ai-reader list``.
+    """Step 5: last-resort heuristic — query ``ai-r list``.
 
     Reuses :func:`detect_agent` to scope the search to a single agent;
     on non-Linux, or when the CLI is missing, the heuristic silently
-    yields nothing.  Source is ``"ai-reader-list"``; ``verified`` is
+    yields nothing.  Source is ``"ai-r-list"``; ``verified`` is
     ``False`` to flag heuristic provenance to callers.
     """
     agent = detect_agent()
     if agent is None:
         return None
     try:
-        from ai_reader.cli import _PARSERS  # type: ignore
+        from ai_r.cli import _PARSERS  # type: ignore
 
         parser = _PARSERS[agent]
     except Exception:
@@ -429,7 +429,7 @@ def _aireader_list_candidate() -> Optional[SessionCandidate]:
                 return SessionCandidate(
                     session_id=sid,
                     agent=agent,
-                    source="ai-reader-list",
+                    source="ai-r-list",
                     verified=False,
                     is_self=False,
                     fingerprint=None,
@@ -451,7 +451,7 @@ def detect_session_candidates() -> list[SessionCandidate]:
        first.
     4. ``current`` pointer (deprecated) — emits a :class:`DeprecationWarning`
        the first time at least one ``current`` candidate is appended.
-    5. ``ai-reader list`` heuristic — at most one candidate, ``verified=False``.
+    5. ``ai-r list`` heuristic — at most one candidate, ``verified=False``.
 
     The result may be empty when nothing matches.  All candidates are
     deduplicated by ``(agent, session_id)``; env-var candidates shadow
@@ -537,14 +537,14 @@ def _select_from_candidates(candidates: list[SessionCandidate]) -> Optional[str]
         import sys
 
         print(
-            f"ai-reader: unknown AI_SESSION_OUTPUT={mode!r}; falling back to 'list'",
+            f"ai-r: unknown AI_SESSION_OUTPUT={mode!r}; falling back to 'list'",
             file=sys.stderr,
         )
     if len(candidates) > 1:
         import sys
 
         print(
-            "ai-reader: WARN: multiple session_id candidates; "
+            "ai-r: WARN: multiple session_id candidates; "
             "returning first. Pass AI_SESSION_OUTPUT=strict|self|fingerprint:<hash> "
             "for disambiguation.",
             file=sys.stderr,

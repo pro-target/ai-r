@@ -22,8 +22,8 @@ The directory is considered a session if any of these files exist;
 missing files degrade gracefully (we just report zero messages).
 
 The base directory can be overridden by ``base_dir`` (which then names
-a single brain directory) or by setting ``$AI_READER_HOME/.gemini``
-and ``$AI_READER_HOME/.gemini-cli``.  When unset we look at
+a single brain directory) or by setting ``$AI_R_HOME/.gemini``
+and ``$AI_R_HOME/.gemini-cli``.  When unset we look at
 ``~/.gemini/antigravity/brain`` and ``~/.gemini/antigravity-cli/brain``.
 """
 
@@ -74,13 +74,13 @@ def _resolve_brain_roots(
 
     When ``base_dir`` is supplied, it is treated as a single brain
     directory and returned as-is.  Otherwise we look at the two known
-    installations under ``$AI_READER_HOME/.gemini`` (if set) or
+    installations under ``$AI_R_HOME/.gemini`` (if set) or
     ``~/.gemini``.
     """
     if base_dir:
         return [Path(base_dir).expanduser()]
 
-    env_home = os.environ.get("AI_READER_HOME")
+    env_home = os.environ.get("AI_R_HOME")
     if env_home:
         root = Path(env_home).expanduser() / ".gemini"
     else:

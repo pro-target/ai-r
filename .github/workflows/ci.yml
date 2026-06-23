@@ -32,7 +32,7 @@ jobs:
 
       - name: Run tests with coverage gate
         run: |
-          pytest --cov=src/ai_reader --cov-fail-under=80 --cov-report=term
+          pytest --cov=src/ai_r --cov-fail-under=80 --cov-report=term
 
       - name: Validate install.sh in dry-run mode
         run: |
@@ -51,8 +51,8 @@ jobs:
           python-version: "3.11"
       - name: Smoke-import every public module
         run: |
-          python -c "import ai_reader, ai_reader.cli, ai_reader.mcp_server"
-          python -c "import ai_reader.parsers"
-          python -c "import ai_reader.parsers.claude, ai_reader.parsers.codex"
-          python -c "import ai_reader.parsers.opencode, ai_reader.parsers.antigravity"
-          python -c "import ai_reader.legacy_compat"
+          python -c "import ai_r, ai_r.cli, ai_r.mcp_server"
+          python -c "import ai_r.parsers"
+          python -c "import ai_r.parsers.claude, ai_r.parsers.codex"
+          python -c "import ai_r.parsers.opencode, ai_r.parsers.antigravity"
+          python -c "import ai_r.legacy_compat"

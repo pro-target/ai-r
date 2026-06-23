@@ -19,7 +19,7 @@ Each line is a JSON object with one of these relevant ``type`` values:
   and custom roles are skipped for summary counts.
 
 The base directory can be overridden by ``base_dir`` or by setting
-``$AI_READER_HOME/.pi/agent/sessions``.
+``$AI_R_HOME/.pi/agent/sessions``.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ _TITLE_MAX_LEN = 100
 def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     if base_dir:
         return Path(base_dir).expanduser()
-    env_home = os.environ.get("AI_READER_HOME")
+    env_home = os.environ.get("AI_R_HOME")
     if env_home:
         return Path(env_home).expanduser() / ".pi" / "agent" / "sessions"
     return Path("~/.pi/agent/sessions").expanduser()

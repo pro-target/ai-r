@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, claude
-from ai_reader.parsers.claude import (
+from ai_r.parsers import AgentName, claude
+from ai_r.parsers.claude import (
     _extract_text_from_user_message,
     _normalise_title,
     _parse_iso_timestamp,
@@ -33,8 +33,8 @@ from ai_reader.parsers.claude import (
     reason="no real Claude projects dir on this host",
 )
 def test_list_sessions_real(real_claude_dir: Path) -> None:
-    sessions = claude.list_sessions()  # uses AI_READER_HOME? no, uses ~/.claude
-    # When AI_READER_HOME is set (autouse fixture), parser redirects there.
+    sessions = claude.list_sessions()  # uses AI_R_HOME? no, uses ~/.claude
+    # When AI_R_HOME is set (autouse fixture), parser redirects there.
     # So we must use base_dir to test the real tree.
     sessions = claude.list_sessions(base_dir=str(real_claude_dir))
     assert sessions, "expected at least one Claude session on this host"
@@ -48,7 +48,7 @@ def test_list_sessions_real(real_claude_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Synthetic fixture (writes into AI_READER_HOME / tmp)
+# Synthetic fixture (writes into AI_R_HOME / tmp)
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +296,7 @@ def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
 
 def test_message_is_frozen(fake_claude_session: Path, tmp_sessions_dir: Path) -> None:
     """Message is a frozen dataclass — attribute mutation is rejected."""
-    from ai_reader.parsers.models import Message
+    from ai_r.parsers.models import Message
 
     base = str(tmp_sessions_dir / ".claude" / "projects")
     msgs = claude.read_messages("test-claude-1", base_dir=base)
@@ -444,8 +444,8 @@ def test_extract_title_priority(tmp_path: Path) -> None:
 
 def test_summarize_task_skip_stopword_tail() -> None:
     """A trailing ``thanks`` falls through to the prior user message."""
-    from ai_reader.parsers.claude_derive import summarize_task
-    from ai_reader.parsers.models import Message
+    from ai_r.parsers.claude_derive import summarize_task
+    from ai_r.parsers.models import Message
 
     messages = [
         Message(
@@ -464,8 +464,8 @@ def test_summarize_task_skip_stopword_tail() -> None:
 
 def test_extract_decisions_tech_filter() -> None:
     """Decision sentences with a tech token are kept; noise is dropped."""
-    from ai_reader.parsers.claude_derive import extract_decisions
-    from ai_reader.parsers.models import Message
+    from ai_r.parsers.claude_derive import extract_decisions
+    from ai_r.parsers.models import Message
 
     messages = [
         Message(

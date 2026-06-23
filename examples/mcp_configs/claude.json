@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "ai-reader": {
-      "command": "/opt/ai-reader/.venv/bin/ai-reader-mcp",
+    "ai-r": {
+      "command": "/opt/ai-r/.venv/bin/ai-r-mcp",
       "args": [],
       "env": {}
     }

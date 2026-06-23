@@ -7,7 +7,7 @@ schema.  Adding a new agent is a three-step operation:
 2. Implement a parser module under this package exporting the four
    standard functions (``list_sessions``, ``read_session``,
    ``search``, ``session_exists``).
-3. Re-export the new module from :mod:`ai_reader.parsers`.
+3. Re-export the new module from :mod:`ai_r.parsers`.
 """
 
 from __future__ import annotations

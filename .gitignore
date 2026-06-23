@@ -42,7 +42,7 @@ logs/
 data/
 
 # Install target
-/opt/ai-reader/
+/opt/ai-r/
 
 # Agent-local memory (serena, etc.) — not for repo
 .serena/

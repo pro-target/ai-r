@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, pi
-from ai_reader.parsers.pi import (
+from ai_r.parsers import AgentName, pi
+from ai_r.parsers.pi import (
     _extract_text,
     _is_valid_uuid,
     _parse_epoch_millis,

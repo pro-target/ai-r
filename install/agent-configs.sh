@@ -4,21 +4,21 @@
 #
 # Why Pi is different: Pi (@earendil-works/pi-coding-agent) has no MCP-server
 # host config to patch — it uses an extension/skill model, not an mcpServers
-# file. So instead of an MCP entry, patch_pi() drops an ai-reader skill into
-# ~/.agents/skills/ai-reader/ (Pi reads that dir). No MCP host, no spawn —
-# the skill just teaches the model to call the read-only `ai-reader` CLI.
-# Pi sessions are also readable BY ai-reader via CLI/SDK. See install/README.md.
+# file. So instead of an MCP entry, patch_pi() drops an ai-r skill into
+# ~/.agents/skills/ai-r/ (Pi reads that dir). No MCP host, no spawn —
+# the skill just teaches the model to call the read-only `ai-r` CLI.
+# Pi sessions are also readable BY ai-r via CLI/SDK. See install/README.md.
 #
 # Environment variables:
-#   AI_READER_CMD  path to ai-reader-mcp entry point (default: ~/.local/bin/ai-reader-mcp)
+#   AI_R_CMD  path to ai-r-mcp entry point (default: ~/.local/bin/ai-r-mcp)
 #
 # This script never deletes any existing keys — it only sets/updates the
-# mcpServers / mcp_servers / mcp entries for the "ai-reader" name.
+# mcpServers / mcp_servers / mcp entries for the "ai-r" name.
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-READER_CMD="${AI_READER_CMD:-$HOME/.local/bin/ai-reader-mcp}"
+READER_CMD="${AI_R_CMD:-$HOME/.local/bin/ai-r-mcp}"
 
 # Colors
 if [[ -t 1 ]]; then
@@ -57,8 +57,8 @@ patch_claude() {
         warn "Claude config not found: $file (skipping)"
         return 0
     fi
-    if json_has_key "$file" "ai-reader"; then
-        log "Claude:    ai-reader already configured"
+    if json_has_key "$file" "ai-r"; then
+        log "Claude:    ai-r already configured"
         return 0
     fi
     # ensure mcpServers object exists
@@ -68,33 +68,33 @@ patch_claude() {
         jq '. + {mcpServers: {}}' "$file" > "$tmp"
         mv "$tmp" "$file"
     fi
-    json_set_mcp_key "$file" "ai-reader" \
-        "{\"command\": \"$READER_CMD\", \"args\": [], \"transport\": \"stdio\", \"description\": \"ai-reader: read/list/search local agent sessions\"}"
-    log "Claude:    added mcpServers.ai-reader"
+    json_set_mcp_key "$file" "ai-r" \
+        "{\"command\": \"$READER_CMD\", \"args\": [], \"transport\": \"stdio\", \"description\": \"ai-r: read/list/search local agent sessions\"}"
+    log "Claude:    added mcpServers.ai-r"
 }
 
-# --- Codex (TOML, [mcp_servers.ai-reader]) ---
+# --- Codex (TOML, [mcp_servers.ai-r]) ---
 patch_codex() {
     local file="$HOME/.codex/config.toml"
     if [[ ! -f "$file" ]]; then
         warn "Codex config not found: $file (skipping)"
         return 0
     fi
-    if grep -Eq '^\[mcp_servers\.ai-reader\]' "$file"; then
-        log "Codex:     ai-reader already configured"
+    if grep -Eq '^\[mcp_servers\.ai-r\]' "$file"; then
+        log "Codex:     ai-r already configured"
         return 0
     fi
     {
-        printf '\n# Added by ai-reader installer\n'
-        printf '[mcp_servers.ai-reader]\n'
+        printf '\n# Added by ai-r installer\n'
+        printf '[mcp_servers.ai-r]\n'
         printf 'command = "%s"\n' "$READER_CMD"
         printf 'args = []\n'
-        printf 'description = "ai-reader: read/list/search local agent sessions"\n'
+        printf 'description = "ai-r: read/list/search local agent sessions"\n'
     } >> "$file"
-    log "Codex:     added [mcp_servers.ai-reader]"
+    log "Codex:     added [mcp_servers.ai-r]"
 }
 
-# --- OpenCode (JSONC, mcp.ai-reader) ---
+# --- OpenCode (JSONC, mcp.ai-r) ---
 patch_opencode() {
     local file="$HOME/.config/opencode/opencode.jsonc"
     if [[ ! -f "$file" ]]; then
@@ -102,8 +102,8 @@ patch_opencode() {
         return 0
     fi
     # Detect via simple grep on the key (JSONC allows comments)
-    if grep -Eq '"ai-reader"' "$file" && grep -Eq '"mcp"\s*:' "$file"; then
-        log "OpenCode:  ai-reader already configured"
+    if grep -Eq '"ai-r"' "$file" && grep -Eq '"mcp"\s*:' "$file"; then
+        log "OpenCode:  ai-r already configured"
         return 0
     fi
     if ! command -v python3 >/dev/null 2>&1; then
@@ -126,11 +126,11 @@ def strip_comments(s: str) -> str:
 clean = strip_comments(text)
 data = json.loads(clean) if clean.strip() else {}
 data.setdefault("mcp", {})
-if "ai-reader" in (data.get("mcp") or {}):
+if "ai-r" in (data.get("mcp") or {}):
     # idempotent
-    print("OpenCode:  ai-reader already present (idempotent skip)", file=sys.stderr)
+    print("OpenCode:  ai-r already present (idempotent skip)", file=sys.stderr)
     sys.exit(0)
-data["mcp"]["ai-reader"] = {
+data["mcp"]["ai-r"] = {
     "type": "local",
     "command": [reader_cmd],
 }
@@ -146,7 +146,7 @@ with open(path, "w", encoding="utf-8") as f:
     if not out.endswith("\n"):
         f.write("\n")
 PY
-    log "OpenCode:  added mcp.ai-reader"
+    log "OpenCode:  added mcp.ai-r"
 }
 
 # --- Antigravity (JSON, mcpServers) ---
@@ -156,8 +156,8 @@ patch_antigravity() {
         warn "Antigravity config not found: $file (skipping)"
         return 0
     fi
-    if json_has_key "$file" "ai-reader"; then
-        log "Antigravity: ai-reader already configured"
+    if json_has_key "$file" "ai-r"; then
+        log "Antigravity: ai-r already configured"
         return 0
     fi
     local tmp
@@ -166,36 +166,36 @@ patch_antigravity() {
         jq '. + {mcpServers: {}}' "$file" > "$tmp"
         mv "$tmp" "$file"
     fi
-    json_set_mcp_key "$file" "ai-reader" \
-        "{\"command\": \"$READER_CMD\", \"args\": [], \"description\": \"ai-reader: read/list/search local agent sessions\"}"
-    log "Antigravity: added mcpServers.ai-reader"
+    json_set_mcp_key "$file" "ai-r" \
+        "{\"command\": \"$READER_CMD\", \"args\": [], \"description\": \"ai-r: read/list/search local agent sessions\"}"
+    log "Antigravity: added mcpServers.ai-r"
 }
 
 # --- Pi (skill, not MCP — Pi has no mcpServers host config) ---
-# Pi cannot host ai-reader-mcp as an in-process MCP tool (design contract).
+# Pi cannot host ai-r-mcp as an in-process MCP tool (design contract).
 # Instead we drop a read-only CLI skill into the shared skills dir that Pi
-# already reads; the model then calls `ai-reader` via bash. No spawn, no MCP.
+# already reads; the model then calls `ai-r` via bash. No spawn, no MCP.
 patch_pi() {
     # Cleanup: dangling symlink left by the abandoned in-process MCP extension.
-    local old_ext="$HOME/.pi/agent/extensions/ai-reader"
+    local old_ext="$HOME/.pi/agent/extensions/ai-r"
     if [[ -L "$old_ext" && ! -e "$old_ext" ]]; then
         rm "$old_ext"
         warn "Pi:       removed dangling extension symlink $old_ext"
     fi
 
-    local dest="$HOME/.agents/skills/ai-reader/SKILL.md"
-    local src="$REPO_DIR/install/pi/skills/ai-reader/SKILL.md"
+    local dest="$HOME/.agents/skills/ai-r/SKILL.md"
+    local src="$REPO_DIR/install/pi/skills/ai-r/SKILL.md"
     if [[ ! -f "$src" ]]; then
         warn "Pi:       skill source missing: $src (skipping)"
         return 0
     fi
     if [[ -f "$dest" ]]; then
-        log "Pi:       skill already installed (~/.agents/skills/ai-reader/)"
+        log "Pi:       skill already installed (~/.agents/skills/ai-r/)"
         return 0
     fi
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
-    log "Pi:       installed skill → ~/.agents/skills/ai-reader/SKILL.md"
+    log "Pi:       installed skill → ~/.agents/skills/ai-r/SKILL.md"
 }
 
 # --- entrypoint ---
@@ -207,7 +207,7 @@ printf "\n%s\n" "$hdr"
 # rather than aborting — matching the README promise.
 if ! command -v jq >/dev/null 2>&1; then
     warn "jq not found — skipping Claude and Antigravity (JSON) patches."
-    warn "Install jq and re-run, or register ai-reader-mcp by hand (see README 'MCP registration')."
+    warn "Install jq and re-run, or register ai-r-mcp by hand (see README 'MCP registration')."
     patch_codex
     patch_opencode
     patch_pi

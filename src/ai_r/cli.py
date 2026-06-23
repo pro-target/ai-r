@@ -1,4 +1,4 @@
-"""CLI entry point for ai-reader.
+"""CLI entry point for ai-r.
 
 Thin command-line wrapper over the same parsers the MCP server
 exposes: list, read, and search sessions for Claude, Codex,
@@ -20,16 +20,16 @@ _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ai_reader import __version__  # noqa: E402
-from ai_reader.agents import _detect_agent_with_source  # noqa: E402
-from ai_reader.parsers import AgentName, Session  # noqa: E402
-from ai_reader.parsers import (  # noqa: E402
+from ai_r import __version__  # noqa: E402
+from ai_r.agents import _detect_agent_with_source  # noqa: E402
+from ai_r.parsers import AgentName, Session  # noqa: E402
+from ai_r.parsers import (  # noqa: E402
     PARSERS as _PARSERS,
     coerce_agent as _coerce_agent,
     iso as _iso,
     target_agents as _target_agents,
 )
-from ai_reader.session import (  # noqa: E402
+from ai_r.session import (  # noqa: E402
     AmbiguousSessionError,
     SessionCandidate,
     detect_session_candidates,
@@ -190,7 +190,7 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
 
 
 def _exit_with_error(message: str, code: int = 1) -> "int":
-    print(f"ai-reader: {message}", file=sys.stderr)
+    print(f"ai-r: {message}", file=sys.stderr)
     return code
 
 
@@ -318,7 +318,7 @@ def _run_read(args: argparse.Namespace) -> int:
         read_messages = getattr(parser, "read_messages", None)
         if read_messages is None:
             print(
-                f"ai-reader: read_messages unavailable for {agent_name.value}",
+                f"ai-r: read_messages unavailable for {agent_name.value}",
                 file=sys.stderr,
             )
         else:
@@ -327,7 +327,7 @@ def _run_read(args: argparse.Namespace) -> int:
                 message_dicts = _messages_to_dicts(raw_messages)
             except Exception as exc:  # noqa: BLE001
                 print(
-                    f"ai-reader: failed to read messages: {exc}",
+                    f"ai-r: failed to read messages: {exc}",
                     file=sys.stderr,
                 )
 
@@ -430,7 +430,7 @@ def _run_detect_session(args: argparse.Namespace) -> int:
     if mode == "list":
         if len(candidates) > 1:
             print(
-                "ai-reader: WARN: multiple session_id candidates; pass "
+                "ai-r: WARN: multiple session_id candidates; pass "
                 "AI_SESSION_OUTPUT=strict|self|fingerprint:<hash> for "
                 "disambiguation.",
                 file=sys.stderr,
@@ -488,7 +488,7 @@ def _run_search(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
-    from ai_reader import mcp_server as _mcp
+    from ai_r import mcp_server as _mcp
 
     # Delegate the actual search to mcp_server (single source of truth for
     # query parsing, scope matching, operator combination). We pass
@@ -538,11 +538,11 @@ def _run_search(args: argparse.Namespace) -> int:
 def _run_find_file_edits(args: argparse.Namespace) -> int:
     """Run the ``find-file-edits`` subcommand.
 
-    Delegates the actual scan to :mod:`ai_reader.find_file_edits`
+    Delegates the actual scan to :mod:`ai_r.find_file_edits`
     (the same core the MCP tool uses) and renders either a
     human-readable summary or a JSON blob.
     """
-    from ai_reader.find_file_edits import find_file_edits as _ffe_core
+    from ai_r.find_file_edits import find_file_edits as _ffe_core
 
     try:
         result = _ffe_core(
@@ -623,7 +623,7 @@ def _run_export_rounds(args: argparse.Namespace) -> int:
         read_messages = getattr(parser, "read_messages", None)
         if read_messages is None:
             print(
-                f"ai-reader: read_messages unavailable for {agent_name.value}",
+                f"ai-r: read_messages unavailable for {agent_name.value}",
                 file=sys.stderr,
             )
         else:
@@ -631,12 +631,12 @@ def _run_export_rounds(args: argparse.Namespace) -> int:
                 messages = list(read_messages(uuid))
             except Exception as exc:  # noqa: BLE001
                 print(
-                    f"ai-reader: failed to read messages: {exc}",
+                    f"ai-r: failed to read messages: {exc}",
                     file=sys.stderr,
                 )
                 messages = []
 
-    from ai_reader.exporters.rounds import session_to_rounds
+    from ai_r.exporters.rounds import session_to_rounds
 
     markdown = session_to_rounds(session, messages=messages)
 
@@ -651,7 +651,7 @@ def _run_export_rounds(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser."""
     parser = argparse.ArgumentParser(
-        prog="ai-reader",
+        prog="ai-r",
         description=(
             "Inspect Claude, Codex, OpenCode, Antigravity and Pi sessions."
         ),
@@ -659,7 +659,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"ai-reader {__version__}",
+        version=f"ai-r {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
 

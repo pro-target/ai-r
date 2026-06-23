@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, opencode
-from ai_reader.parsers.opencode import (
+from ai_r.parsers import AgentName, opencode
+from ai_r.parsers.opencode import (
     _epoch_ms_to_datetime,
     _open_db,
     _resolve_db_paths,
@@ -65,7 +65,7 @@ def test_list_sessions_missing_db_returns_empty(
     candidates, simulating a host with no OpenCode installation.
     """
     monkeypatch.setattr(
-        "ai_reader.parsers.opencode._resolve_db_paths",
+        "ai_r.parsers.opencode._resolve_db_paths",
         lambda base_dir=None, override=None: [],
     )
     assert opencode.list_sessions(base_dir=str(tmp_path / "no-such-dir")) == []
@@ -97,7 +97,7 @@ def test_search(
     result is deterministic.
     """
     monkeypatch.setattr(
-        "ai_reader.parsers.opencode._resolve_db_paths",
+        "ai_r.parsers.opencode._resolve_db_paths",
         lambda base_dir=None, override=None: [str(fake_opencode_db)],
     )
     out = opencode.search("opencode")
@@ -337,7 +337,7 @@ def test_open_db_locked_falls_back_to_copy(
     import glob
     import sqlite3 as _sqlite3
 
-    from ai_reader.parsers import opencode as oc
+    from ai_r.parsers import opencode as oc
 
     real_connect = _sqlite3.connect
 
@@ -358,6 +358,6 @@ def test_open_db_locked_falls_back_to_copy(
     finally:
         conn.close()
 
-    assert glob.glob("/tmp/ai_reader_opencode_*.db"), (
+    assert glob.glob("/tmp/ai_r_opencode_*.db"), (
         "expected a fallback copy under /tmp"
     )

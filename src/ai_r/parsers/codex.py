@@ -18,7 +18,7 @@ Each line is a JSON object with one of the following ``type`` values:
 * ``"custom_tool_call"`` and friends — non-message noise, skipped.
 
 User-text dedup across ``response_item`` and ``event_msg`` uses the first
-``$AI_READER_DEDUP_KEY_LEN`` chars (default 256) as the seen-set key.
+``$AI_R_DEDUP_KEY_LEN`` chars (default 256) as the seen-set key.
 Bump the env var if your prompts collide in the first 64 chars but
 diverge later.
 
@@ -27,7 +27,7 @@ are ignored.  The first user message text becomes the title, with a
 fallback to ``payload.cwd`` if no user message is found.
 
 The base directory can be overridden by ``base_dir`` or by setting
-``$AI_READER_HOME/.codex/sessions`` (the sibling ``archived_sessions``
+``$AI_R_HOME/.codex/sessions`` (the sibling ``archived_sessions``
 directory is scanned automatically).
 """
 
@@ -47,7 +47,7 @@ _DEDUP_KEY_LEN_DEFAULT = 256
 
 
 def get_dedup_key_len() -> int:
-    """Re-read ``$AI_READER_DEDUP_KEY_LEN`` on every call.
+    """Re-read ``$AI_R_DEDUP_KEY_LEN`` on every call.
 
     Cheap (single ``os.environ`` dict lookup); the alternative — module-level
     capture at import time — silently ignores runtime changes (e.g. operator
@@ -55,7 +55,7 @@ def get_dedup_key_len() -> int:
     that mutates the env post-import). Returns the default if unset, empty,
     non-integer, or non-positive.
     """
-    raw = os.environ.get("AI_READER_DEDUP_KEY_LEN", str(_DEDUP_KEY_LEN_DEFAULT))
+    raw = os.environ.get("AI_R_DEDUP_KEY_LEN", str(_DEDUP_KEY_LEN_DEFAULT))
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -67,7 +67,7 @@ def get_dedup_key_len() -> int:
 
 def _dedup_key(text: str) -> str:
     """Stable dedup key for user-text seen-set. Length controlled by
-    ``$AI_READER_DEDUP_KEY_LEN`` (default 256). Longer = stricter dedup,
+    ``$AI_R_DEDUP_KEY_LEN`` (default 256). Longer = stricter dedup,
     cost = more memory per session. 256 covers the first ~4 paragraphs
     of any realistic user prompt, which is the practical collision zone
     when the same prompt appears in both ``response_item`` and
@@ -80,7 +80,7 @@ def _resolve_base_dir(base_dir: Optional[str]) -> List[Path]:
     if base_dir:
         primary = Path(base_dir).expanduser()
     else:
-        env_home = os.environ.get("AI_READER_HOME")
+        env_home = os.environ.get("AI_R_HOME")
         if env_home:
             primary = Path(env_home).expanduser() / ".codex" / "sessions"
         else:

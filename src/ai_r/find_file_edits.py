@@ -2,13 +2,13 @@
 
 The pure-Python scan logic lives here so the CLI and the MCP tool
 both delegate to a single implementation.  The MCP tool is a thin
-wrapper (see :mod:`ai_reader.mcp_server`) that catches
+wrapper (see :mod:`ai_r.mcp_server`) that catches
 :class:`ValueError` and converts it to the MCP error-dict
-convention; the CLI handler (:func:`ai_reader.cli._run_find_file_edits`)
+convention; the CLI handler (:func:`ai_r.cli._run_find_file_edits`)
 catches the same exception and prints it to stderr.
 
 The module also re-exports the small set of helpers that downstream
-consumers historically imported from :mod:`ai_reader.mcp_server`
+consumers historically imported from :mod:`ai_r.mcp_server`
 (``_target_agents``, ``_coerce_agent``, ``_PARSERS``,
 ``_EDIT_TOOLS``, ``_EDIT_PATH_KEYS``) so existing call sites and
 tests keep working.
@@ -20,7 +20,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence
 
-from ai_reader.parsers import (
+from ai_r.parsers import (
     PARSERS,
     coerce_agent,
     iso,
@@ -31,7 +31,7 @@ __all__ = [
     "EDIT_TOOLS",
     "EDIT_PATH_KEYS",
     # ``PARSERS``, ``coerce_agent``, ``target_agents`` and ``iso`` are
-    # re-exported from :mod:`ai_reader.parsers` (the canonical source of
+    # re-exported from :mod:`ai_r.parsers` (the canonical source of
     # truth) so downstream consumers and tests that historically imported
     # them from here keep working.
     "PARSERS",

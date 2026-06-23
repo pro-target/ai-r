@@ -1,5 +1,5 @@
 {
   "mcpServers": {
-    "ai-reader": { "type": "stdio", "command": "ai-reader-mcp", "args": [], "env": {} }
+    "ai-r": { "type": "stdio", "command": "ai-r-mcp", "args": [], "env": {} }
   }
 }

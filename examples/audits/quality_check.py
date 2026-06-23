@@ -15,7 +15,7 @@ Counts three families of signals across the message stream:
 Same spirit as ``git-auditor``'s ``scout_behavioral_audit``
 (``~/.agents/skills/git-auditor/scripts/context_auditor.py``, lines
 ~393-477), extended to a broader quality-signal pass and driven through
-the public ``ai_reader.read_messages`` API.
+the public ``ai_r.read_messages`` API.
 
 Usage::
 
@@ -34,14 +34,14 @@ import re
 import sys
 from typing import Callable, Dict, List
 
-from ai_reader.parsers import (
+from ai_r.parsers import (
     antigravity,
     claude,
     codex,
     opencode,
     pi,
 )
-from ai_reader.parsers.models import Message
+from ai_r.parsers.models import Message
 
 
 PARSERS: Dict[str, Callable] = {

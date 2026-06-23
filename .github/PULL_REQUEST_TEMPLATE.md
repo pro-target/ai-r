@@ -17,7 +17,7 @@
 
 ## How was it tested?
 
-- [ ] `pytest --cov=src/ai_reader` passes locally
+- [ ] `pytest --cov=src/ai_r` passes locally
 - [ ] New tests added (if applicable)
 - [ ] Coverage stays ≥ 80% (`pyproject.toml` enforces this)
 - [ ] `install.sh` dry-run still parses (`DRY_RUN=1 bash install.sh`)

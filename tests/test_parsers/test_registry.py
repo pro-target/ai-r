@@ -1,10 +1,10 @@
 """Tests for the cross-agent registry helpers.
 
 Exercises the package-level :func:`find_sessions` and
-:func:`read_session` dispatchers in :mod:`ai_reader.parsers`.  Each
+:func:`read_session` dispatchers in :mod:`ai_r.parsers`.  Each
 test seeds a small number of synthetic Claude sessions into the
 shared ``tmp_sessions_dir`` fixture (the autouse
-``_isolate_ai_reader_home`` fixture redirects every parser there).
+``_isolate_ai_r_home`` fixture redirects every parser there).
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, Session, find_sessions, read_session
+from ai_r.parsers import AgentName, Session, find_sessions, read_session
 
 
 def _write_claude_session(
@@ -137,8 +137,8 @@ def test_read_session_multi_candidate_across_agents(
     """
     from datetime import datetime
 
-    from ai_reader.parsers import claude as claude_mod
-    from ai_reader.parsers import codex as codex_mod
+    from ai_r.parsers import claude as claude_mod
+    from ai_r.parsers import codex as codex_mod
 
     shared = "ses-shared-uuid"
     fake_claude = Session(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers._quarantine import (
+from ai_r.parsers._quarantine import (
     QUARANTINE_REASON_INVALID_JSON,
     QUARANTINE_REASON_SCHEMA_MISMATCH,
     QUARANTINE_REASON_UNSUPPORTED_TYPE,

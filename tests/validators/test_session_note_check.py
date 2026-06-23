@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers.models import AgentName
-from ai_reader.session import SessionCandidate
-from ai_reader.validators.session_note_check import (
+from ai_r.parsers.models import AgentName
+from ai_r.session import SessionCandidate
+from ai_r.validators.session_note_check import (
     SessionNoteValidationResult,
     extract_session_id_from_note,
     parse_required_sections,
@@ -23,7 +23,7 @@ from ai_reader.validators.session_note_check import (
 _TEMPLATE = (
     Path(__file__).resolve().parents[2]
     / "src"
-    / "ai_reader"
+    / "ai_r"
     / "templates"
     / "session_note.md"
 )
@@ -40,7 +40,7 @@ _DETECT_VARS = (
     "CODEX_HOME",
     "CLAUDECODE",
     "OPENCODE",
-    "AI_READER_SESSION_IDENTITY_DIR",
+    "AI_R_SESSION_IDENTITY_DIR",
     "AI_SESSION_OUTPUT",
 )
 
@@ -53,7 +53,7 @@ def _clean_session_env(
         monkeypatch.delenv(var, raising=False)
     empty_identity = tmp_path / "empty_identity"
     empty_identity.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AI_READER_SESSION_IDENTITY_DIR", str(empty_identity))
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(empty_identity))
 
 
 def _complete_note(session_block: str = "") -> str:
@@ -65,7 +65,7 @@ def _complete_note(session_block: str = "") -> str:
         "**Date**: 2026-06-21\n\n"
         "## Goal\nShip PR7b.\n\n"
         "## Decisions\n- validator reads template at runtime.\n\n"
-        "## Files touched\n- src/ai_reader/validators/session_note_check.py\n\n"
+        "## Files touched\n- src/ai_r/validators/session_note_check.py\n\n"
         "## Open questions\n- none\n\n"
         "## Next actions\n- wire into session-summarizer.\n\n"
         "## Verification\n- run pytest tests/validators/.\n"
@@ -161,7 +161,7 @@ def test_validate_session_note_identity_match_any_candidate(
 ) -> None:
     base = tmp_path / "session-identity"
     base.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AI_READER_SESSION_IDENTITY_DIR", str(base))
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(base))
     _write_per_session(base, "opencode", "ses_firstcandidate")
     _write_per_session(base, "opencode", "ses_secondcandidat")
     note = tmp_path / "note.md"
@@ -183,7 +183,7 @@ def test_validate_session_note_identity_mismatch_with_candidates(
 ) -> None:
     base = tmp_path / "session-identity"
     base.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AI_READER_SESSION_IDENTITY_DIR", str(base))
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(base))
     _write_per_session(base, "opencode", "ses_candidateaaa")
     _write_per_session(base, "opencode", "ses_candidatebbb")
     note = tmp_path / "note.md"
@@ -216,7 +216,7 @@ def test_validate_session_note_identity_ambiguous_no_match(
 ) -> None:
     base = tmp_path / "session-identity"
     base.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("AI_READER_SESSION_IDENTITY_DIR", str(base))
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(base))
     _write_per_session(base, "opencode", "ses_candidateaaa")
     _write_per_session(base, "opencode", "ses_candidatebbb")
     note = tmp_path / "note.md"

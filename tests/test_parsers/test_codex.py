@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ai_reader.parsers import AgentName, codex
-from ai_reader.parsers.codex import (
+from ai_r.parsers import AgentName, codex
+from ai_r.parsers.codex import (
     _extract_text_from_parts,
     _is_system_noise,
     _is_valid_uuid,
@@ -300,29 +300,29 @@ def test_dedup_key_len_default_is_256() -> None:
 
 def test_dedup_key_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """Runtime env changes are honored — no module reload required."""
-    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "1024")
+    monkeypatch.setenv("AI_R_DEDUP_KEY_LEN", "1024")
     try:
         assert codex.get_dedup_key_len() == 1024
         assert len(codex._dedup_key("x" * 5000)) == 1024
     finally:
-        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+        monkeypatch.delenv("AI_R_DEDUP_KEY_LEN", raising=False)
     assert codex.get_dedup_key_len() == 256
 
 
 def test_dedup_key_invalid_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "not-a-number")
+    monkeypatch.setenv("AI_R_DEDUP_KEY_LEN", "not-a-number")
     try:
         assert codex.get_dedup_key_len() == 256
     finally:
-        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+        monkeypatch.delenv("AI_R_DEDUP_KEY_LEN", raising=False)
 
 
 def test_dedup_key_non_positive_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "0")
+    monkeypatch.setenv("AI_R_DEDUP_KEY_LEN", "0")
     try:
         assert codex.get_dedup_key_len() == 256
     finally:
-        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+        monkeypatch.delenv("AI_R_DEDUP_KEY_LEN", raising=False)
 
 
 def test_event_msg_filters_system_noise(tmp_sessions_dir: Path) -> None:

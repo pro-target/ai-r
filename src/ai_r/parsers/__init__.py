@@ -8,17 +8,17 @@ Each parser module exports the same four-function interface:
 * :func:`search`        — case-insensitive title substring search.
 * :func:`session_exists` — boolean existence check.
 
-All public data flows through :class:`ai_reader.parsers.models.Session`
-and :class:`ai_reader.parsers.models.AgentName`.
+All public data flows through :class:`ai_r.parsers.models.Session`
+and :class:`ai_r.parsers.models.AgentName`.
 
 Path resolution
 ---------------
 
 Every parser accepts an optional ``base_dir`` argument for tests and
-also honours the ``AI_READER_HOME`` environment variable, which is
+also honours the ``AI_R_HOME`` environment variable, which is
 treated as the user's ``$HOME`` for the duration of the call.  This
 is the *only* testing hook — do not add other side effects.  When
-``AI_READER_HOME`` is unset, parsers fall back to ``~``.
+``AI_R_HOME`` is unset, parsers fall back to ``~``.
 
 Cross-agent helpers
 -------------------
@@ -58,8 +58,8 @@ __all__ = [
     "find_sessions",
     "read_session",
     # Canonical cross-agent registry + helpers (re-exported by
-    # ``ai_reader.find_file_edits`` and used by ``ai_reader.cli`` /
-    # ``ai_reader.mcp_server``).  These are the SINGLE source of truth;
+    # ``ai_r.find_file_edits`` and used by ``ai_r.cli`` /
+    # ``ai_r.mcp_server``).  These are the SINGLE source of truth;
     # the legacy private aliases below delegate to them.
     "PARSERS",
     "coerce_agent",
@@ -70,7 +70,7 @@ __all__ = [
 
 # Canonical agent registry — the single source of truth for the mapping
 # between :class:`AgentName` values and their parser modules.  Both
-# ``ai_reader.find_file_edits`` and ``ai_reader.cli`` import this dict
+# ``ai_r.find_file_edits`` and ``ai_r.cli`` import this dict
 # (and the helpers below) rather than keeping their own copies.
 PARSERS: Dict[AgentName, object] = {
     AgentName.CLAUDE: claude,

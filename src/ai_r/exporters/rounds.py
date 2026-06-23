@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 from typing import List, Optional, Sequence, Set
 
-from ai_reader.parsers.models import Message, Session
+from ai_r.parsers.models import Message, Session
 
 __all__ = ["session_to_rounds"]
 
@@ -89,7 +89,7 @@ def _truncate(text: str, limit: int = 200) -> str:
 
 def _extract_decisions(messages: Sequence[Message]) -> List[str]:
     try:
-        from ai_reader.parsers.claude_derive import extract_decisions  # type: ignore[import-not-found]
+        from ai_r.parsers.claude_derive import extract_decisions  # type: ignore[import-not-found]
     except ImportError:
         return []
     try:

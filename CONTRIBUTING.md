@@ -1,4 +1,4 @@
-# Contributing to ai-reader
+# Contributing to ai-r
 
 Thanks for your interest! This project is small enough that the
 fastest path from idea to merge is:
@@ -13,7 +13,7 @@ fastest path from idea to merge is:
 4. **Run the full test suite + linters locally:**
    ```bash
    pip install -e ".[dev]"
-   pytest --cov=src/ai_reader
+   pytest --cov=src/ai_r
    ```
    Coverage must stay ≥ 80% (`pyproject.toml` enforces this in CI).
 5. **Conventional Commits.** Allowed prefixes: `feat:`, `fix:`,
@@ -24,7 +24,7 @@ fastest path from idea to merge is:
 
 ## Local-dev MCP setup
 
-For local-dev MCP setup (registering `ai-reader-mcp` so your editor can
+For local-dev MCP setup (registering `ai-r-mcp` so your editor can
 drive it), see **MCP registration** in [README.md](./README.md).
 
 ## Style
@@ -39,10 +39,10 @@ drive it), see **MCP registration** in [README.md](./README.md).
 ## Adding a new agent parser
 
 See [docs/parsers.md](./docs/parsers.md). Summary:
-1. Add a value to `AgentName` in `src/ai_reader/parsers/models.py`.
-2. Create `src/ai_reader/parsers/<agent>.py` exporting `list_sessions`,
+1. Add a value to `AgentName` in `src/ai_r/parsers/models.py`.
+2. Create `src/ai_r/parsers/<agent>.py` exporting `list_sessions`,
    `read_session`, `search`, `session_exists`.
-3. Re-export the module from `src/ai_reader/parsers/__init__.py`.
+3. Re-export the module from `src/ai_r/parsers/__init__.py`.
 4. Add a `tests/test_parsers/test_<agent>.py` with fixtures.
 
 ## Reporting a security issue
