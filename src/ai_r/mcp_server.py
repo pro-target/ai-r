@@ -18,8 +18,12 @@ protocol — that would corrupt the JSON-RPC stream.
 
 from __future__ import annotations
 
+import os
 import shlex
 import sys
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -47,6 +51,29 @@ _MESSAGES_HARD_CAP = 1000
 _BODY_SEARCH_MESSAGE_CAP = 1000
 _HAYSTACK_CHARS_CAP = 1_000_000
 _LIST_LIMIT_DEFAULT = 100
+
+# --- Body-search haystack cache -------------------------------------------
+# Repeated ``scope="body"`` searches used to re-read + re-concatenate every
+# session's messages on every call.  This LRU cache stores the built haystack
+# (and its ``body_truncated`` flag) keyed by ``(agent, uuid, mtime)``.
+#
+# Invalidation strategy: MTIME-BASED (preferred).
+# ``Session.path`` carries the source-of-truth path for every agent — the
+# JSONL file for Claude/Codex/Pi/Antigravity and the SQLite DB path for
+# OpenCode (see parsers/models.py:68).  We stat that path with
+# ``os.path.getmtime``; if the mtime changed (or the stat fails / path is
+# gone) the entry is treated as a miss and rebuilt.  For OpenCode the DB is
+# shared across all sessions, so a DB mtime bump invalidates every OpenCode
+# session's entry at once — which is the correct, safe behavior since any
+# session may have grown.
+_HAYSTACK_CACHE_MAX = 256
+# Soft TTL is a defensive backstop only: if a source path cannot be statted
+# (OSError), we still serve a cached entry but bound its staleness so a
+# transiently-unreadable file does not pin stale content forever.
+_HAYSTACK_CACHE_TTL_SEC = 300
+
+_haystack_cache: "OrderedDict[tuple[str, str, float], tuple[str, bool]]" = OrderedDict()
+_haystack_cache_lock = threading.Lock()
 
 
 mcp = FastMCP(
@@ -203,6 +230,76 @@ def _body_search_messages(session: Session) -> tuple[Sequence[Any], bool]:
         return (), False
     truncated = len(messages) > _BODY_SEARCH_MESSAGE_CAP
     return messages[:_BODY_SEARCH_MESSAGE_CAP], truncated
+
+
+def _session_source_mtime(session: Session) -> Optional[float]:
+    """Return the mtime of ``session.path``, or ``None`` if unstattable.
+
+    ``None`` (OSError / missing / empty path) makes the caller fall back to
+    the soft-TTL branch of the cache so a transiently-unreadable source does
+    not crash the search.
+    """
+    path = getattr(session, "path", "") or ""
+    if not path:
+        return None
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _get_cached_haystack(
+    session: Session,
+    agent_name: str,
+) -> tuple[str, bool]:
+    """Return ``(haystack, body_truncated)`` for ``session``, cached by mtime.
+
+    Cache key: ``(agent_name, session.uuid, mtime)`` where ``mtime`` is the
+    mtime of ``session.path`` (JSONL file or, for OpenCode, the shared SQLite
+    DB).  When the source mtime changes the entry is rebuilt, so a HIT
+    produces byte-identical matching behavior to a MISS.
+
+    Thread-safety: the lock is held only for the cheap OrderedDict check and
+    the store; the expensive ``_body_search_messages`` + ``_build_haystack``
+    run OUTSIDE the lock so one slow build does not serialize concurrent
+    reads of other sessions.  A concurrent double-build of the same key is
+    harmless (last writer wins; both produce identical output).
+
+    If the source path cannot be statted (``mtime is None``), the key falls
+    back to a soft TTL (:data:`_HAYSTACK_CACHE_TTL_SEC`) so we never pin
+    stale content indefinitely for an unreadable path.
+    """
+    mtime = _session_source_mtime(session)
+    now = time.monotonic()
+
+    # Build the lookup key.  A known mtime is the cache validator; an unknown
+    # mtime (None) folds a wall-clock TTL into the key via a coarse bucket so
+    # the entry self-expires without a separate reaper.
+    if mtime is not None:
+        key = (agent_name, session.uuid, mtime)
+    else:
+        bucket = int(now // _HAYSTACK_CACHE_TTL_SEC)
+        key = (agent_name, session.uuid, float(bucket))
+
+    with _haystack_cache_lock:
+        cached = _haystack_cache.get(key)
+        if cached is not None:
+            # LRU: move to most-recently-used so eviction hits oldest entries.
+            _haystack_cache.move_to_end(key)
+            return cached
+
+    # Cache MISS — build outside the lock so concurrent reads of other
+    # sessions are not blocked by this (potentially slow) read+concat.
+    messages, body_truncated = _body_search_messages(session)
+    haystack = _build_haystack(messages)
+    value = (haystack, body_truncated)
+
+    with _haystack_cache_lock:
+        _haystack_cache[key] = value
+        _haystack_cache.move_to_end(key)
+        while len(_haystack_cache) > _HAYSTACK_CACHE_MAX:
+            _haystack_cache.popitem(last=False)
+    return value
 
 
 @mcp.tool()
@@ -463,15 +560,17 @@ def search_sessions(
                         t not in title_lc for t in (positive + negative)
                     )
             elif scope == "body":
-                messages, body_truncated = _body_search_messages(session)
-                haystack = _build_haystack(messages)
+                haystack, body_truncated = _get_cached_haystack(
+                    session, agent_name
+                )
                 matched = _match(haystack, positive, negative, op_upper)
                 if matched and positive:
                     snippet_text = _extract_snippet(haystack, positive)
             else:
                 title_lc = session.title.lower()
-                messages, body_truncated = _body_search_messages(session)
-                haystack = _build_haystack(messages)
+                haystack, body_truncated = _get_cached_haystack(
+                    session, agent_name
+                )
                 in_title = any(t in title_lc for t in positive)
                 in_body = any(t in haystack for t in positive)
                 combined = f"{title_lc}\n{haystack}"
