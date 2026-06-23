@@ -43,6 +43,9 @@ __all__ = ["mcp", "main"]
 
 
 _MESSAGES_CAP = 100
+_MESSAGES_HARD_CAP = 1000
+_BODY_SEARCH_MESSAGE_CAP = 1000
+_HAYSTACK_CHARS_CAP = 1_000_000
 _LIST_LIMIT_DEFAULT = 100
 
 
@@ -125,13 +128,16 @@ def _project_message_content(m: Any) -> str:
     return "\n".join(chunks)
 
 
-def _project_messages(messages: Sequence[Any]) -> List[dict[str, Any]]:
+def _project_messages(
+    messages: Sequence[Any],
+    hard_cap: int = 0,
+) -> List[dict[str, Any]]:
     """Project parser ``Message`` objects to ``{role, content}`` dicts.
 
     Only ``user``/``assistant`` roles are surfaced, preserving the
-    historical MCP output shape; ``tool`` messages are dropped.  No cap
-    is applied here — pagination (``offset``/``limit``) is the caller's
-    responsibility.
+    historical MCP output shape; ``tool`` messages are dropped.  When
+    ``hard_cap`` is positive, projection stops after that many surfaced
+    messages.
     """
     out: List[dict[str, Any]] = []
     for m in messages:
@@ -141,6 +147,8 @@ def _project_messages(messages: Sequence[Any]) -> List[dict[str, Any]]:
         if not content:
             continue
         out.append({"role": m.role, "content": content})
+        if hard_cap and hard_cap > 0 and len(out) >= hard_cap:
+            break
     return out
 
 
@@ -148,6 +156,7 @@ def _extract_messages(
     session: Session,
     offset: int = 0,
     limit: int = _MESSAGES_CAP,
+    hard_cap: int = _MESSAGES_HARD_CAP,
 ) -> List[dict[str, Any]]:
     """Best-effort message extraction for a session, with pagination.
 
@@ -176,12 +185,24 @@ def _extract_messages(
         raw = parser.read_messages(session.uuid)
     except (FileNotFoundError, ValueError, OSError):
         return []
-    projected = _project_messages(raw)
+    projected = _project_messages(raw, hard_cap=hard_cap)
     if offset > 0:
         projected = projected[offset:]
     if limit and limit > 0:
         projected = projected[:limit]
     return projected
+
+
+def _body_search_messages(session: Session) -> tuple[Sequence[Any], bool]:
+    parser = _PARSERS.get(session.agent)
+    if parser is None:
+        return (), False
+    try:
+        messages = parser.read_messages(session.uuid)
+    except (FileNotFoundError, ValueError, OSError):
+        return (), False
+    truncated = len(messages) > _BODY_SEARCH_MESSAGE_CAP
+    return messages[:_BODY_SEARCH_MESSAGE_CAP], truncated
 
 
 @mcp.tool()
@@ -269,6 +290,8 @@ def read_session(
           length the slice was taken from).
         * ``offset`` / ``limit`` — the pagination echo values actually
           used.
+        * ``messages_truncated`` — True when the MCP hard cap stopped
+          extraction before every projected message could be returned.
 
         On a missing session, returns an ``error`` dict instead of
         raising.
@@ -277,6 +300,8 @@ def read_session(
         return {"error": "invalid_argument", "message": "uuid must be non-empty"}
     if offset < 0:
         return {"error": "invalid_argument", "message": "offset must be >= 0"}
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        return {"error": "invalid_argument", "message": "limit must be an integer"}
     try:
         agent_name = _coerce_agent(agent)
     except ValueError as exc:
@@ -297,7 +322,15 @@ def read_session(
             "agent": agent_name.value,
         }
 
-    projected = _extract_messages(session, offset=0, limit=0)
+    projected = _extract_messages(
+        session,
+        offset=0,
+        limit=0,
+        hard_cap=_MESSAGES_HARD_CAP + 1,
+    )
+    messages_truncated = len(projected) > _MESSAGES_HARD_CAP
+    if messages_truncated:
+        projected = projected[:_MESSAGES_HARD_CAP]
     total = len(projected)
     if offset > 0:
         projected = projected[offset:]
@@ -309,6 +342,7 @@ def read_session(
     summary["total"] = total
     summary["offset"] = offset
     summary["limit"] = limit
+    summary["messages_truncated"] = messages_truncated
     return summary
 
 
@@ -429,20 +463,14 @@ def search_sessions(
                         t not in title_lc for t in (positive + negative)
                     )
             elif scope == "body":
-                try:
-                    messages = parser.read_messages(session.uuid)
-                except (FileNotFoundError, ValueError, OSError):
-                    messages = []
+                messages, body_truncated = _body_search_messages(session)
                 haystack = _build_haystack(messages)
                 matched = _match(haystack, positive, negative, op_upper)
                 if matched and positive:
                     snippet_text = _extract_snippet(haystack, positive)
             else:
                 title_lc = session.title.lower()
-                try:
-                    messages = parser.read_messages(session.uuid)
-                except (FileNotFoundError, ValueError, OSError):
-                    messages = []
+                messages, body_truncated = _body_search_messages(session)
                 haystack = _build_haystack(messages)
                 in_title = any(t in title_lc for t in positive)
                 in_body = any(t in haystack for t in positive)
@@ -459,6 +487,8 @@ def search_sessions(
             summary = _session_summary(session)
             if snippet_text:
                 summary["snippet"] = snippet_text
+            if scope in ("body", "all") and body_truncated:
+                summary["body_truncated"] = True
             summaries.append(summary)
             if limit and len(summaries) >= limit:
                 return summaries
@@ -484,7 +514,10 @@ def _parse_query(query: str) -> tuple[list[str], list[str]]:
     return positive, negative
 
 
-def _build_haystack(messages: Sequence[Any]) -> str:
+def _build_haystack(
+    messages: Sequence[Any],
+    max_chars: int = _HAYSTACK_CHARS_CAP,
+) -> str:
     """Concatenate message text + tool_use inputs + tool_result contents.
 
     Lowercased once on return. Includes content that lives in tool calls
@@ -493,21 +526,32 @@ def _build_haystack(messages: Sequence[Any]) -> str:
     Bash/file/etc. invocations.
     """
     chunks: List[str] = []
+    total_chars = 0
     for m in messages:
         text = getattr(m, "text", "")
         if isinstance(text, str) and text:
             chunks.append(text)
+            total_chars += len(text)
         for tool in getattr(m, "tool_use", ()) or ():
             if isinstance(tool, dict):
                 inp = tool.get("input", "")
                 if inp:
-                    chunks.append(str(inp))
+                    chunk = str(inp)
+                    chunks.append(chunk)
+                    total_chars += len(chunk)
         for res in getattr(m, "tool_result", ()) or ():
             if isinstance(res, dict):
                 content = res.get("content", "")
                 if content:
-                    chunks.append(str(content))
-    return "\n".join(chunks).lower()
+                    chunk = str(content)
+                    chunks.append(chunk)
+                    total_chars += len(chunk)
+        if max_chars and max_chars > 0 and total_chars >= max_chars:
+            break
+    haystack = "\n".join(chunks).lower()
+    if max_chars and max_chars > 0:
+        return haystack[:max_chars]
+    return haystack
 
 
 def _match(

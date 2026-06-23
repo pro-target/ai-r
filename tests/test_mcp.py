@@ -25,6 +25,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from ai_r.mcp_server import (
     _build_haystack,
+    _BODY_SEARCH_MESSAGE_CAP,
     _codex_text,
     _coerce_agent,
     _extract_messages,
@@ -32,6 +33,7 @@ from ai_r.mcp_server import (
     _iso,
     _match,
     _MESSAGES_CAP,
+    _MESSAGES_HARD_CAP,
     _parse_query,
     _pi_text,
     _session_summary,
@@ -759,6 +761,33 @@ def test_messages_cap_constant_unchanged() -> None:
     assert _MESSAGES_CAP == 100
 
 
+def test_extract_messages_hard_caps_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_r.parsers.models import Message, Session
+
+    monkeypatch.setattr(
+        "ai_r.parsers.claude.read_messages",
+        lambda _uuid: [
+            Message(role="user", text=f"message {i}")
+            for i in range(_MESSAGES_HARD_CAP + 5)
+        ],
+    )
+    session = Session(
+        uuid="cap-me",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path="/tmp/fake.jsonl",
+        message_count=_MESSAGES_HARD_CAP + 5,
+    )
+
+    result = _extract_messages(session, limit=0)
+
+    assert len(result) == _MESSAGES_HARD_CAP
+    assert result[-1]["content"] == f"message {_MESSAGES_HARD_CAP - 1}"
+
+
 # ---------------------------------------------------------------------------
 # search_sessions: extended API (scope/operator/limit, body search)
 # ---------------------------------------------------------------------------
@@ -880,6 +909,39 @@ def test_search_sessions_body_or_match(
     )
     matched = [s for s in result if s["uuid"] == "body-or-1"]
     assert matched, "OR: only pwa appears, must still match"
+
+
+def test_search_sessions_body_marks_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_r.parsers.models import Message, Session
+
+    session = Session(
+        uuid="body-truncated-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path="/tmp/fake.jsonl",
+        message_count=_BODY_SEARCH_MESSAGE_CAP + 1,
+    )
+
+    monkeypatch.setattr(
+        "ai_r.parsers.claude.list_sessions",
+        lambda: [session],
+    )
+    monkeypatch.setattr(
+        "ai_r.parsers.claude.read_messages",
+        lambda _uuid: [
+            Message(role="user", text="needle")
+            for _ in range(_BODY_SEARCH_MESSAGE_CAP + 1)
+        ],
+    )
+
+    result = search_sessions("needle", agent="claude", scope="body")
+
+    assert result
+    assert result[0]["uuid"] == "body-truncated-1"
+    assert result[0]["body_truncated"] is True
 
 
 def test_search_sessions_body_not_match(
@@ -1135,6 +1197,17 @@ def test_build_haystack_includes_tool_use_and_result() -> None:
     assert "plain user text" in haystack
     assert "pytest" in haystack
     assert "5 passed" in haystack
+
+
+def test_build_haystack_caps_chars() -> None:
+    from ai_r.parsers.models import Message
+
+    msgs = [
+        Message(role="user", text="abc"),
+        Message(role="assistant", text="def"),
+    ]
+
+    assert _build_haystack(msgs, max_chars=4) == "abc\n"
 
 
 def test_extract_snippet_centers_on_term() -> None:
