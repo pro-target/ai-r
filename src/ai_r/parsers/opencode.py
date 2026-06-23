@@ -67,6 +67,8 @@ output.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import glob
 import hashlib
 import json
@@ -74,6 +76,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +91,12 @@ _PartTuple = Tuple[dict, Optional[int]]
 _TITLE_MAX_LEN = 100
 _DEFAULT_DB = "~/.local/share/opencode/opencode.db"
 
+# Temp DB copies orphan on crash/SIGKILL/MCP-client disconnect.  The
+# sweeper (below) unlinks any ``/tmp/ai_r_opencode_*.db`` older than
+# this TTL so a concurrent live request's fresh temp file is never
+# removed.
+_TEMP_DB_TTL_SEC = 1800  # 30 minutes
+
 
 class _TemporaryCopyConnection(sqlite3.Connection):
     """SQLite connection that removes its temporary DB copy on close."""
@@ -100,11 +109,78 @@ class _TemporaryCopyConnection(sqlite3.Connection):
             super().close()
         finally:
             if temp_path:
+                _untrack_temp_connection(self)
                 try:
                     os.unlink(temp_path)
                 except FileNotFoundError:
                     pass
                 self._ai_r_temp_path = None
+
+
+# --- temp-copy orphan reaping -------------------------------------------
+#
+# A module-level registry of active temp-copy connections plus a
+# best-effort sweeper.  The sweeper runs at most once per process
+# (lazy, on first :func:`_open_db` call — never at import time to keep
+# tests side-effect free) and unlinks any ``/tmp/ai_r_opencode_*.db``
+# older than ``_TEMP_DB_TTL_SEC``.  An :func:`atexit` hook closes any
+# connections still tracked at normal shutdown so their temp files are
+# unlinked too.
+_active_temp_conns: set[sqlite3.Connection] = set()
+_active_temp_conns_lock = threading.Lock()
+_sweeper_done = False
+_sweeper_lock = threading.Lock()
+
+
+def _track_temp_connection(conn: sqlite3.Connection) -> None:
+    with _active_temp_conns_lock:
+        _active_temp_conns.add(conn)
+
+
+def _untrack_temp_connection(conn: sqlite3.Connection) -> None:
+    with _active_temp_conns_lock:
+        _active_temp_conns.discard(conn)
+
+
+def _sweep_temp_copies() -> None:
+    """Best-effort unlink of orphaned ``/tmp/ai_r_opencode_*.db`` files.
+
+    Only files whose mtime is older than :data:`_TEMP_DB_TTL_SEC` are
+    removed, so a concurrent live request's fresh temp file is never
+    touched.  All unlink errors are swallowed.
+    """
+    cutoff = time.time() - _TEMP_DB_TTL_SEC
+    for stale in glob.glob("/tmp/ai_r_opencode_*.db"):
+        try:
+            if os.path.getmtime(stale) < cutoff:
+                os.unlink(stale)
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+
+
+def _maybe_sweep_temp_copies() -> None:
+    """Run :func:`_sweep_temp_copies` at most once per process."""
+    global _sweeper_done
+    with _sweeper_lock:
+        if _sweeper_done:
+            return
+        _sweeper_done = True
+    _sweep_temp_copies()
+
+
+def _atexit_close_temp_connections() -> None:
+    """Close (and thus unlink) temp-copy connections still tracked."""
+    with _active_temp_conns_lock:
+        conns = list(_active_temp_conns)
+        _active_temp_conns.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+atexit.register(_atexit_close_temp_connections)
 
 
 def _expand(path: str) -> str:
@@ -164,6 +240,7 @@ def _resolve_db_paths(
 
 def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
     """Open an OpenCode DB read-only, retrying on lock, falling back to copy."""
+    _maybe_sweep_temp_copies()
     for backoff in (0.0, 0.5, 1.0, 2.0):
         try:
             uri = f"file:{db_path}?mode=ro"
@@ -193,6 +270,7 @@ def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
             factory=_TemporaryCopyConnection,
         )
         conn._ai_r_temp_path = tmp_path
+        _track_temp_connection(conn)
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
     except Exception:
@@ -204,19 +282,105 @@ def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
         return None
 
 
+# --- TTL-bounded per-thread RO connection pool -------------------------
+#
+# MCP server tools run sync in a ThreadPoolExecutor → the parser is
+# called from multiple threads.  Each thread gets its own cached RO
+# connection (``threading.local()``); a cached conn is reused only
+# while younger than :data:`_CONN_TTL_SEC`, which bounds the connection
+# lifetime and avoids serving stale WAL snapshots indefinitely.  On
+# cache miss / expiry / lock the pool delegates (re)opening to
+# :func:`_open_db`, which already implements the retry + /tmp-copy
+# fallback contract — that logic is NOT duplicated here.
+_CONN_TTL_SEC = 60  # seconds a cached RO connection may be reused
+
+_conn_pool = threading.local()
+
+
+def _pooled_conn(db_path: str):
+    """Context manager yielding a cached RO connection for ``db_path``.
+
+    Each thread keeps at most one cached connection per DB path.  A
+    cached connection is reused only while younger than
+    :data:`_CONN_TTL_SEC`; otherwise it is closed and reopened.  All
+    (re)opening goes through :func:`_open_db` so the lock-fallback /
+    /tmp-copy contract is preserved.
+
+    The connection is NOT closed on context exit — it stays cached for
+    the next call on the same thread.  Closes happen only on expiry
+    (next call past TTL) or process teardown (atexit / GC).
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        cache = getattr(_conn_pool, "conns", None)
+        if cache is None:
+            cache = {}
+            _conn_pool.conns = cache
+
+        entry = cache.get(db_path)
+        conn: Optional[sqlite3.Connection] = None
+        if entry is not None:
+            cached_conn, opened_at = entry
+            if time.monotonic() - opened_at < _CONN_TTL_SEC:
+                conn = cached_conn
+
+        if conn is None:
+            # Close + drop any stale cached entry, then (re)open.
+            if db_path in cache:
+                old_conn, _ = cache.pop(db_path)
+                _close_pooled(old_conn)
+            conn = _open_db(db_path)
+            if conn is None:
+                # Nothing to yield; let the caller's ``if conn is not
+                # None`` / exception handling deal with it.
+                raise _PoolOpenError(db_path)
+            cache[db_path] = (conn, time.monotonic())
+
+        try:
+            yield conn
+        except sqlite3.Error:
+            # A SQLite error mid-use likely means the cached conn is
+            # bad — drop it so the next call reopens.
+            cache.pop(db_path, None)
+            _close_pooled(conn)
+            raise
+
+    return _cm()
+
+
+class _PoolOpenError(RuntimeError):
+    """Raised internally when :func:`_open_db` returns ``None``."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(f"Could not open OpenCode DB: {db_path}")
+
+
+def _close_pooled(conn: sqlite3.Connection) -> None:
+    """Close a (possibly temp-copy) pooled connection, best-effort."""
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
 def _iter_dbs(
     base_dir: Optional[str], override: Optional[str]
 ) -> Iterable[Tuple[str, sqlite3.Connection]]:
     """Yield ``(path, conn)`` for every readable OpenCode DB.
 
-    The caller is responsible for closing the connection.  Connections
-    that fail to open are silently skipped (we surface the error in
-    :func:`list_sessions` only if no DB at all could be opened).
+    Uses the per-thread TTL-bounded connection pool; the yielded
+    connection is NOT closed on exhaustion of the generator (it stays
+    cached for reuse).  Connections that fail to open are silently
+    skipped.
     """
     for path in _resolve_db_paths(base_dir, override):
-        conn = _open_db(path)
-        if conn is not None:
-            yield path, conn
+        try:
+            with _pooled_conn(path) as conn:
+                yield path, conn
+        except _PoolOpenError:
+            continue
 
 
 def _epoch_ms_to_datetime(ms: int) -> datetime:
@@ -304,9 +468,9 @@ def list_sessions(
                 )
                 sessions.append(session)
         except sqlite3.Error:
+            # The pooled conn may be bad — drop it so the next call
+            # reopens.  (The pool's own except also handles this.)
             continue
-        finally:
-            conn.close()
 
     sessions.sort(key=lambda s: s.date, reverse=True)
     return sessions
@@ -346,8 +510,6 @@ def _read_session_by_uuid(
             )
         except sqlite3.Error:
             continue
-        finally:
-            conn.close()
     raise FileNotFoundError(f"OpenCode session {uuid!r} not found")
 
 
@@ -552,30 +714,25 @@ def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
     those messages degrade to empty text.
     """
     messages: List[Message] = []
-    conn = _open_db(db_path)
-    if conn is None:
-        return messages
     try:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='part'"
-            )
-            has_parts = cursor.fetchone() is not None
-        except sqlite3.Error:
-            has_parts = False
+        cm = _pooled_conn(db_path)
+        with cm as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='part'"
+                )
+                has_parts = cursor.fetchone() is not None
+            except sqlite3.Error:
+                has_parts = False
 
-        sql = _SELECT_MESSAGES_WITH_PARTS if has_parts else _SELECT_MESSAGES_ONLY
-        rows = cursor.execute(sql, (uuid,)).fetchall()
-    except sqlite3.Error:
-        conn.close()
+            sql = _SELECT_MESSAGES_WITH_PARTS if has_parts else _SELECT_MESSAGES_ONLY
+            rows = cursor.execute(sql, (uuid,)).fetchall()
+    except _PoolOpenError:
         return messages
-    finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+    except sqlite3.Error:
+        return messages
 
     # Group consecutive rows by mid (ORDER BY keeps a message's rows
     # contiguous).  Each row carries one part (or NULL pdata for a
@@ -680,8 +837,6 @@ def session_exists(
             row = cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
         except sqlite3.Error:
             continue
-        finally:
-            conn.close()
         if row is not None:
             return True
     return False
