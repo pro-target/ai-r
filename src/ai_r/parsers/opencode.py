@@ -73,6 +73,7 @@ import json
 import os
 import shutil
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,6 +87,24 @@ _PartTuple = Tuple[dict, Optional[int]]
 
 _TITLE_MAX_LEN = 100
 _DEFAULT_DB = "~/.local/share/opencode/opencode.db"
+
+
+class _TemporaryCopyConnection(sqlite3.Connection):
+    """SQLite connection that removes its temporary DB copy on close."""
+
+    _ai_r_temp_path: str | None = None
+
+    def close(self) -> None:
+        temp_path = self._ai_r_temp_path
+        try:
+            super().close()
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                self._ai_r_temp_path = None
 
 
 def _expand(path: str) -> str:
@@ -161,12 +180,27 @@ def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
 
     try:
         h = hashlib.sha1(db_path.encode()).hexdigest()[:16]
-        tmp_path = f"/tmp/ai_r_opencode_{h}.db"
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f"ai_r_opencode_{h}_",
+            suffix=".db",
+        )
+        os.close(fd)
         shutil.copy2(db_path, tmp_path)
-        conn = sqlite3.connect(tmp_path, timeout=30.0)
+        os.chmod(tmp_path, 0o600)
+        conn = sqlite3.connect(
+            tmp_path,
+            timeout=30.0,
+            factory=_TemporaryCopyConnection,
+        )
+        conn._ai_r_temp_path = tmp_path
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
     except Exception:
+        if "tmp_path" in locals():
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
         return None
 
 
