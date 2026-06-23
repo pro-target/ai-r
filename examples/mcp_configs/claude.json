@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ai-r": {
+      "command": "/opt/ai-r/.venv/bin/ai-r-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
