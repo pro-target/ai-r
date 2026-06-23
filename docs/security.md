@@ -1,0 +1,79 @@
+# Security: untrusted session content
+
+`ai-reader` is a **read-only** session reader. It has no write surface
+and no access-control layer (see
+[Architecture -> read-only](architecture.md)). The security concern
+is not *who may read* a session -- it is *what the reader's caller does
+with the content*.
+
+## Threat model
+
+Agent session logs contain arbitrary text: user prompts, fetched web
+pages, tool inputs and outputs, file contents the agent read, and
+output from other models. None of this is trusted.
+
+A consumer that feeds session content into an LLM (an auditor, a
+summarizer, an orchestrator that replays a session, a reviewer agent)
+passes that untrusted text into a model's context. Session content can
+and does contain instruction-shaped strings: attempts to override the
+consuming model's instructions, tool-call JSON embedded in a fetched
+web page, or another agent's reasoning that *describes* a dangerous
+command.
+
+A naive consumer treats these as instructions. The model may obey
+content that originated inside a session log it was only asked to
+*read*. This is prompt injection via session logs.
+
+## This is not theoretical
+
+During the audit that produced this note, a consumer agent that had
+read an untrusted session via `read_session` had a Bash action gated
+by a prompt-injection guard, which fired correctly. Session logs from
+every supported agent (Claude, Codex, OpenCode, Antigravity, Pi)
+routinely contain fetches, tool outputs, and cross-agent text -- all
+untrusted.
+
+## What `ai-reader` does (and does not)
+
+`ai-reader` is the parser layer. It **does not** sanitize, classify,
+or redact instruction-shaped content -- doing so would silently destroy
+session fidelity, which defeats the purpose of a reader. Session text
+is returned verbatim.
+
+The boundary is deliberate: trust decisions belong to the **consumer**,
+not the reader.
+
+## What consumers must do
+
+Treat every string returned by `read_session` / `read_messages` /
+`search_sessions` as **untrusted data**, not as instructions:
+
+1. **Frame as data.** Wrap session content so the consuming model
+   understands it is a record to analyze, not a directive.
+2. **Never auto-execute** a tool call, shell command, or file write
+   that originates *inside* session content. Gate every side-effecting
+   action behind human approval, and verify the action matches the
+   consumer's own task -- not the session's text.
+3. **Sandbox the consumer.** Run audit/replay agents with a
+   prompt-injection action gate (a hook that blocks risky tools once
+   untrusted content has entered context) and minimal filesystem /
+   network permissions.
+4. **Review cross-agent content twice.** Sessions that reference other
+   sessions (via `find_file_edits`, quoted transcripts, or pasted logs)
+   chain untrusted sources -- the injection surface compounds.
+
+## `find_file_edits` intent extraction
+
+`find_file_edits` returns an `intent` string mined from the session
+that edited a file. That string is session-derived and therefore
+untrusted by the same rule: display it, cite it, but do not act on it
+as an instruction.
+
+## Related
+
+- [Architecture](architecture.md) -- read-only design, no access layer.
+- The `ee72961` access-control removal decision (see
+  [Architecture -> Decisions](architecture.md#decisions)):
+  authorization ("may caller read") was removed because the repo is
+  public; this threat model is the *orthogonal* concern -- *what the
+  reader's caller does with content*.

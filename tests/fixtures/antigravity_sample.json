@@ -1,0 +1,17 @@
+{
+  "session_id": "test-ag-1",
+  "events": [
+    {
+      "timestamp": "2026-06-14T10:00:00Z",
+      "source": "USER_EXPLICIT",
+      "type": "USER_INPUT",
+      "content": "<USER_REQUEST>Set up the lab</USER_REQUEST>"
+    },
+    {
+      "timestamp": "2026-06-14T10:00:05Z",
+      "source": "MODEL",
+      "type": "MODEL_OUTPUT",
+      "content": "ok"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{"timestamp":"2026-06-14T10:00:00Z","type":"session_meta","payload":{"id":"event-msg-1","cwd":"/tmp/work","timestamp":"2026-06-14T10:00:00Z"}}
+{"timestamp":"2026-06-14T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"text","text":"hello world from response_item"}]}}
+{"timestamp":"2026-06-14T10:00:03Z","type":"event_msg","payload":{"type":"user_message","message":"hello world from response_item"}}
+{"timestamp":"2026-06-14T10:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hi there."}]}}

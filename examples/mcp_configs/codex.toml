@@ -1,0 +1,6 @@
+# Codex MCP config — merge into ~/.codex/config.toml
+# Codex reads TOML; this is the [mcp_servers] section.
+
+[mcp_servers.ai-reader]
+command = "/opt/ai-reader/.venv/bin/ai-reader-mcp"
+args = []

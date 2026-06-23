@@ -1,0 +1,10 @@
+{
+  // OpenCode MCP config — merge into ~/.config/opencode/opencode.jsonc
+  // (JSONC allows comments.)
+  "mcp": {
+    "ai-reader": {
+      "command": "/opt/ai-reader/.venv/bin/ai-reader-mcp",
+      "args": []
+    }
+  }
+}
