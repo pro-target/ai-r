@@ -36,12 +36,24 @@ untrusted.
 ## What `ai-r` does (and does not)
 
 `ai-r` is the parser layer. It **does not** sanitize, classify,
-or redact instruction-shaped content -- doing so would silently destroy
-session fidelity, which defeats the purpose of a reader. Session text
-is returned verbatim.
+or redact instruction-shaped content by default -- doing so would
+silently destroy session fidelity, which defeats the purpose of a
+reader. Session text is returned verbatim.
 
 The boundary is deliberate: trust decisions belong to the **consumer**,
 not the reader.
+
+For consumers that feed session text into another LLM, `ai-r` exposes
+`ai_r.security.sanitize_session_text()`. The helper is opt-in: it wraps
+content in an explicit untrusted-data frame and can bound prompt size,
+but it preserves the original text instead of trying to remove
+instruction-shaped strings.
+
+The MCP server also applies output-size guards. `read_session` caps the
+projected MCP message list, and `search_sessions(scope="body"|"all")`
+caps body-search messages and haystack bytes. These guards protect MCP
+payload size; they are not a trust decision and do not make session
+content safe to execute.
 
 ## What consumers must do
 
