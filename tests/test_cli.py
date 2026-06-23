@@ -1209,3 +1209,131 @@ def test_cli_find_file_edits_agent_filter(
     payload = json.loads(out)
     assert payload["count"] == 1
     assert payload["records"][0]["agent"] == "claude"
+
+
+# ---------------------------------------------------------------------------
+# detect-agent / detect-session / export rounds  (smoke coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_detect_agent_env_named() -> None:
+    """``detect-agent`` honours ``AGENT_NAME`` and prints the agent name.
+
+    In-process so the env var reaches ``_detect_agent_with_source``
+    cleanly.  ``AGENT_NAME`` is first in the detection cascade, so it
+    wins regardless of other host agent env vars.
+    """
+    rc, out, err = _run_inproc(
+        ["detect-agent", "--quiet"],
+        env={"AGENT_NAME": "claude"},
+    )
+    assert rc == 0, err
+    assert out.strip() == "claude"
+
+
+def test_cli_detect_agent_human_format() -> None:
+    """Non-quiet mode prints both ``agent:`` and ``source:`` lines."""
+    rc, out, err = _run_inproc(
+        ["detect-agent"],
+        env={"AGENT_NAME": "claude"},
+    )
+    assert rc == 0, err
+    assert "agent:" in out
+    assert "source:" in out
+    assert "CLAUDE" in out
+
+
+def test_cli_detect_session_env_override() -> None:
+    """``detect-session`` surfaces the ``AI_SESSION_ID`` override candidate.
+
+    ``AI_SESSION_ID`` is the universal (step-1) signal — always emits a
+    candidate with ``verified=True``.  We use ``--json`` so the output
+    is a stable array we can assert against even if the host also has
+    per-session flag files.
+    """
+    sentinel = "smoke-detected-session-id"
+    rc, out, err = _run_inproc(
+        ["detect-session", "--json"],
+        env={"AI_SESSION_ID": sentinel},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert isinstance(payload, list)
+    assert len(payload) >= 1
+    ids = [c["id"] for c in payload]
+    assert sentinel in ids
+    # The env-override candidate is always verified.
+    match = next(c for c in payload if c["id"] == sentinel)
+    assert match["verified"] is True
+    assert match["source"] == "AI_SESSION_ID"
+
+
+def test_cli_detect_session_count_env_override() -> None:
+    """``--count`` returns at least 1 when ``AI_SESSION_ID`` is set."""
+    rc, out, err = _run_inproc(
+        ["detect-session", "--count"],
+        env={"AI_SESSION_ID": "smoke-count-session"},
+    )
+    assert rc == 0, err
+    assert int(out.strip()) >= 1
+
+
+def test_cli_export_rounds_stdout(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``export rounds`` renders markdown for a session with messages."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["export", "rounds", "--agent", "claude", uuid],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    # session_to_rounds emits a markdown header + changelog entry.
+    assert uuid in out
+    assert "#" in out  # some markdown heading
+
+
+def test_cli_export_rounds_to_file(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """``--output PATH`` writes the markdown to disk."""
+    uuid = fake_claude_session_with_tools.stem
+    dest = tmp_path / "rounds.md"
+    rc, out, err = _run_inproc(
+        ["export", "rounds", "--agent", "claude", uuid, "--output", str(dest)],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert dest.is_file()
+    body = dest.read_text(encoding="utf-8")
+    assert uuid in body
+    assert len(body) > 0
+
+
+def test_cli_export_rounds_include_round(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--include-round`` pulls messages via read_messages and enriches output."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["export", "rounds", "--agent", "claude", uuid, "--include-round"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert uuid in out
+
+
+def test_cli_export_rounds_not_found(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``export rounds`` on a missing uuid exits 3 (shared resolution path)."""
+    rc, out, err = _run_inproc(
+        ["export", "rounds", "--agent", "claude", "definitely-not-here"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 3
+    assert "not found" in err.lower()
