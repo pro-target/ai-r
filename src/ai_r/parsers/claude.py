@@ -41,7 +41,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from ._common import _parse_iso_timestamp
+from ._common import (
+    _parse_iso_timestamp,
+    _qa_entry,
+    _qa_options_from_question,
+    _qa_pairs_from_result_text,
+)
 from .models import AgentName, Message, Session
 
 
@@ -371,7 +376,16 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
                         )
                     except (TypeError, ValueError):
                         input_str = str(raw_input)
-                tool_use.append({"name": name, "input": input_str})
+                entry = {"name": name, "input": input_str}
+                # Carry the AskUserQuestion id + structured questions so a
+                # later pass can pair them with the user's chosen answer
+                # (the answer text lives only in the matching tool_result).
+                if name == "AskUserQuestion" and isinstance(raw_input, dict):
+                    questions = raw_input.get("questions")
+                    if isinstance(questions, list):
+                        entry["_ask_id"] = part.get("id", "")
+                        entry["_ask_questions"] = questions
+                tool_use.append(entry)
             elif part_type == "tool_result":
                 result_content = part.get("content", "")
                 if isinstance(result_content, list):
@@ -386,7 +400,11 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
                     result_str = result_content
                 else:
                     result_str = ""
-                tool_result.append({"content": result_str})
+                result_entry = {"content": result_str}
+                tuid = part.get("tool_use_id")
+                if isinstance(tuid, str) and tuid:
+                    result_entry["_tool_use_id"] = tuid
+                tool_result.append(result_entry)
     elif isinstance(content, str):
         text_chunks.append(content)
     return Message(
@@ -413,8 +431,95 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
                 if msg is not None:
                     messages.append(msg)
     except OSError:
-        return messages
-    return messages
+        return _link_ask_user_questions(messages)
+    return _link_ask_user_questions(messages)
+
+
+def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
+    """Pair ``AskUserQuestion`` calls with the user's answers.
+
+    Claude records an interactive question as an assistant ``tool_use``
+    (name ``AskUserQuestion`` carrying the structured ``questions``) and
+    the user's reply as a ``tool_result`` in a following user-role
+    record.  The chosen-answer text lives ONLY in that result string
+    (``"question"="answer", ...``), so the pairing must join the two by
+    ``tool_use_id``.
+
+    Returns a new list where every answer-bearing message gains a
+    populated :attr:`~ai_r.parsers.models.Message.qa` tuple; internal
+    linkage keys (``_ask_id`` / ``_ask_questions`` / ``_tool_use_id``)
+    are stripped from the surfaced ``tool_use`` / ``tool_result`` entries
+    so they never leak downstream.  Messages without an answered question
+    are returned unchanged.
+    """
+    # Map AskUserQuestion tool_use_id -> its structured questions list.
+    ask_by_id: dict[str, list] = {}
+    for msg in messages:
+        for tu in msg.tool_use:
+            if not isinstance(tu, dict):
+                continue
+            ask_id = tu.get("_ask_id")
+            questions = tu.get("_ask_questions")
+            if isinstance(ask_id, str) and ask_id and isinstance(questions, list):
+                ask_by_id[ask_id] = questions
+
+    def _scrub_tool_use(entries: Tuple[dict, ...]) -> Tuple[dict, ...]:
+        return tuple(
+            {k: v for k, v in e.items() if not k.startswith("_")}
+            if isinstance(e, dict) else e
+            for e in entries
+        )
+
+    def _scrub_tool_result(entries: Tuple[dict, ...]) -> Tuple[dict, ...]:
+        return tuple(
+            {k: v for k, v in e.items() if not k.startswith("_")}
+            if isinstance(e, dict) else e
+            for e in entries
+        )
+
+    out: List[Message] = []
+    for msg in messages:
+        qa: List[dict] = []
+        for tr in msg.tool_result:
+            if not isinstance(tr, dict):
+                continue
+            tuid = tr.get("_tool_use_id")
+            if not (isinstance(tuid, str) and tuid in ask_by_id):
+                continue
+            questions = ask_by_id[tuid]
+            pairs = _qa_pairs_from_result_text(tr.get("content", ""))
+            # Build a question-text -> options lookup so each parsed
+            # answer pair can be enriched with the options that were
+            # offered (the result string carries text only).
+            opts_by_q: dict[str, Tuple[str, ...]] = {}
+            for q in questions:
+                if isinstance(q, dict):
+                    qtext = q.get("question")
+                    if isinstance(qtext, str):
+                        opts_by_q[qtext.strip()] = _qa_options_from_question(q)
+            for q_text, answer in pairs:
+                qa.append(
+                    _qa_entry(q_text, opts_by_q.get(q_text, ()), answer)
+                )
+
+        needs_scrub = any(
+            isinstance(e, dict) and any(k.startswith("_") for k in e)
+            for e in (*msg.tool_use, *msg.tool_result)
+        )
+        if not qa and not needs_scrub:
+            out.append(msg)
+            continue
+        out.append(
+            Message(
+                role=msg.role,
+                text=msg.text,
+                tool_use=_scrub_tool_use(msg.tool_use),
+                tool_result=_scrub_tool_result(msg.tool_result),
+                timestamp=msg.timestamp,
+                qa=tuple(qa),
+            )
+        )
+    return out
 
 
 def read_messages(

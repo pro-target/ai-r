@@ -142,11 +142,40 @@ def _pi_text(parts: object) -> str:
     return "\n".join(chunks)
 
 
+def _render_qa(qa: Any) -> str:
+    """Render a message's ``qa`` entries as readable ``Q: ... A: ...`` lines.
+
+    Each entry is a ``{"question", "options", "answer"}`` dict (the
+    cross-agent interactive question→answer pair).  Rendering the
+    *question alongside the answer* is the whole point: a bare answer
+    label ("option B") is useless without the question it answered, so
+    both are always emitted together.
+    """
+    lines: List[str] = []
+    for entry in qa or ():
+        if not isinstance(entry, dict):
+            continue
+        question = entry.get("question") or ""
+        answer = entry.get("answer") or ""
+        if not (question or answer):
+            continue
+        lines.append(f"[question→answer] Q: {question} A: {answer}")
+    return "\n".join(lines)
+
+
 def _project_message_content(m: Any) -> str:
-    """Return compact MCP content for text or user/assistant tool-only messages."""
+    """Return compact MCP content for text or user/assistant tool-only messages.
+
+    Interactive question→answer pairs (``m.qa``) are always rendered when
+    present so the user's reply to an ``AskUserQuestion`` /
+    ``request_user_input`` / ``question`` prompt surfaces in the message
+    body even though it lives in a tool-result record.
+    """
+    qa_text = _render_qa(getattr(m, "qa", ()) or ())
+
     text = getattr(m, "text", "")
     if isinstance(text, str) and text:
-        return text
+        return f"{text}\n{qa_text}" if qa_text else text
 
     chunks: List[str] = []
     for tool in getattr(m, "tool_use", ()) or ():
@@ -154,6 +183,8 @@ def _project_message_content(m: Any) -> str:
         chunks.append(f"[tool_use: {name}]" if name else "[tool_use]")
     for _ in getattr(m, "tool_result", ()) or ():
         chunks.append("[tool_result]")
+    if qa_text:
+        chunks.append(qa_text)
     return "\n".join(chunks)
 
 
@@ -170,12 +201,33 @@ def _project_messages(
     """
     out: List[dict[str, Any]] = []
     for m in messages:
-        if m.role not in ("user", "assistant"):
+        qa = getattr(m, "qa", ()) or ()
+        # Surface user/assistant messages as before; additionally surface
+        # ``tool``-role messages *only* when they carry an interactive
+        # question→answer pair (Codex records the answer on the
+        # function_call_output, a tool-role record).  A bare tool message
+        # without qa stays dropped to preserve the historical MCP shape.
+        if m.role not in ("user", "assistant") and not qa:
             continue
         content = _project_message_content(m)
         if not content:
             continue
-        out.append({"role": m.role, "content": content})
+        # Codex's answer-bearing record is role "tool"; relabel it "user"
+        # so the answer reads as the user's reply (it is) and the output
+        # shape stays {user|assistant}.
+        role = m.role if m.role in ("user", "assistant") else "user"
+        entry: dict[str, Any] = {"role": role, "content": content}
+        if qa:
+            entry["qa"] = [
+                {
+                    "question": e.get("question", ""),
+                    "options": list(e.get("options", ()) or ()),
+                    "answer": e.get("answer", ""),
+                }
+                for e in qa
+                if isinstance(e, dict)
+            ]
+        out.append(entry)
         if hard_cap and hard_cap > 0 and len(out) >= hard_cap:
             break
     return out

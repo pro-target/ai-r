@@ -39,7 +39,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from ._common import _is_valid_uuid, _parse_iso_timestamp
+from ._common import (
+    _is_valid_uuid,
+    _parse_iso_timestamp,
+    _qa_from_codex,
+)
 from .models import AgentName, Message, Session
 
 
@@ -291,6 +295,16 @@ def _codex_message_text(payload: dict) -> str:
     return _extract_text_from_parts(payload.get("content", []))
 
 
+def _safe_json(blob: object) -> object:
+    """Best-effort ``json.loads`` returning ``None`` on any failure."""
+    if not isinstance(blob, str) or not blob.strip():
+        return None
+    try:
+        return json.loads(blob)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
 def _extract_messages_from_rollout(path: Path) -> List[Message]:
     """Read a Codex rollout JSONL into structured :class:`Message` objects.
 
@@ -306,6 +320,11 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     """
     messages: List[Message] = []
     seen_user_texts: set[str] = set()
+    # Pending request_user_input calls: call_id -> structured questions.
+    # The chosen answers arrive later in the matching function_call_output,
+    # so we buffer the questions and pair them by call_id when the output
+    # lands (the answer text is keyed by question id, not positional).
+    pending_questions: dict[str, list] = {}
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -347,6 +366,20 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                                 input_str = json.dumps(arguments, ensure_ascii=False)
                             except (TypeError, ValueError):
                                 input_str = str(arguments)
+                        # request_user_input is Codex's interactive-question
+                        # tool: buffer its questions so the later output can
+                        # be paired into a question->answer ``qa``.
+                        if name == "request_user_input":
+                            call_id = payload.get("call_id")
+                            parsed_args = (
+                                arguments
+                                if isinstance(arguments, dict)
+                                else _safe_json(input_str)
+                            )
+                            if isinstance(call_id, str) and isinstance(parsed_args, dict):
+                                questions = parsed_args.get("questions")
+                                if isinstance(questions, list):
+                                    pending_questions[call_id] = questions
                         messages.append(
                             Message(
                                 role="assistant",
@@ -362,12 +395,19 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                                 output = json.dumps(output, ensure_ascii=False)
                             except (TypeError, ValueError):
                                 output = str(output)
+                        call_id = payload.get("call_id")
+                        qa: tuple = ()
+                        if isinstance(call_id, str) and call_id in pending_questions:
+                            questions = pending_questions.pop(call_id)
+                            answers_obj = _safe_json(output)
+                            qa = tuple(_qa_from_codex(questions, answers_obj))
                         messages.append(
                             Message(
                                 role="tool",
                                 text="",
                                 tool_result=({"content": output},),
                                 timestamp=env_ts,
+                                qa=qa,
                             )
                         )
                 # verified against Codex CLI 2026-05 snapshot; recheck on schema change

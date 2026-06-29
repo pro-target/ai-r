@@ -93,6 +93,17 @@ class Message:
             input serialized to a string (JSON for structured inputs).
         tool_result: Tuple of ``{"content": str}`` dicts for tool
             return values.
+        qa: Tuple of ``{"question": str, "options": tuple[str, ...],
+            "answer": str}`` dicts capturing the user's reply to an
+            interactive agent question (Claude ``AskUserQuestion``,
+            Codex ``request_user_input``, OpenCode ``question``).  Each
+            entry pairs the *question text* with the *answer the user
+            chose* so a downstream reader never sees a bare "option B"
+            without the question it answered.  ``options`` lists the
+            offered choices (may be empty when the format omits them);
+            ``answer`` is the chosen label(s) joined by ``" | "`` for
+            multi-select.  Empty when the message carries no answered
+            question, so existing consumers are unaffected.
     """
 
     role: str
@@ -100,6 +111,7 @@ class Message:
     tool_use: Tuple[dict, ...] = ()
     tool_result: Tuple[dict, ...] = ()
     timestamp: Optional[datetime] = None
+    qa: Tuple[dict, ...] = ()
 
 
 __all__ = ["AgentName", "Message", "Session"]

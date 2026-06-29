@@ -592,6 +592,234 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
 
 
 @pytest.fixture
+def fake_claude_session_with_ask(tmp_sessions_dir: Path) -> Path:
+    """A Claude session with an AskUserQuestion call + answered tool_result.
+
+    Mirrors the real wire shape: an assistant ``tool_use`` named
+    ``AskUserQuestion`` carrying ``input.questions`` and a following
+    user-role record holding the matching ``tool_result`` whose content
+    is the human-readable ``"question"="answer"`` string.
+    """
+    session_id = "claude-ask-1"
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-q" / f"{session_id}.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Plan the work"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_ask1",
+                            "name": "AskUserQuestion",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "Which approach?",
+                                        "header": "Approach",
+                                        "multiSelect": False,
+                                        "options": [
+                                            {"label": "Option A",
+                                             "description": "first"},
+                                            {"label": "Option B",
+                                             "description": "second"},
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_ask1",
+                            "content": (
+                                'Your questions have been answered: '
+                                '"Which approach?"="Option B". '
+                                "You can now continue with these answers in mind."
+                            ),
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:10Z",
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_codex_session_with_ask(tmp_sessions_dir: Path) -> Path:
+    """A Codex rollout with a request_user_input call + answered output.
+
+    Codex stores the call as a ``function_call`` named
+    ``request_user_input`` (args carry ``questions`` with per-question
+    ``id``) and the answer as the matching ``function_call_output``
+    whose ``output`` is ``{"answers": {"<id>": {"answers": [...]}}}``.
+    """
+    uuid = "codex-ask-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T12-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": uuid, "cwd": "/tmp/work"},
+            },
+            {
+                "timestamp": "2026-06-14T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "request_user_input",
+                    "call_id": "call_ask1",
+                    "arguments": json.dumps(
+                        {
+                            "questions": [
+                                {
+                                    "id": "mode",
+                                    "header": "Mode",
+                                    "question": "Which mode?",
+                                    "options": [
+                                        {"label": "Fast", "description": "f"},
+                                        {"label": "Safe", "description": "s"},
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-14T12:00:08Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_ask1",
+                    "output": json.dumps(
+                        {"answers": {"mode": {"answers": ["Safe"]}}}
+                    ),
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_opencode_db_with_ask(tmp_sessions_dir: Path) -> Path:
+    """OpenCode DB whose assistant message carries a ``question`` tool part.
+
+    The question tool stores the offered questions in ``state.input`` and
+    the chosen answers in ``state.metadata.answers`` (a list parallel to
+    the questions; multi-select yields more than one label).
+    """
+    db_path = tmp_sessions_dir / "opencode_ask.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE session (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT,
+            title        TEXT,
+            time_created INTEGER,
+            time_updated INTEGER
+        );
+        CREATE TABLE message (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, NULL, ?, ?, ?)",
+        ("oc-ask-1", "Ask session", 1_716_000_000_000, 1_716_000_500_000),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        ("aq", "oc-ask-1", 1_716_000_200_000, 1_716_000_200_000,
+         json.dumps({"role": "assistant"})),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        ("aq-p0", "aq", "oc-ask-1", 1_716_000_200_000, 1_716_000_200_000,
+         json.dumps({
+             "type": "tool",
+             "tool": "question",
+             "callID": "c1",
+             "state": {
+                 "status": "completed",
+                 "input": {
+                     "questions": [
+                         {
+                             "question": "Scope?",
+                             "header": "Scope",
+                             "options": [
+                                 {"label": "Small", "description": "s"},
+                                 {"label": "Big", "description": "b"},
+                             ],
+                         },
+                         {
+                             "question": "Extras?",
+                             "header": "Extras",
+                             "options": [
+                                 {"label": "Tests", "description": "t"},
+                                 {"label": "Docs", "description": "d"},
+                             ],
+                         },
+                     ]
+                 },
+                 "output": (
+                     'User has answered your questions: '
+                     '"Scope?"="Small", "Extras?"="Tests | Docs".'
+                 ),
+                 "metadata": {
+                     "answers": [["Small"], ["Tests", "Docs"]],
+                     "truncated": False,
+                 },
+             },
+         })),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
 def fake_antigravity_brain_with_transcript(tmp_sessions_dir: Path) -> Path:
     """A brain directory whose transcript_full.jsonl carries user/model records."""
     brain = tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / "ag-tools-1"

@@ -93,6 +93,7 @@ from ._opencode_db import (
     _iter_dbs,
     _pooled_conn,  # noqa: F401  re-export
 )
+from ._common import _qa_from_structured_answers
 from .models import AgentName, Message, Session
 
 
@@ -618,6 +619,7 @@ def _build_message(
     text_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
+    qa: List[dict] = []
 
     # Fallback: legacy DBs that stored content inside message.data.
     if message_data is not None and not parts:
@@ -653,6 +655,17 @@ def _build_message(
             output = state.get("output")
             if output is not None:
                 tool_result.append({"content": _stringify(output)})
+            # OpenCode's ``question`` tool is its interactive-question
+            # surface: the offered questions live in ``state.input`` and
+            # the chosen answers in ``state.metadata.answers`` (a list
+            # parallel to the questions). Pair them into a ``qa`` entry.
+            if name == "question":
+                questions = inp.get("questions") if isinstance(inp, dict) else None
+                metadata = state.get("metadata")
+                answers = (
+                    metadata.get("answers") if isinstance(metadata, dict) else None
+                )
+                qa.extend(_qa_from_structured_answers(questions, answers))
         elif ptype in ("file", "patch"):
             tool_use.append(
                 {"name": ptype, "input": _part_metadata_input(part), "timestamp": ts_for_entry}
@@ -665,6 +678,7 @@ def _build_message(
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
         timestamp=timestamp,
+        qa=tuple(qa),
     )
 
 

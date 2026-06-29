@@ -260,6 +260,14 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
 
 
 
+# NOTE (interactive question→answer pairs): the parsed Antigravity surface
+# (overview.txt / transcript*.jsonl) has NO structured interactive-question
+# record — observed record ``type`` values are PLANNER_RESPONSE / VIEW_FILE /
+# GREP_SEARCH / USER_INPUT / ... with no AskUserQuestion-style call+answer.
+# (Antigravity's planning UI may emit such prompts, but only as free-text
+# inside model reasoning, not as a parseable question→answer pair.)
+# Antigravity therefore never populates :attr:`Message.qa`.  Recheck if a
+# structured ask-question record type appears.
 def _antigravity_message_from_record(record: dict) -> Optional[Message]:
     """Map an Antigravity transcript record to a :class:`Message`.
 

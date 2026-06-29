@@ -257,6 +257,11 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
 
 
 
+# NOTE (interactive question→answer pairs): the Pi session format has NO
+# native interactive-question tool — its only ``toolCall`` names observed
+# in real sessions are ordinary tools (bash/read/edit/write/...), with no
+# AskUserQuestion / request_user_input / question equivalent.  Pi therefore
+# never populates :attr:`Message.qa`.  Recheck if Pi adds such a tool.
 def _pi_extract_message(
     message: dict, timestamp: Optional[datetime] = None
 ) -> Optional[Message]:
