@@ -63,6 +63,14 @@ cannot:
   every agent, each tagged with the user request that triggered it.
   "Did any agent run a deploy last week?" "Show me every shell command
   Codex executed." (see `find-tool-calls`).
+- **What changed, why, and where the churn is.** Three read-only lenses
+  over the same edit stream: `find-file-edits` answers *what* files were
+  touched, `find-tool-calls` carries the *why* (the user request behind
+  each call, as `intent`), and `file-frequency` rolls both up to show
+  *which* files change most — ranked by edits, distinct sessions,
+  distinct requests, and the agents involved. "Which file is the
+  hot spot, and how many separate requests keep dragging me back to it?"
+  (see `file-frequency`).
 - **Replay a session as a CHANGELOG round.** Render a session into
   Goal / Status / Files touched / Decisions / Next-actions markdown — a
   handoff doc you can paste into another agent or a standup (see
@@ -185,6 +193,10 @@ ai-r find-file-edits "config" --agent claude --limit 20
 # what did agents run? exact tool name or substring pattern, time-boxed
 ai-r find-tool-calls Bash --since 2026-06-01
 ai-r find-tool-calls --pattern deploy --agent codex
+
+# which files change most? rank by edits / sessions / distinct requests / agents
+ai-r file-frequency --top 10
+ai-r file-frequency --path src/ --agent claude --since 2026-06-01
 
 # which agent / session am I in (scripts, orchestration, self-resume)
 ai-r detect-agent --quiet          # → e.g. "claude"

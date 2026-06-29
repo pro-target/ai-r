@@ -15,6 +15,7 @@ from ai_r.cli.commands import (
     detect_agent,
     detect_session,
     export,
+    file_frequency,
     find_file_edits,
     find_tool_calls,
     list_cmd,
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.register(sub)
     find_file_edits.register(sub)
     find_tool_calls.register(sub)
+    file_frequency.register(sub)
     detect_agent.register(sub)
     detect_session.register(sub)
     export.register(sub)
