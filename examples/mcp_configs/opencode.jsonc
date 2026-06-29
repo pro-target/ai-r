@@ -1,0 +1,11 @@
+{
+  // OpenCode MCP config — merge into ~/.config/opencode/opencode.jsonc
+  // (JSONC allows comments.)
+  "mcp": {
+    "ai-r": {
+      "type": "local",
+      "command": ["/opt/ai-r/.venv/bin/ai-r-mcp"],
+      "enabled": true
+    }
+  }
+}

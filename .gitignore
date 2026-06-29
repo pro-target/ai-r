@@ -1,0 +1,57 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Local data
+.local/
+data/
+
+# Agent-local memory (serena, etc.) — not for repo
+.serena/
+
+# Internal working/audit notes — private, not for public repo
+_docs/
+TODO.md
+
+# Maintainer-only commit pipeline (personal, depends on ~/.agents) — not for public repo
+automation.sh
+docs/commit-identity.md
+
+# Node/npm artifacts (repo is Python; npm only used by throwaway scaffolds)
+package-lock.json
+node_modules/

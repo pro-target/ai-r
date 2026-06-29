@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "ai-r": { "type": "stdio", "command": "ai-r-mcp", "args": [], "env": {} }
+  }
+}

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests with coverage gate
+        run: |
+          pytest --cov=src/ai_r --cov-fail-under=80 --cov-report=term
+
+      - name: Validate install.sh in dry-run mode
+        run: |
+          DRY_RUN=1 bash install.sh || true
+
+      - name: Validate uninstall.sh in dry-run mode
+        run: |
+          DRY_RUN=1 bash uninstall.sh || true
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Smoke-import every public module
+        run: |
+          python -c "import ai_r, ai_r.cli, ai_r.mcp_server"
+          python -c "import ai_r.parsers"
+          python -c "import ai_r.parsers.claude, ai_r.parsers.codex"
+          python -c "import ai_r.parsers.opencode, ai_r.parsers.antigravity"
+          python -c "import ai_r.legacy_compat"
