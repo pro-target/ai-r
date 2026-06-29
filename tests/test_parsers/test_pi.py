@@ -16,9 +16,8 @@ from ai_r.parsers.pi import (
 )
 
 
-def test_list_sessions_real(real_pi_dir: Path | None) -> None:
-    if real_pi_dir is None:
-        pytest.skip("no real Pi sessions on this host")
+def test_list_sessions_real(real_pi_dir: Path) -> None:
+    # ``real_pi_dir`` auto-skips when the host has no Pi data (see conftest).
     sessions = pi.list_sessions(base_dir=str(real_pi_dir))
     assert sessions, "expected at least one Pi session on this host"
     for s in sessions[:3]:

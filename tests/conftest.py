@@ -23,6 +23,34 @@ import pytest
 pytest_plugins: list[str] = []
 
 
+# Fixtures that read the *real* user home.  A test requesting any of these
+# is host-dependent and gets auto-tagged ``@pytest.mark.host`` so the
+# hermetic CI job (``pytest -m "not host"``) deselects it.
+_HOST_FIXTURES = frozenset(
+    {
+        "real_claude_dir",
+        "real_codex_dir",
+        "real_opencode_db",
+        "real_pi_dir",
+        "real_antigravity_root",
+    }
+)
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Auto-tag every test that depends on real host data with ``host``.
+
+    Keeps the hermetic invariant honest without each author remembering to
+    add the marker by hand: requesting a ``real_*`` fixture *is* the signal.
+    """
+    for item in items:
+        fixturenames = getattr(item, "fixturenames", ())
+        if _HOST_FIXTURES.intersection(fixturenames):
+            item.add_marker(pytest.mark.host)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_ai_r_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -860,32 +888,49 @@ _REAL_ANTIGRAVITY_DIRS: List[Path] = [
 ]
 
 
-@pytest.fixture(scope="session")
-def real_claude_dir() -> Path | None:
-    return _REAL_CLAUDE_DIR if _REAL_CLAUDE_DIR.is_dir() else None
+# These probes intentionally read the *real* user home.  Each one
+# ``pytest.skip``s its requesting test when the host has no data, so the
+# absence of local sessions can NEVER turn a run red — it only skips.
+# Any test that takes one of these fixtures is auto-tagged ``@pytest.mark.host``
+# (see ``pytest_collection_modifyitems`` below) and is therefore excluded
+# from the hermetic CI job.  This is the single source of truth for the
+# "host data missing -> skip, never fail" invariant.
 
 
 @pytest.fixture(scope="session")
-def real_codex_dir() -> Path | None:
-    return _REAL_CODEX_DIR if _REAL_CODEX_DIR.is_dir() else None
+def real_claude_dir() -> Path:
+    if not _REAL_CLAUDE_DIR.is_dir():
+        pytest.skip("no real Claude sessions on this host")
+    return _REAL_CLAUDE_DIR
 
 
 @pytest.fixture(scope="session")
-def real_opencode_db() -> Path | None:
-    return _REAL_OPENCODE_DB if _REAL_OPENCODE_DB.is_file() else None
+def real_codex_dir() -> Path:
+    if not _REAL_CODEX_DIR.is_dir():
+        pytest.skip("no real Codex sessions on this host")
+    return _REAL_CODEX_DIR
 
 
 @pytest.fixture(scope="session")
-def real_pi_dir() -> Path | None:
-    return _REAL_PI_DIR if _REAL_PI_DIR.is_dir() else None
+def real_opencode_db() -> Path:
+    if not _REAL_OPENCODE_DB.is_file():
+        pytest.skip("no real OpenCode DB on this host")
+    return _REAL_OPENCODE_DB
 
 
 @pytest.fixture(scope="session")
-def real_antigravity_root() -> Path | None:
+def real_pi_dir() -> Path:
+    if not _REAL_PI_DIR.is_dir():
+        pytest.skip("no real Pi sessions on this host")
+    return _REAL_PI_DIR
+
+
+@pytest.fixture(scope="session")
+def real_antigravity_root() -> Path:
     for root in _REAL_ANTIGRAVITY_DIRS:
         if root.is_dir() and any(root.iterdir()):
             return root
-    return None
+    pytest.skip("no real Antigravity brain dirs on this host")
 
 
 # ---------------------------------------------------------------------------

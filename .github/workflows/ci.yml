@@ -34,6 +34,13 @@ jobs:
         run: |
           pytest --cov=src/ai_r --cov-fail-under=80 --cov-report=term
 
+      - name: Hermetic test gate (clean home, host tests deselected)
+        # Proves the suite is green on a machine with zero local session
+        # data. Any non-host test that secretly depends on the real home
+        # fails here instead of silently reddening main.
+        run: |
+          HOME="$(mktemp -d)" pytest -m "not host" --cov=src/ai_r --cov-fail-under=80 --cov-report=term
+
       - name: Validate install.sh in dry-run mode
         run: |
           DRY_RUN=1 bash install.sh || true

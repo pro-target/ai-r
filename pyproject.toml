@@ -49,6 +49,9 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 asyncio_mode = "auto"
+markers = [
+    "host: test reads real ~/.claude|.codex|opencode|.pi|.gemini data; auto-applied to any test using a real_* fixture; skipped when absent and deselected by the hermetic CI job",
+]
 
 [tool.coverage.run]
 source = ["src/ai_r"]

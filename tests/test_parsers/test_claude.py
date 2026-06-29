@@ -28,14 +28,10 @@ from ai_r.parsers.claude import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not Path("~/.claude/projects").expanduser().is_dir(),
-    reason="no real Claude projects dir on this host",
-)
 def test_list_sessions_real(real_claude_dir: Path) -> None:
-    sessions = claude.list_sessions()  # uses AI_R_HOME? no, uses ~/.claude
-    # When AI_R_HOME is set (autouse fixture), parser redirects there.
-    # So we must use base_dir to test the real tree.
+    # ``real_claude_dir`` auto-skips when the host has no Claude data (conftest).
+    # The autouse ``_isolate_ai_r_home`` fixture redirects AI_R_HOME at a fake
+    # tree, so we pass ``base_dir`` explicitly to read the real one.
     sessions = claude.list_sessions(base_dir=str(real_claude_dir))
     assert sessions, "expected at least one Claude session on this host"
     for s in sessions[:5]:

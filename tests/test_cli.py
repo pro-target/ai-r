@@ -168,8 +168,20 @@ def test_cli_no_subcommand_returns_1() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_list_claude() -> None:
-    p = _run_cli("list", "--agent", "claude")
+def test_cli_list_claude(tmp_sessions_dir: Path) -> None:
+    # Hermetic: seed a fake home and point AI_R_HOME at it, so the test
+    # does not depend on real sessions existing on the runner.
+    _write_claude_session(
+        tmp_sessions_dir,
+        "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a",
+        "Hermetic list session",
+    )
+    p = _run_cli(
+        "list",
+        "--agent",
+        "claude",
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
     assert p.returncode == 0, p.stderr
     assert "UUID" in p.stdout
     assert "AGENT" in p.stdout
@@ -350,9 +362,19 @@ def test_cli_search_json() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_inproc_list_claude() -> None:
+def test_cli_inproc_list_claude(tmp_sessions_dir: Path) -> None:
     """In-process: drives ``cli.main`` directly so coverage counts."""
-    rc, out, err = _run_inproc(["list", "--agent", "claude"])
+    # Hermetic: seed a fake home so the listing does not rely on the runner
+    # having real Claude sessions.
+    _write_claude_session(
+        tmp_sessions_dir,
+        "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a",
+        "Hermetic inproc list session",
+    )
+    rc, out, err = _run_inproc(
+        ["list", "--agent", "claude"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
     assert rc == 0
     assert "UUID" in out
 

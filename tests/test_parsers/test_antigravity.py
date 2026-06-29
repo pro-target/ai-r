@@ -1,9 +1,8 @@
 """Tests for the Antigravity brain parser.
 
-The real ``~/.gemini/antigravity/brain`` directory on the test host is
-empty (no Antigravity installation), so all real-data assertions are
-guarded by ``skipif``.  The synthetic fixture in ``conftest.py`` covers
-the parser logic in isolation.
+When the host has no Antigravity brain dir, the ``real_antigravity_root``
+fixture auto-skips these real-data tests (see conftest).  The synthetic
+fixture in ``conftest.py`` covers the parser logic in isolation.
 """
 from __future__ import annotations
 
@@ -28,10 +27,8 @@ from ai_r.parsers.antigravity import (
 # ---------------------------------------------------------------------------
 
 
-def test_list_sessions_real(real_antigravity_root: Path | None) -> None:
-    if real_antigravity_root is None:
-        pytest.skip("no real Antigravity brain dir on this host")
-
+def test_list_sessions_real(real_antigravity_root: Path) -> None:
+    # ``real_antigravity_root`` auto-skips when no brain dir exists (conftest).
     sessions = antigravity.list_sessions(base_dir=str(real_antigravity_root))
     assert isinstance(sessions, list)
     for s in sessions[:3]:
@@ -39,10 +36,8 @@ def test_list_sessions_real(real_antigravity_root: Path | None) -> None:
         assert s.title
 
 
-def test_scan_brain_real_smoke(real_antigravity_root: Path | None) -> None:
-    if real_antigravity_root is None:
-        pytest.skip("no real Antigravity brain dir on this host")
-
+def test_scan_brain_real_smoke(real_antigravity_root: Path) -> None:
+    # ``real_antigravity_root`` auto-skips when no brain dir exists (conftest).
     for brain in sorted(real_antigravity_root.iterdir(), key=lambda p: p.name):
         session = _scan_brain(brain)
         if session is None:
