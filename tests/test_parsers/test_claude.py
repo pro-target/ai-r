@@ -479,3 +479,94 @@ def test_extract_decisions_tech_filter() -> None:
     assert any("port 8080" in d for d in decisions)
     assert any("docker" in d.lower() for d in decisions)
     assert not any("fridge" in d.lower() for d in decisions)
+
+
+# ---------------------------------------------------------------------------
+# Subagent tree (kind + parent_uuid) — directory form + inline sidechain
+# ---------------------------------------------------------------------------
+
+
+def test_list_sessions_discovers_subagent_dir_form(
+    fake_claude_subagent: Path, tmp_sessions_dir: Path
+) -> None:
+    """A ``subagents/agent-*.jsonl`` file is discovered and tagged subagent."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    sessions = claude.list_sessions(base_dir=base)
+    assert len(sessions) == 1
+    sub = sessions[0]
+    assert sub.uuid == "agent-sub-1"
+    assert sub.kind == "subagent"
+    assert sub.parent_uuid == "parent-claude-1"
+    # project slug skips the per-session + subagents folders.
+    assert sub.extra.get("project_slug") == "proj-a"
+
+
+def test_top_level_session_defaults_to_agent_kind(
+    fake_claude_session: Path, tmp_sessions_dir: Path
+) -> None:
+    """A normal session is ``kind='agent'`` with no parent."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    session = claude.read_session("test-claude-1", base_dir=base)
+    assert session.kind == "agent"
+    assert session.parent_uuid is None
+
+
+def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
+    """An inline ``isSidechain: True`` record classifies the session."""
+    base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
+    jsonl = base / "inline-sidechain.jsonl"
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "inline task"},
+            "timestamp": "2026-06-14T12:00:00Z",
+            "parentUuid": "inline-parent-9",
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid == "inline-parent-9"
+
+
+def test_isSidechain_false_stays_agent(tmp_sessions_dir: Path) -> None:
+    """``isSidechain: False`` present on every record must NOT mark subagent.
+
+    Guards the value-not-presence rule: real Claude data carries the key
+    set to ``False`` on normal records.
+    """
+    base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
+    jsonl = base / "normal-with-key.jsonl"
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "normal task"},
+            "timestamp": "2026-06-14T12:00:00Z",
+            "parentUuid": "some-parent",
+            "isSidechain": False,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "agent"
+    assert session.parent_uuid is None
+
+
+def test_read_subagent_session_by_uuid(
+    fake_claude_subagent: Path, tmp_sessions_dir: Path
+) -> None:
+    """A subagent session can be resolved + read by its agent-* uuid."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    session = claude.read_session("agent-sub-1", base_dir=base)
+    assert session.kind == "subagent"
+    msgs = claude.read_messages("agent-sub-1", base_dir=base)
+    assert any(m.role == "user" for m in msgs)

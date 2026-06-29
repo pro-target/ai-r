@@ -54,8 +54,15 @@ class Session:
             for Antigravity this is the number of records in the
             overview.txt / transcript.jsonl; for Pi this is the number
             of user/assistant message entries.
-        parent_uuid: For OpenCode sub-sessions (``session.parent_id``).
-            ``None`` for top-level sessions and for other agents.
+        parent_uuid: For OpenCode sub-sessions (``session.parent_id``)
+            and for Claude subagent sessions (the parent session uuid
+            inferred from the ``subagents/`` directory layout or the
+            ``parentUuid`` field of an inline sidechain record).  ``None``
+            for top-level sessions and for agents without subagent support.
+        kind: ``"agent"`` for a normal top-level session, ``"subagent"``
+            for a spawned subagent (sidechain) session.  Defaults to
+            ``"agent"``.  Subagent detection is currently implemented only
+            for Claude; every other parser leaves this at ``"agent"``.
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.
@@ -68,6 +75,7 @@ class Session:
     path: str
     message_count: int
     parent_uuid: Optional[str] = None
+    kind: str = "agent"
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 

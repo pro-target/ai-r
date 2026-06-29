@@ -186,16 +186,54 @@ def extract_title(
     return title if title is not None else "Untitled"
 
 
+def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
+    """Return the parent-session uuid for a ``subagents/`` file, else ``None``.
+
+    Claude stores spawned subagents under
+    ``projects/<slug>/<parent-uuid>/subagents/agent-*.jsonl`` *or*
+    ``projects/<slug>/subagents/agent-*.jsonl``.  When the file sits in a
+    ``subagents`` directory, the parent uuid is the name of the directory
+    holding ``subagents`` (the parent session's own folder).  Returns
+    ``None`` when the path is not a subagent file or the parent folder name
+    is not usable as a uuid (e.g. the project slug itself).
+    """
+    parent = jsonl_path.parent
+    if parent.name != "subagents":
+        return None
+    grandparent_name = parent.parent.name
+    # The directory wrapping ``subagents/`` is normally the parent session
+    # uuid folder.  If it is the project slug (no per-session folder), we
+    # have no reliable parent uuid from the path and fall back to ``None``;
+    # the in-file ``parentUuid``/``sessionId`` scan can still supply one.
+    if not grandparent_name:
+        return None
+    return grandparent_name
+
+
 def _scan_file(jsonl_path: Path) -> Optional[Session]:
     """Build a :class:`Session` from one Claude JSONL file.
 
     Returns ``None`` if the file yields no usable title/timestamp.
+
+    Subagent detection covers both on-disk shapes:
+
+    * **directory form** — the file lives under a ``subagents/`` folder
+      (``.../<parent-uuid>/subagents/agent-*.jsonl``); the parent uuid is
+      taken from the folder wrapping ``subagents/``.
+    * **inline form** — any record carries ``isSidechain: true``; the
+      parent uuid is read from that record's ``parentUuid`` field.
+
+    The presence of an ``isSidechain`` *key* is NOT a signal — only the
+    value ``True`` marks a sidechain (Claude writes ``isSidechain: false``
+    on every normal record).
     """
     custom_title: Optional[str] = None
     ai_title: Optional[str] = None
     first_user_text: Optional[str] = None
     last_timestamp: Optional[datetime] = None
     message_count = 0
+    is_sidechain = False
+    inline_parent_uuid: Optional[str] = None
 
     try:
         with jsonl_path.open("r", encoding="utf-8") as fh:
@@ -213,6 +251,16 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
                 ts = _parse_iso_timestamp(record.get("timestamp", ""))
                 if ts is not None:
                     last_timestamp = ts
+
+                # Inline sidechain detection: value must be True, the mere
+                # presence of the key is not enough (it is False everywhere
+                # on normal records).
+                if record.get("isSidechain") is True:
+                    is_sidechain = True
+                    if inline_parent_uuid is None:
+                        raw_parent = record.get("parentUuid")
+                        if isinstance(raw_parent, str) and raw_parent.strip():
+                            inline_parent_uuid = raw_parent.strip()
 
                 rec_type = record.get("type")
                 if rec_type == "custom-title" and custom_title is None:
@@ -251,7 +299,20 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         except OSError:
             return None
 
-    project_slug = jsonl_path.parent.name
+    # Resolve subagent classification + parent uuid from BOTH the directory
+    # layout and any inline sidechain marker.  The path-derived parent uuid
+    # wins when present (it is the canonical parent-session folder); the
+    # in-file ``parentUuid`` is the fallback for the inline form.
+    path_parent_uuid = _parent_uuid_from_subagent_path(jsonl_path)
+    is_subagent = path_parent_uuid is not None or is_sidechain
+    parent_uuid = path_parent_uuid or inline_parent_uuid
+
+    # project_slug is the first non-``subagents`` ancestor folder name.
+    slug_dir = jsonl_path.parent
+    if slug_dir.name == "subagents":
+        slug_dir = slug_dir.parent.parent
+    project_slug = slug_dir.name
+
     return Session(
         uuid=jsonl_path.stem,
         agent=AgentName.CLAUDE,
@@ -259,6 +320,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         date=last_timestamp,
         path=str(jsonl_path),
         message_count=message_count,
+        parent_uuid=parent_uuid,
+        kind="subagent" if is_subagent else "agent",
         extra={"project_slug": project_slug},
     )
 
@@ -275,12 +338,25 @@ def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
         return []
 
     sessions: List[Session] = []
-    for jsonl_path in root.glob("*/*.jsonl"):
-        if not jsonl_path.is_file():
-            continue
-        session = _scan_file(jsonl_path)
-        if session is not None:
-            sessions.append(session)
+    seen: set[str] = set()
+    # Two discovery passes:
+    #  1. ``<slug>/<uuid>.jsonl`` — top-level sessions (and inline-sidechain
+    #     files, which live alongside their parent and are classified by
+    #     ``_scan_file`` via the ``isSidechain`` marker).
+    #  2. ``**/subagents/agent-*.jsonl`` — directory-form subagent sessions,
+    #     which the shallow ``*/*.jsonl`` glob never reaches.
+    globs = ("*/*.jsonl", "**/subagents/agent-*.jsonl")
+    for pattern in globs:
+        for jsonl_path in root.glob(pattern):
+            if not jsonl_path.is_file():
+                continue
+            key = str(jsonl_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            session = _scan_file(jsonl_path)
+            if session is not None:
+                sessions.append(session)
 
     sessions.sort(key=lambda s: s.date, reverse=True)
     return sessions
@@ -300,9 +376,10 @@ def _find_session_file(uuid: str, base_dir: Optional[str]) -> Path:
         raise ValueError(f"Invalid Claude session uuid: {uuid!r}")
 
     root = _resolve_base_dir(base_dir)
-    for jsonl_path in root.glob(f"*/{uuid}.jsonl"):
-        if jsonl_path.is_file():
-            return jsonl_path
+    for pattern in (f"*/{uuid}.jsonl", f"**/subagents/{uuid}.jsonl"):
+        for jsonl_path in root.glob(pattern):
+            if jsonl_path.is_file():
+                return jsonl_path
 
     raise FileNotFoundError(
         f"Claude session {uuid!r} not found under {root}"

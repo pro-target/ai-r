@@ -130,6 +130,54 @@ def fake_claude_session(tmp_sessions_dir: Path) -> Path:
 
 
 @pytest.fixture
+def fake_claude_subagent(tmp_sessions_dir: Path) -> Path:
+    """A Claude subagent session under ``<parent-uuid>/subagents/agent-*.jsonl``.
+
+    Mirrors the real directory-form layout: the parent session has its own
+    folder named after its uuid, and spawned subagents live in a
+    ``subagents`` sub-directory.  Records carry ``isSidechain: True`` and a
+    ``parentUuid`` pointing at the parent session (the directory name is the
+    authoritative parent uuid).
+    """
+    parent_uuid = "parent-claude-1"
+    agent_id = "agent-sub-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / parent_uuid
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Do the subtask"},
+                "timestamp": "2026-06-14T11:00:00Z",
+                "sessionId": agent_id,
+                "parentUuid": parent_uuid,
+                "isSidechain": True,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Subtask done."}],
+                },
+                "timestamp": "2026-06-14T11:00:05Z",
+                "sessionId": agent_id,
+                "parentUuid": parent_uuid,
+                "isSidechain": True,
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
 def fake_codex_session(tmp_sessions_dir: Path) -> Path:
     """A single Codex rollout file inside the fake sessions tree."""
     uuid = "test-codex-1"

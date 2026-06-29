@@ -299,6 +299,66 @@ def test_extract_messages_dispatches_to_claude(
     assert _extract_messages(s)[0]["content"] == "Hello, world"
 
 
+def test_extract_messages_surfaces_tool_input_and_intent(
+    fake_claude_session_with_tools: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Feature 1: tool_use content shows the call input + assistant intent.
+
+    The fixture's assistant message runs ``Bash`` with
+    ``{"command": "pytest"}`` after a user "Run the tests" turn, so the
+    projected assistant message must (a) embed the command in its content
+    and (b) carry ``intent`` = the previous user request.
+    """
+    from ai_r.parsers.models import Session
+
+    base = fake_claude_session_with_tools.parent.parent  # .../projects
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: base
+    )
+    s = Session(
+        uuid="claude-tools-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_claude_session_with_tools),
+        message_count=3,
+    )
+    msgs = _extract_messages(s)
+    assistant = next(m for m in msgs if m["role"] == "assistant")
+    # Feature 1.1: the Bash command (the key input) is surfaced, not a
+    # bare ``[tool_use: Bash]`` placeholder.
+    assert "Bash" in assistant["content"]
+    assert "pytest" in assistant["content"]
+    assert "command=" in assistant["content"]
+    # Feature 1.2: intent = the previous user request.
+    assert assistant.get("intent") == "Run the tests"
+
+
+def test_extract_messages_surfaces_timestamp(
+    fake_claude_session_with_tools: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Feature 2: every projected message carries an ISO timestamp."""
+    from ai_r.parsers.models import Session
+
+    base = fake_claude_session_with_tools.parent.parent  # .../projects
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: base
+    )
+    s = Session(
+        uuid="claude-tools-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_claude_session_with_tools),
+        message_count=3,
+    )
+    msgs = _extract_messages(s)
+    assistant = next(m for m in msgs if m["role"] == "assistant")
+    ts = assistant["timestamp"]
+    assert ts  # non-empty ISO string
+    assert ts.startswith("2026-06-14T10:00:05")
+
+
 def test_extract_messages_dispatches_to_codex(
     fake_codex_session: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -363,7 +423,8 @@ def test_extract_messages_dispatches_to_opencode(
     msgs = _extract_messages(s)
     assert msgs, "expected non-empty opencode messages"
     for m in msgs:
-        assert set(m.keys()) == {"role", "content"}
+        assert {"role", "content"} <= set(m.keys())
+        assert set(m.keys()) <= {"role", "content", "timestamp", "intent", "qa"}
     roles = [m["role"] for m in msgs]
     assert roles == ["user", "assistant"]
 
@@ -390,7 +451,8 @@ def test_extract_messages_dispatches_to_antigravity(
     msgs = _extract_messages(s)
     assert msgs, "expected non-empty antigravity messages"
     for m in msgs:
-        assert set(m.keys()) == {"role", "content"}
+        assert {"role", "content"} <= set(m.keys())
+        assert set(m.keys()) <= {"role", "content", "timestamp", "intent", "qa"}
 
 
 def test_extract_messages_all_agents_dispatch() -> None:
@@ -501,6 +563,58 @@ def test_list_sessions_limit_zero_is_uncapped(
     assert result["truncated"] is False
 
 
+def test_list_sessions_surfaces_subagent_kind_and_parent(
+    fake_claude_subagent: Path,
+    tmp_sessions_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent session is summarised with ``kind`` + ``parent_uuid``."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = list_sessions(agent="claude")
+    assert result["total"] == 1
+    s = result["sessions"][0]
+    assert s["uuid"] == "agent-sub-1"
+    assert s["kind"] == "subagent"
+    assert s["parent_uuid"] == "parent-claude-1"
+
+
+def test_list_sessions_kind_filter(
+    fake_claude_subagent: Path,
+    fake_claude_session: Path,
+    tmp_sessions_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``kind=`` selects only agents / only subagents; omitted returns both."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+    both = list_sessions(agent="claude")
+    assert both["total"] == 2
+
+    only_sub = list_sessions(agent="claude", kind="subagent")
+    assert only_sub["total"] == 1
+    assert only_sub["sessions"][0]["uuid"] == "agent-sub-1"
+    assert only_sub["sessions"][0]["kind"] == "subagent"
+
+    only_agent = list_sessions(agent="claude", kind="agent")
+    assert only_agent["total"] == 1
+    assert only_agent["sessions"][0]["uuid"] == "test-claude-1"
+    assert only_agent["sessions"][0]["kind"] == "agent"
+
+
+def test_list_sessions_invalid_kind_returns_error_dict() -> None:
+    """An unknown ``kind`` is surfaced as a structured error dict."""
+    result = list_sessions(agent="claude", kind="banana")
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "kind" in result["message"].lower()
+
+
 def test_read_session_invalid_uuid_returns_error_dict() -> None:
     result = read_session(uuid="", agent="claude")
     assert isinstance(result, dict)
@@ -566,9 +680,12 @@ def test_read_session_returns_capped_role_content_list(
     assert isinstance(msgs, list)
     assert len(msgs) == 2
     for m in msgs:
-        assert set(m.keys()) == {"role", "content"}
-    assert msgs[0] == {"role": "user", "content": "Hello, world"}
-    assert msgs[1] == {"role": "assistant", "content": "Hi there!"}
+        assert {"role", "content"} <= set(m.keys())
+        assert set(m.keys()) <= {"role", "content", "timestamp", "intent", "qa"}
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "Hello, world"
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == "Hi there!"
     # Pagination fields.
     assert result["total"] == 2
     assert result["offset"] == 0
@@ -717,11 +834,14 @@ def test_read_session_claude_tool_only_messages_not_blank(
 
     result = read_session(uuid="tool-only-1", agent="claude")
     msgs = result["messages"]
-    assert msgs == [
-        {"role": "assistant", "content": "[tool_use: Bash]"},
-        {"role": "user", "content": "[tool_result]"},
-        {"role": "assistant", "content": "done"},
+    # tool_use input "ls" is not valid JSON → raw-string fallback, so the
+    # call surfaces as "[tool_use: Bash ls]".  timestamps are now attached.
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("assistant", "[tool_use: Bash ls]"),
+        ("user", "[tool_result]"),
+        ("assistant", "done"),
     ]
+    assert msgs[0]["timestamp"] == "2026-06-14T10:00:00+00:00"
     assert all(m["content"] for m in msgs)
 
 
@@ -740,7 +860,8 @@ def test_read_session_mcp_drops_tool_messages(
     roles = [m["role"] for m in msgs]
     assert roles == ["user", "assistant"]
     for m in msgs:
-        assert set(m.keys()) == {"role", "content"}
+        assert {"role", "content"} <= set(m.keys())
+        assert set(m.keys()) <= {"role", "content", "timestamp", "intent", "qa"}
 
 
 def test_message_and_read_messages_reexported() -> None:

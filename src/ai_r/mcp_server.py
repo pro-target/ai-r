@@ -1,11 +1,13 @@
 """MCP server entry point for ai-r.
 
-Exposes five tools over the Model Context Protocol:
+Exposes these tools over the Model Context Protocol:
 
 * :func:`list_sessions`  — enumerate sessions, optionally filtered by agent.
 * :func:`read_session`   — load a single session by ``uuid`` and ``agent``.
 * :func:`find_file_edits` — find file edits across sessions.
 * :func:`find_tool_calls` — find arbitrary tool calls across sessions.
+* :func:`session_diff`   — reconstruct what a session changed, without git.
+* :func:`session_stats`  — group + rank sessions (by agent/dir/date/kind).
 * :func:`search_sessions` — case-insensitive search across title and/or
   message bodies with AND/OR/NOT operators and Google-style ``-term``
   negative prefixes.
@@ -19,6 +21,7 @@ protocol — that would corrupt the JSON-RPC stream.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import sys
@@ -40,9 +43,12 @@ from ai_r.find_file_edits import (  # noqa: E402
     coerce_agent as _coerce_agent,
     find_file_edits as _find_file_edits_core,
     iso as _iso,
+    previous_user_intent as _previous_user_intent,
     target_agents as _target_agents,
 )
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
+from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
+from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import Session  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
 
@@ -53,6 +59,12 @@ _MESSAGES_CAP = 100
 _MESSAGES_HARD_CAP = 1000
 _BODY_SEARCH_MESSAGE_CAP = 1000
 _HAYSTACK_CHARS_CAP = 1_000_000
+# Max chars of a single tool_use input value surfaced in read_session
+# content.  tool_use.input is RAW, untrusted session content (a JSON
+# string) — bound it so an oversized/adversarial blob cannot flood the
+# MCP output.  Mirrors the size-bounding philosophy of
+# ``ai_r.security.sanitize_session_text(max_chars=...)``.
+_TOOL_INPUT_CHARS_CAP = 400
 _LIST_LIMIT_DEFAULT = 100
 
 # --- Body-search haystack cache -------------------------------------------
@@ -96,6 +108,8 @@ def _session_summary(session: Session) -> dict[str, Any]:
         "title": session.title,
         "date": _iso(session.date),
         "message_count": session.message_count,
+        "kind": session.kind,
+        "parent_uuid": session.parent_uuid,
     }
 
 
@@ -164,6 +178,61 @@ def _render_qa(qa: Any) -> str:
     return "\n".join(lines)
 
 
+# Per-tool "key input" keys, ordered by preference.  The first key present
+# in the parsed input wins.  Bash-style commands and file-tool paths are the
+# high-signal inputs for understanding *what* a tool call did.
+_TOOL_INPUT_KEYS: tuple[str, ...] = (
+    "command",
+    "file_path",
+    "path",
+    "notebook_path",
+    "pattern",
+    "query",
+    "url",
+)
+
+
+def _tool_use_summary(tool: dict) -> str:
+    """Render one ``tool_use`` entry as ``[tool_use: NAME ...key input...]``.
+
+    ``tool.input`` is the RAW tool input serialized to a string (JSON for
+    structured inputs — see parsers/models.py:91-93).  It is untrusted
+    session content, so:
+
+    * we ``json.loads`` it and surface only a key input value (command /
+      path / query …) when the JSON is an object;
+    * on any decode failure we fall back to a truncated slice of the raw
+      string;
+    * every surfaced value is bounded by ``_TOOL_INPUT_CHARS_CAP`` so an
+      oversized/adversarial blob cannot flood the output.
+    """
+    name = tool.get("name") if isinstance(tool, dict) else None
+    if not name:
+        return "[tool_use]"
+
+    raw = tool.get("input") if isinstance(tool, dict) else None
+    detail = ""
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            detail = raw[:_TOOL_INPUT_CHARS_CAP]
+        else:
+            if isinstance(parsed, dict):
+                for key in _TOOL_INPUT_KEYS:
+                    val = parsed.get(key)
+                    if isinstance(val, str) and val.strip():
+                        detail = f"{key}={val[:_TOOL_INPUT_CHARS_CAP]}"
+                        break
+                else:
+                    # No known key — surface a compact slice of the dict.
+                    detail = json.dumps(parsed)[:_TOOL_INPUT_CHARS_CAP]
+            else:
+                detail = str(parsed)[:_TOOL_INPUT_CHARS_CAP]
+
+    return f"[tool_use: {name} {detail}]" if detail else f"[tool_use: {name}]"
+
+
 def _project_message_content(m: Any) -> str:
     """Return compact MCP content for text or user/assistant tool-only messages.
 
@@ -174,16 +243,24 @@ def _project_message_content(m: Any) -> str:
     """
     qa_text = _render_qa(getattr(m, "qa", ()) or ())
 
+    chunks: List[str] = []
     text = getattr(m, "text", "")
     if isinstance(text, str) and text:
-        return f"{text}\n{qa_text}" if qa_text else text
+        chunks.append(text)
 
-    chunks: List[str] = []
+    # tool_use summaries are surfaced even alongside text: an assistant
+    # message often carries both narration ("I'll run them now.") *and* the
+    # actual call, and the call input is the high-signal part for
+    # understanding what happened.  tool_result placeholders stay dropped
+    # when text is present (results are not load-bearing for read_session).
     for tool in getattr(m, "tool_use", ()) or ():
-        name = tool.get("name") if isinstance(tool, dict) else None
-        chunks.append(f"[tool_use: {name}]" if name else "[tool_use]")
-    for _ in getattr(m, "tool_result", ()) or ():
-        chunks.append("[tool_result]")
+        if isinstance(tool, dict):
+            chunks.append(_tool_use_summary(tool))
+        else:
+            chunks.append("[tool_use]")
+    if not text:
+        for _ in getattr(m, "tool_result", ()) or ():
+            chunks.append("[tool_result]")
     if qa_text:
         chunks.append(qa_text)
     return "\n".join(chunks)
@@ -201,7 +278,7 @@ def _project_messages(
     messages.
     """
     out: List[dict[str, Any]] = []
-    for m in messages:
+    for idx, m in enumerate(messages):
         qa = getattr(m, "qa", ()) or ()
         # Surface user/assistant messages as before; additionally surface
         # ``tool``-role messages *only* when they carry an interactive
@@ -218,6 +295,19 @@ def _project_messages(
         # shape stays {user|assistant}.
         role = m.role if m.role in ("user", "assistant") else "user"
         entry: dict[str, Any] = {"role": role, "content": content}
+        # Timeline (Feature 2): surface the message timestamp in ISO form,
+        # ``None`` when the parser carried no timestamp.  ``_iso`` requires a
+        # datetime, so guard the ``None`` case explicitly.
+        ts = getattr(m, "timestamp", None)
+        entry["timestamp"] = _iso(ts) if ts is not None else None
+        # Intent (Feature 1): for assistant messages that invoke a tool,
+        # attach the previous user request that motivated the call.  Reuse
+        # ``previous_user_intent`` over the *full* message list so the index
+        # walk-back sees dropped tool/text records too.
+        if role == "assistant" and (getattr(m, "tool_use", ()) or ()):
+            intent = _previous_user_intent(messages, idx)
+            if intent:
+                entry["intent"] = intent
         if qa:
             entry["qa"] = [
                 {
@@ -362,12 +452,20 @@ def list_sessions(
     agent: Optional[str] = None,
     limit: int = _LIST_LIMIT_DEFAULT,
     offset: int = 0,
+    kind: Optional[str] = None,
 ) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
     Results are sorted by date (newest first) and paginated with
     ``limit``/``offset`` so the payload stays small. The default ``limit``
     guards against dumping an unbounded number of sessions.
+
+    Each summary carries ``kind`` (``"agent"`` for a top-level session,
+    ``"subagent"`` for a spawned subagent/sidechain) and ``parent_uuid``
+    (the parent session's uuid for subagents, else ``None``).  NOTE:
+    subagent-tree detection is currently implemented for **Claude only**;
+    every other agent always reports ``kind="agent"``.  This is a scope
+    boundary, not a bug.
 
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
@@ -376,12 +474,15 @@ def list_sessions(
             may return a very large payload). Defaults to 100.
         offset: Zero-based index of the first session to return. Use with
             ``limit`` to page through ``total``.
+        kind: Optional filter. ``"agent"`` returns only top-level sessions,
+            ``"subagent"`` returns only subagent sessions. When omitted
+            (default), both kinds are returned.
 
     Returns:
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
         "truncated": bool}``. ``total`` is the full count matching the
-        ``agent`` filter; ``truncated`` is True when more sessions remain
-        beyond this page.
+        ``agent`` (and ``kind``) filter; ``truncated`` is True when more
+        sessions remain beyond this page.
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         return {"error": "invalid_argument",
@@ -389,6 +490,9 @@ def list_sessions(
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         return {"error": "invalid_argument",
                 "message": f"offset must be a non-negative integer, got {offset!r}"}
+    if kind is not None and kind not in ("agent", "subagent"):
+        return {"error": "invalid_argument",
+                "message": f"kind must be 'agent', 'subagent' or null, got {kind!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -398,6 +502,8 @@ def list_sessions(
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
+            if kind is not None and session.kind != kind:
+                continue
             summaries.append(_session_summary(session))
 
     # Global newest-first sort: parsers sort per-agent, but across agents we
@@ -552,6 +658,94 @@ def find_tool_calls(
             since=since,
             until=until,
             limit=limit,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def session_stats(
+    agent: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    group_by: str = "agent",
+    top: int = 8,
+    edit_path: str = "/",
+) -> dict[str, Any]:
+    """Summarise sessions, grouped and ranked — the *bird's-eye* audit view.
+
+    Where ``find_file_edits`` / ``find_tool_calls`` return flat record
+    streams, this rolls the *sessions themselves* up by one dimension so you
+    can see how the work is distributed in a single call.
+
+    ``group_by`` is one of:
+
+    * ``"agent"`` (default) — claude vs codex vs opencode vs ...
+    * ``"dir"``   — by working directory / project (``cwd`` for codex/pi,
+      project slug for claude; ``"(unknown)"`` for agents without one).
+    * ``"date"``  — by calendar day (``YYYY-MM-DD``).
+    * ``"kind"``  — top-level *agent* sessions vs spawned *subagent* sessions.
+
+    Each group carries its session count plus enrichment from the shared
+    ``find_file_edits`` core: ``edits`` (file edits attributed to the group's
+    sessions), ``intents`` (distinct requests behind those edits), the
+    distinct ``agents`` in the group, and total ``messages``.
+
+    RISK-4 note: subagent detection is currently **Claude-only**.  When no
+    subagent sessions are in scope, a ``group_by="kind"`` result shows a
+    single ``agent`` bucket — so the result always carries
+    ``kind_split_available`` (``False`` here) plus a ``note`` making clear
+    that this is NOT a verified "no subagents", just an absent split.
+
+    Thin wrapper over :func:`ai_r.session_stats.session_stats` that
+    translates the core ``ValueError`` contract into the
+    ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
+    client expects.
+    """
+    try:
+        return _session_stats_core(
+            agent=agent,
+            since=since,
+            until=until,
+            group_by=group_by,
+            top=top,
+            edit_path=edit_path,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def session_diff(
+    session_uuid: str,
+    agent: str,
+    path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Reconstruct *what the agent changed* in one session — without git.
+
+    Stitches the session's own edit records (``Edit``/``MultiEdit``
+    ``old_string``→``new_string``, ``Write`` ``content``, codex shell-exec
+    redirections) into a per-file, chronological diff. Returns
+    ``{"files": [...], "count": N, "caveats": [...]}``; each file carries
+    its ordered ``edits`` (timestamp + intent + hunks) and a stitched,
+    readable ``diff``.
+
+    ``caveats`` always carries two honest blind spots: (1) this is a diff
+    of the agent's *actions*, not the git outcome — manual edits / partial
+    commits / merges are invisible; (2) RISK-3 — inherits the
+    ``find_file_edits`` shell-redirect gap (``tee`` / ``sed -i`` / ``cp`` /
+    ``mv`` / heredoc writes are not detected and are silently skipped).
+
+    Thin wrapper over :func:`ai_r.session_diff.session_diff` that
+    translates the core ``ValueError`` contract into the
+    ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
+    client expects.
+    """
+    try:
+        return _session_diff_core(
+            session_uuid=session_uuid,
+            agent=agent,
+            path=path,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
