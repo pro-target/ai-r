@@ -44,6 +44,7 @@ from ai_r.find_file_edits import (  # noqa: E402
 )
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.parsers import Session  # noqa: E402
+from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
 
 __all__ = ["mcp", "main"]
 
@@ -563,6 +564,7 @@ def search_sessions(
     scope: str = "title",
     operator: str = "AND",
     limit: int = 50,
+    sort: str = "relevance",
 ) -> List[dict[str, Any]]:
     """Case-insensitive search across sessions.
 
@@ -584,6 +586,12 @@ def search_sessions(
             Negative ``-term`` prefixes are always excluded regardless
             of operator.
         limit: Maximum number of results.  0 or negative = no limit.
+            Applied *after* sorting, so it keeps the top-ranked matches.
+        sort: Result ordering.
+            * ``"relevance"`` — BM25 relevance over the matched text
+              (default).  Pure-stdlib scoring; ties keep newest-first.
+            * ``"date"`` — newest-first by session date (the historical
+              pre-ranking order).
 
     Returns:
         A list of session summaries. When ``scope`` is ``"body"`` or
@@ -617,6 +625,13 @@ def search_sessions(
             "message": f"limit must be a non-negative integer, got {limit!r}",
         }]
 
+    sort_lower = (sort or "relevance").lower()
+    if sort_lower not in ("relevance", "date"):
+        return [{
+            "error": "invalid_argument",
+            "message": f"unknown sort {sort!r}; expected relevance or date",
+        }]
+
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -624,12 +639,17 @@ def search_sessions(
 
     positive, negative = _parse_query(needle)
     summaries: List[dict[str, Any]] = []
+    # Text each match was found in, kept parallel to ``summaries``. Only
+    # populated/used when ``sort == "relevance"`` so that date-sort never
+    # pays for tokenisation.
+    score_texts: List[str] = []
 
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
             matched = False
             snippet_text = ""
+            score_text = ""
 
             if scope == "title":
                 title_lc = session.title.lower()
@@ -645,6 +665,7 @@ def search_sessions(
                     matched = all(
                         t not in title_lc for t in (positive + negative)
                     )
+                score_text = title_lc
             elif scope == "body":
                 haystack, body_truncated = _get_cached_haystack(
                     session, agent_name
@@ -652,6 +673,7 @@ def search_sessions(
                 matched = _match(haystack, positive, negative, op_upper)
                 if matched and positive:
                     snippet_text = _extract_snippet(haystack, positive)
+                score_text = haystack
             else:
                 title_lc = session.title.lower()
                 haystack, body_truncated = _get_cached_haystack(
@@ -666,6 +688,7 @@ def search_sessions(
                         snippet_text = _extract_snippet(haystack, positive)
                     elif in_title and positive:
                         snippet_text = _extract_snippet(title_lc, positive)
+                score_text = combined
 
             if not matched:
                 continue
@@ -675,8 +698,26 @@ def search_sessions(
             if scope in ("body", "all") and body_truncated:
                 summary["body_truncated"] = True
             summaries.append(summary)
-            if limit and len(summaries) >= limit:
-                return summaries
+            score_texts.append(score_text)
+
+    if sort_lower == "relevance" and summaries:
+        # Flatten phrase terms into BM25 query tokens; lazily tokenise only
+        # the matched docs (never the whole haystack cache).
+        query_tokens: List[str] = []
+        for term in positive:
+            query_tokens.extend(_tokenize(term))
+        docs_tokens = [_tokenize(text) for text in score_texts]
+        scores = _bm25_scores(query_tokens, docs_tokens)
+        # ``sorted`` is stable: equal scores preserve list_sessions order
+        # (newest-first), giving a deterministic recency tie-break.
+        order = sorted(
+            range(len(summaries)), key=lambda i: scores[i], reverse=True
+        )
+        summaries = [summaries[i] for i in order]
+    # ``sort == "date"`` keeps the existing newest-first insertion order.
+
+    if limit:
+        summaries = summaries[:limit]
     return summaries
 
 

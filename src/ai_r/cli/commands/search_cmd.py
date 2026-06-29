@@ -41,6 +41,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="How to combine terms: and (default), or, or not. Negative prefix: '-term' is always excluded.",
     )
     search_p.add_argument(
+        "--sort",
+        choices=("relevance", "date"),
+        default="relevance",
+        help="Result ordering: relevance (BM25, default) or date (newest-first).",
+    )
+    search_p.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
@@ -85,17 +91,21 @@ def _run_search(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
+    sort = getattr(args, "sort", "relevance")
+
     from ai_r import mcp_server as _mcp
 
     # Delegate the actual search to mcp_server (single source of truth for
-    # query parsing, scope matching, operator combination). We pass
-    # limit=0 so we can apply date filters first and then trim ourselves.
+    # query parsing, scope matching, operator combination, and relevance
+    # ranking). We pass limit=0 so the full ranked result set comes back;
+    # we then apply date filters (order-preserving) and trim ourselves.
     raw = _mcp.search_sessions(
         query=query,
         agent=args.agent,
         scope=scope,
         operator=operator,
         limit=0,
+        sort=sort,
     )
 
     if raw and isinstance(raw[0], dict) and raw[0].get("error") == "invalid_argument":

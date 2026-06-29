@@ -1075,6 +1075,161 @@ def test_search_sessions_limit(
     assert len(result) <= 2
 
 
+# ---------------------------------------------------------------------------
+# search_sessions: relevance ranking (BM25) + sort modes
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_dated_body_session(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    user_text: str,
+    when: str,
+    title: str = "ranking test",
+) -> None:
+    """Like ``_write_claude_body_session`` but with a caller-set timestamp.
+
+    Lets a test control both *recency* (``when``) and *relevance*
+    (``user_text``) so the two can be played off against each other.
+    """
+    records = [
+        {
+            "type": "ai-title",
+            "aiTitle": title,
+            "timestamp": when,
+            "sessionId": uuid,
+        },
+        {
+            "type": "user",
+            "message": {"role": "user", "content": user_text},
+            "timestamp": when,
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+            "timestamp": when,
+            "sessionId": uuid,
+        },
+    ]
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-x" / f"{uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+
+
+def test_search_sessions_relevance_beats_recency(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A less-recent but more-relevant session ranks above a fresher but
+    barely-relevant one when ``sort='relevance'`` (the default)."""
+    # OLDER session: term appears many times (high relevance).
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="rank-relevant-old",
+        user_text="kafka kafka kafka kafka pipeline",
+        when="2026-01-01T10:00:00Z",
+        title="old",
+    )
+    # NEWER session: term appears once amid lots of noise (low relevance).
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="rank-fresh-new",
+        user_text="kafka " + " ".join(f"noise{i}" for i in range(60)),
+        when="2026-06-20T10:00:00Z",
+        title="new",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("kafka", agent="claude", scope="body")
+    uuids = [s["uuid"] for s in result]
+    assert set(uuids) == {"rank-relevant-old", "rank-fresh-new"}
+    # Relevance default: the older-but-denser match wins despite the other
+    # being newer.
+    assert uuids[0] == "rank-relevant-old"
+
+
+def test_search_sessions_sort_date_reproduces_pre_reform_order(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sort='date'`` restores newest-first order regardless of BM25
+    score (the historical pre-ranking behaviour)."""
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="date-relevant-old",
+        user_text="kafka kafka kafka kafka pipeline",
+        when="2026-01-01T10:00:00Z",
+        title="old",
+    )
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="date-fresh-new",
+        user_text="kafka " + " ".join(f"noise{i}" for i in range(60)),
+        when="2026-06-20T10:00:00Z",
+        title="new",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("kafka", agent="claude", scope="body", sort="date")
+    uuids = [s["uuid"] for s in result]
+    # Newest-first: the fresher session leads even though it's less relevant.
+    assert uuids == ["date-fresh-new", "date-relevant-old"]
+
+
+def test_search_sessions_limit_applied_after_ranking(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit`` keeps the TOP-ranked matches, not the newest ones.
+
+    The most relevant session is the oldest, so a date-truncating limit
+    would drop it; a rank-then-limit keeps it.
+    """
+    # Most relevant, but oldest -> would be dropped by a date-order limit.
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="lim-top-old",
+        user_text="kafka kafka kafka kafka kafka pipeline",
+        when="2026-01-01T10:00:00Z",
+        title="old",
+    )
+    # Two fresher, far less relevant sessions.
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="lim-mid-new",
+        user_text="kafka " + " ".join(f"noise{i}" for i in range(80)),
+        when="2026-06-20T10:00:00Z",
+        title="newer",
+    )
+    _write_claude_dated_body_session(
+        tmp_sessions_dir,
+        uuid="lim-low-newest",
+        user_text="kafka " + " ".join(f"chaff{i}" for i in range(120)),
+        when="2026-06-25T10:00:00Z",
+        title="newest",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("kafka", agent="claude", scope="body", limit=1)
+    assert len(result) == 1
+    # The single survivor is the top-ranked (oldest, densest) session —
+    # proof that the limit ran AFTER ranking, not before.
+    assert result[0]["uuid"] == "lim-top-old"
+
+
+def test_search_sessions_invalid_sort() -> None:
+    result = search_sessions("x", sort="bogus")
+    assert isinstance(result, list)
+    assert result and result[0].get("error") == "invalid_argument"
+    assert "sort" in result[0]["message"].lower()
+
+
 def test_search_sessions_invalid_scope() -> None:
     result = search_sessions("x", scope="bogus")
     assert isinstance(result, list)

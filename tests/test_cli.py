@@ -873,6 +873,77 @@ def test_cli_search_invalid_limit(
     assert "--limit" in err.lower()
 
 
+def test_cli_search_sort_flag_parses(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--sort relevance`` and ``--sort date`` both parse and exit 0."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-sort-1", ["kafka pipeline notes"]
+    )
+    for mode in ("relevance", "date"):
+        rc, out, err = _run_inproc(
+            [
+                "search",
+                "kafka",
+                "--scope",
+                "body",
+                "--sort",
+                mode,
+                "--agent",
+                "claude",
+                "--json",
+            ],
+            env={"AI_R_HOME": str(tmp_sessions_dir)},
+        )
+        assert rc == 0, err
+        assert isinstance(json.loads(out), list)
+    # An unknown choice is rejected by argparse (exit 2).
+    rc, out, err = _run_inproc(
+        ["search", "kafka", "--sort", "bogus", "--agent", "claude"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 2
+
+
+def test_cli_search_json_order_matches_mcp(
+    tmp_sessions_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI ``--json`` relevance order is identical to a direct
+    ``search_sessions`` call on the same query (CLI just delegates)."""
+    # Two body matches with different term densities -> non-trivial order.
+    _write_claude_session_with_body(
+        tmp_sessions_dir,
+        "ord-dense",
+        ["kafka kafka kafka kafka stream"],
+    )
+    _write_claude_session_with_body(
+        tmp_sessions_dir,
+        "ord-sparse",
+        ["kafka " + " ".join(f"noise{i}" for i in range(60))],
+    )
+
+    rc, out, err = _run_inproc(
+        ["search", "kafka", "--scope", "body", "--agent", "claude", "--json"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    cli_uuids = [item["uuid"] for item in json.loads(out)]
+
+    # Drive the MCP source-of-truth directly with the same AI_R_HOME.
+    from ai_r import mcp_server as _mcp
+
+    monkeypatch.setenv("AI_R_HOME", str(tmp_sessions_dir))
+    mcp_result = _mcp.search_sessions(
+        query="kafka", agent="claude", scope="body"
+    )
+    mcp_uuids = [item["uuid"] for item in mcp_result]
+
+    assert cli_uuids == mcp_uuids
+    # Sanity: the denser match leads under relevance default.
+    assert cli_uuids[0] == "ord-dense"
+
+
 def test_cli_search_body_with_date_filter(
     tmp_sessions_dir: Path,
 ) -> None:
