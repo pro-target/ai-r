@@ -41,8 +41,9 @@ logs/
 .local/
 data/
 
-# Agent-local memory (serena, etc.) — not for repo
+# Agent-local memory/config (serena, claude code, etc.) — not for repo
 .serena/
+.claude/
 
 # Internal working/audit notes — private, not for public repo
 _docs/
