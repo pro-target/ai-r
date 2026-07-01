@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import edit_path_from_input
+from ai_r.security import coerce_tool_input as _coerce_tool_input_shared
 
 # --- Tool-name → normalized subtype ---------------------------------------
 # ``tool_call`` events carry a normalized subtype so a consumer can filter
@@ -94,6 +95,10 @@ class Event:
         refs: Structured references pulled from the event — currently
             ``{"file": path}`` and/or ``{"tool": name}`` entries so
             ``file`` / ``tool`` facets can filter without re-parsing.
+            A ``tool_call`` event additionally carries
+            ``{"is_error": bool}`` when its result was correlated (by
+            ``tool_use_id``); the ref is absent when the outcome is
+            unknown (agent exposes no per-result error signal).
         source: Provenance tag, ``"parser:<agent>"``.
         sha256: Content hash over ``(type, text, refs)`` for dedup /
             change-detection.  Deterministic across runs.
@@ -150,13 +155,14 @@ def _mk_event(
 
 
 def _coerce_tool_input(raw: object) -> object:
-    """Best-effort JSON-decode of a tool input (dicts pass through)."""
-    if isinstance(raw, str) and raw.strip():
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return raw
-    return raw
+    """Best-effort JSON-decode of a tool input (dicts pass through).
+
+    Thin alias for :func:`ai_r.security.coerce_tool_input`, the single
+    size-guarded coerce shared with ``find_tool_calls`` — a string above the
+    1 MB cap is returned verbatim instead of being decoded (memory-exhaustion
+    guard for tens-of-MB codex ``function_call.arguments`` blobs).
+    """
+    return _coerce_tool_input_shared(raw)
 
 
 def _path_from_payload(payload: object) -> Optional[str]:

@@ -253,6 +253,31 @@ def _tool_use_summary(tool: dict) -> str:
     return f"[tool_use: {name} {detail}]" if detail else f"[tool_use: {name}]"
 
 
+_TOOL_RESULT_SNIPPET_CHARS = 120
+
+
+def _tool_result_summary(tr: dict) -> str:
+    """Render one ``tool_result`` entry, surfacing success vs. error.
+
+    * a failed call → ``[tool_result ERROR: <first ~120 chars>]`` so the
+      core audit question "did this actually work?" is answerable from the
+      projection alone;
+    * a successful call → ``[tool_result ok]`` (or ``[tool_result ok:
+      <snippet>]`` when a short content snippet is available).
+
+    ``content`` is untrusted session data; it is collapsed to a single
+    line and bounded by :data:`_TOOL_RESULT_SNIPPET_CHARS`.
+    """
+    is_error = bool(tr.get("is_error"))
+    raw = tr.get("content", "")
+    snippet = ""
+    if isinstance(raw, str) and raw.strip():
+        snippet = " ".join(raw.split())[:_TOOL_RESULT_SNIPPET_CHARS]
+    if is_error:
+        return f"[tool_result ERROR: {snippet}]" if snippet else "[tool_result ERROR]"
+    return f"[tool_result ok: {snippet}]" if snippet else "[tool_result ok]"
+
+
 def _project_message_content(m: Any) -> str:
     """Return compact MCP content for text or user/assistant tool-only messages.
 
@@ -271,16 +296,26 @@ def _project_message_content(m: Any) -> str:
     # tool_use summaries are surfaced even alongside text: an assistant
     # message often carries both narration ("I'll run them now.") *and* the
     # actual call, and the call input is the high-signal part for
-    # understanding what happened.  tool_result placeholders stay dropped
-    # when text is present (results are not load-bearing for read_session).
+    # understanding what happened.
     for tool in getattr(m, "tool_use", ()) or ():
         if isinstance(tool, dict):
             chunks.append(_tool_use_summary(tool))
         else:
             chunks.append("[tool_use]")
-    if not text:
-        for _ in getattr(m, "tool_result", ()) or ():
-            chunks.append("[tool_result]")
+
+    # tool_result outcomes surface success/error so read_session can answer
+    # "did this edit/command work?".  When the message carries narration
+    # text, only *errors* are surfaced (a plain success is not load-bearing
+    # next to the text); when the message is result-only, every result is
+    # rendered so the record is never empty.
+    for tr in getattr(m, "tool_result", ()) or ():
+        if not isinstance(tr, dict):
+            if not text:
+                chunks.append("[tool_result]")
+            continue
+        if text and not bool(tr.get("is_error")):
+            continue
+        chunks.append(_tool_result_summary(tr))
     if qa_text:
         chunks.append(qa_text)
     return "\n".join(chunks)
@@ -1075,7 +1110,9 @@ def plan(
 
 
 @mcp.tool()
-def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
+def get_body(
+    id: str, shallow: bool = False, max_chars: int = 500_000
+) -> dict[str, Any]:
     """Return the on-demand body for an event / plan ``id``.
 
     For a ``plan_event`` id: the full plan text and/or Codex ``steps``
@@ -1088,11 +1125,16 @@ def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
     case where a subagent receives one plan without the draft noise
     (``dropped_drafts`` lists the ids that were elided).
 
+    ``max_chars`` bounds the returned ``body``/``text`` (default 500_000,
+    generous enough that ordinary bodies are never cut; pass ``0`` to
+    disable).  When it trips, the field is sliced with a ``…[truncated]``
+    marker and ``body_truncated: true`` is set.
+
     Returns the body dict, or ``{"error": ..., "message": ...}`` on a bad id.
     """
     if not id or not str(id).strip():
         return {"error": "invalid_argument", "message": "id must be non-empty"}
-    return _get_body_core(id, shallow=shallow)
+    return _get_body_core(id, shallow=shallow, max_chars=max_chars)
 
 
 @mcp.tool()

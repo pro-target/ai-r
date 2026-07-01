@@ -328,12 +328,29 @@ def _messages_to_events(
     A ``user`` message → one ``user_turn``.  An ``assistant`` message →
     one ``assistant_turn`` (when it has text) followed by one
     ``tool_call(<sub>)`` per ``tool_use`` entry.  ``tool`` role records
-    carry no turn text of their own and are skipped (their results are
-    not first-class events in Phase 1).
+    carry no turn text of their own and are skipped as standalone events,
+    but their ``tool_result`` entries are correlated back to the owning
+    ``tool_call`` (by ``tool_use_id``) so the call event carries an
+    ``is_error`` ref — the success/error outcome is thus visible on the
+    existing ``tool_call`` events WITHOUT introducing a new event type
+    (so ``type`` filters and event counts are unchanged).
     """
     events: List[Event] = []
     seq = 0
     session_iso = iso(session_ts) if session_ts is not None else None
+
+    # Correlate tool_result outcomes back to their calls by ``tool_use_id``.
+    # Only ids that appear on a result are recorded; a call whose id is not
+    # in this map simply carries no outcome (unknown / no error signal —
+    # e.g. Codex/Pi/Antigravity, which expose no per-result flag).
+    error_by_tool_id: dict[str, bool] = {}
+    for _m in messages:
+        for _tr in getattr(_m, "tool_result", ()) or ():
+            if not isinstance(_tr, dict):
+                continue
+            _tid = _tr.get("tool_use_id")
+            if isinstance(_tid, str) and _tid:
+                error_by_tool_id[_tid] = bool(_tr.get("is_error"))
 
     # Detect plan signals once; index the message-level ones by their
     # triggering message so each ``plan_event`` is emitted inline (right
@@ -397,6 +414,12 @@ def _messages_to_events(
                 fpath = _path_from_payload(_coerce_tool_input(tool.get("input", "")))
                 if fpath:
                     refs.append({"file": fpath})
+                # Surface the call's outcome when a correlated result exists:
+                # ``{"is_error": True|False}``.  Absent when no matching
+                # result id was seen (outcome unknown / agent has no signal).
+                tu_id = tool.get("tool_use_id")
+                if isinstance(tu_id, str) and tu_id in error_by_tool_id:
+                    refs.append({"is_error": error_by_tool_id[tu_id]})
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=tool_iso,
                     event_type=f"tool_call({sub})", text=name, refs=refs,

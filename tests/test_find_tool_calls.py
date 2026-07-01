@@ -201,7 +201,12 @@ def test_find_tool_calls_no_sessions_returns_empty(
         lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
     )
     result = find_tool_calls(tool_name="anything")
-    assert result == {"records": [], "count": 0, "truncated": False}
+    assert result == {
+        "records": [],
+        "count": 0,
+        "truncated": False,
+        "output_truncated": False,
+    }
 
 
 def test_find_tool_calls_no_match_returns_empty(
@@ -219,7 +224,12 @@ def test_find_tool_calls_no_match_returns_empty(
         lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
     )
     result = find_tool_calls(tool_name="NonExistent")
-    assert result == {"records": [], "count": 0, "truncated": False}
+    assert result == {
+        "records": [],
+        "count": 0,
+        "truncated": False,
+        "output_truncated": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -539,9 +549,15 @@ def test_find_tool_calls_huge_input_not_parsed(
     assert result["count"] == 1
     hit = result["records"][0]
     assert hit["tool"] == "search_sessions"
+    # The oversized string is NOT json-parsed (memory-exhaustion guard): it
+    # stays a str rather than a decoded structure.  It is then per-field
+    # char-capped (never inlined at full 1.1 MB), sliced with a marker and
+    # flagged in ``truncated_fields``.
     assert isinstance(hit["input"], str)
-    assert len(hit["input"]) == len(big)
-    assert hit["input"] == big
+    assert len(hit["input"]) < len(big)
+    assert hit["input"].startswith("a")
+    assert hit["input"].endswith("…[truncated]")
+    assert "input" in hit["truncated_fields"]
 
 
 def test_find_tool_calls_input_json_string_is_parsed(

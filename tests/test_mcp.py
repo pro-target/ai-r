@@ -839,13 +839,66 @@ def test_read_session_claude_tool_only_messages_not_blank(
     msgs = result["messages"]
     # tool_use input "ls" is not valid JSON → raw-string fallback, so the
     # call surfaces as "[tool_use: Bash ls]".  timestamps are now attached.
+    # The result-only user record now surfaces the call outcome instead of a
+    # bare ``[tool_result]`` placeholder: a successful result renders as
+    # ``[tool_result ok: <snippet>]`` so read_session can tell success/error.
     assert [(m["role"], m["content"]) for m in msgs] == [
         ("assistant", "[tool_use: Bash ls]"),
-        ("user", "[tool_result]"),
+        ("user", "[tool_result ok: ok]"),
         ("assistant", "done"),
     ]
     assert msgs[0]["timestamp"] == "2026-06-14T10:00:00+00:00"
     assert all(m["content"] for m in msgs)
+
+
+def test_read_session_claude_tool_error_surfaced(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed tool call renders as ``[tool_result ERROR: <snippet>]`` so
+    read_session can answer "did this actually work?"."""
+    records = [
+        {
+            "type": "ai-title",
+            "aiTitle": "Tool error projection",
+            "timestamp": "2026-06-14T09:59:59Z",
+            "sessionId": "tool-err-1",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                             "input": {"command": "pytest"}}],
+            },
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": "tool-err-1",
+        },
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                 "content": "Traceback: boom\nAssertionError"},
+            ]},
+            "timestamp": "2026-06-14T10:00:01Z",
+            "sessionId": "tool-err-1",
+        },
+    ]
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-err" / "tool-err-1.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="tool-err-1", agent="claude")
+    contents = [m["content"] for m in result["messages"]]
+    err = next(c for c in contents if c.startswith("[tool_result ERROR"))
+    assert "Traceback: boom" in err
+    assert "ok" not in err
 
 
 def test_read_session_mcp_drops_tool_messages(

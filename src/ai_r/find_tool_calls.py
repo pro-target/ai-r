@@ -28,39 +28,52 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.security import coerce_tool_input as _coerce_input
 
 __all__ = [
     "find_tool_calls",
 ]
 
-# Refuse to JSON-decode tool inputs above this size.  Codex sessions
-# can carry ``function_call.arguments`` payloads in the tens of MB
-# (base64 blobs, etc.); decoding those is a memory-exhaustion vector.
-_MAX_INPUT_BYTES = 1_000_000  # 1 MB
+# --- Per-record field caps (chars) ----------------------------------------
+# ``limit`` bounds the record COUNT only, never bytes.  Without these caps a
+# single record can inline a multi-hundred-KB ``input`` / uncapped user
+# ``intent`` / uncapped ``assistant`` text, so a handful of records blow the
+# MCP response past any sane size.  Each field is truncated to its cap and
+# marked in the per-record ``truncated_fields`` list when it trips.
+_INPUT_CHARS_CAP = 4_000      # parsed/raw tool input, serialized
+_ASSISTANT_CHARS_CAP = 4_000  # assistant message text hosting the call
+_INTENT_CHARS_CAP = 1_000     # preceding user message text
+
+# --- Total-response byte budget -------------------------------------------
+# Cumulative serialized size after which we stop appending records and set the
+# top-level ``output_truncated`` flag (DISTINCT from the count-based
+# ``truncated``: the former means "output capped by size", the latter "more
+# records matched than ``limit``").  Generous — only bites pathological output.
+_OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
 
 
-def _coerce_input(raw: Any) -> Any:
-    """Best-effort JSON decode of a tool input payload.
+def _cap_field(value: Any, cap: int) -> tuple[Any, bool]:
+    """Return ``(value, truncated)`` bounding a field to ``cap`` chars.
 
-    Some agents (codex ``function_call``) carry the input as a JSON
-    string; others (claude ``tool_use``) carry a dict directly.  When
-    ``raw`` is a non-empty string we try ``json.loads``; on success the
-    decoded value is returned, otherwise the original string is kept
-    (so non-JSON payloads still surface to the caller).  Non-string
-    inputs are returned unchanged.
-
-    Strings larger than :data:`_MAX_INPUT_BYTES` are returned as-is
-    without attempting ``json.loads`` to avoid unbounded memory use.
+    A ``str`` longer than ``cap`` is sliced with a trailing marker.  A
+    non-string value (parsed dict/list) is serialized to measure size; only
+    when its JSON form exceeds ``cap`` do we replace it with the truncated
+    string form (small structured inputs pass through unchanged as the parsed
+    object).  ``None`` and short values are returned untouched.
     """
-    if isinstance(raw, str):
-        if len(raw) > _MAX_INPUT_BYTES:
-            return raw
-        if raw.strip():
-            try:
-                return json.loads(raw)
-            except (ValueError, TypeError):
-                return raw
-    return raw
+    if value is None:
+        return value, False
+    if isinstance(value, str):
+        if len(value) > cap:
+            return value[:cap] + "…[truncated]", True
+        return value, False
+    try:
+        serialized = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    if len(serialized) > cap:
+        return serialized[:cap] + "…[truncated]", True
+    return value, False
 
 
 def find_tool_calls(
@@ -91,13 +104,23 @@ def find_tool_calls(
             ``100``.
 
     Returns:
-        A dict ``{"records": [...], "count": N, "truncated": bool}``.
+        A dict ``{"records": [...], "count": N, "truncated": bool,
+        "output_truncated": bool}``.  ``count`` is the total number of
+        matches; ``truncated`` is ``True`` when more records matched than
+        ``limit`` (count-based); ``output_truncated`` is ``True`` when the
+        cumulative serialized size hit the response byte budget and record
+        appending stopped early (size-based) — the two are independent.
         Each record carries ``agent``, ``session_uuid``,
         ``session_title``, ``session_date``, ``message_index``,
         ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
         input was a JSON string), ``intent`` (the immediately
-        preceding user message text or ``None``) and ``assistant``
-        (the assistant text of the message hosting the call).
+        preceding user message text or ``None``), ``assistant``
+        (the assistant text of the message hosting the call) and
+        ``truncated_fields`` (list naming any of ``input``/``intent``/
+        ``assistant`` that were char-capped for this record; empty when
+        none tripped).  The ``input``/``intent``/``assistant`` fields are
+        each bounded to a per-field char cap; an over-cap value is sliced
+        with a ``…[truncated]`` marker.
 
     Raises:
         ValueError: on invalid arguments (neither or both of
@@ -182,6 +205,22 @@ def find_tool_calls(
                         call_ts is None or call_ts > until_dt
                     ):
                         continue
+                    capped_input, input_trunc = _cap_field(
+                        _coerce_input(tool.get("input", "")), _INPUT_CHARS_CAP
+                    )
+                    capped_intent, intent_trunc = _cap_field(
+                        intent, _INTENT_CHARS_CAP
+                    )
+                    capped_asst, asst_trunc = _cap_field(
+                        msg.text or "", _ASSISTANT_CHARS_CAP
+                    )
+                    truncated_fields = [
+                        f for f, hit in (
+                            ("input", input_trunc),
+                            ("intent", intent_trunc),
+                            ("assistant", asst_trunc),
+                        ) if hit
+                    ]
                     records.append({
                         "agent": agent_name.value.lower(),
                         "session_uuid": session.uuid,
@@ -192,9 +231,10 @@ def find_tool_calls(
                             iso(call_ts) if call_ts is not None else None
                         ),
                         "tool": name,
-                        "input": _coerce_input(tool.get("input", "")),
-                        "intent": intent,
-                        "assistant": msg.text or "",
+                        "input": capped_input,
+                        "intent": capped_intent,
+                        "assistant": capped_asst,
+                        "truncated_fields": truncated_fields,
                     })
 
     records.sort(key=lambda r: (r["timestamp"] is None, r["timestamp"] or ""))
@@ -203,4 +243,28 @@ def find_tool_calls(
     if limit and len(records) > limit:
         records = records[:limit]
         truncated = True
-    return {"records": records, "count": total, "truncated": truncated}
+
+    # Size-based safeguard: stop emitting records once the cumulative
+    # serialized size exceeds the response byte budget.  Distinct from the
+    # count-based ``truncated`` above — ``output_truncated`` means "output
+    # capped by size", so a caller can tell "more records exist" (raise
+    # ``limit``) from "output too big" (fields already field-capped, but the
+    # sheer record count blew the budget).
+    output_truncated = False
+    budgeted: List[dict[str, Any]] = []
+    running = 0
+    for rec in records:
+        running += len(json.dumps(rec, ensure_ascii=False, default=str))
+        if running > _OUTPUT_BYTES_BUDGET and budgeted:
+            output_truncated = True
+            break
+        budgeted.append(rec)
+    if output_truncated:
+        records = budgeted
+
+    return {
+        "records": records,
+        "count": total,
+        "truncated": truncated,
+        "output_truncated": output_truncated,
+    }

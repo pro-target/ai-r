@@ -99,8 +99,19 @@ class Message:
         tool_use: Tuple of ``{"name": str, "input": str}`` dicts for
             assistant tool invocations.  ``input`` is the raw tool
             input serialized to a string (JSON for structured inputs).
-        tool_result: Tuple of ``{"content": str}`` dicts for tool
-            return values.
+            May additionally carry ``"tool_use_id": str`` when the source
+            format exposes a stable call id (Claude ``tool_use.id``,
+            OpenCode ``callID``) so the event layer can correlate the
+            call with its result; absent otherwise.
+        tool_result: Tuple of ``{"content": str, "is_error": bool}`` dicts
+            for tool return values.  ``is_error`` is ``True`` when the
+            agent flagged the call as failed.  It is a *real* signal for
+            Claude (``tool_result.is_error``) and OpenCode
+            (``state.status == "error"``); for Codex, Antigravity and Pi
+            no per-result error flag exists in the source records, so it
+            is best-effort and defaults to ``False`` there.  May also carry
+            ``"tool_use_id": str`` mirroring the ``tool_use`` id when the
+            format exposes one, enabling call↔result correlation.
         qa: Tuple of ``{"question": str, "options": tuple[str, ...],
             "answer": str}`` dicts capturing the user's reply to an
             interactive agent question (Claude ``AskUserQuestion``,

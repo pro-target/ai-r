@@ -40,11 +40,11 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 37 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 38 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 7 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
+| `query` | 8 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
 | `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
@@ -123,6 +123,14 @@ parameters. Events carry **references** (`refs`), never inlined bodies.
 - **Steps:** `mcp__ai-r__query(kind="subagent")`; also `mcp__ai-r__query(parent="…")` and `mcp__ai-r__query(group="…")`.
 - **Expected:** An error dict `{error:"invalid_argument", message:"… not yet supported …"}` (or equivalent) — **not** an events list.
 - **Pass criteria:** GO only when each of the three facets returns a loud error mentioning "not yet supported". A silent (empty or unfiltered) result is NO-GO.
+
+### QRY-8 — `tool_call` events carry an `is_error` outcome (cross-agent best-effort)
+- **Function:** `query`
+- **Goal:** A `tool_call` event surfaces whether the call succeeded or failed, without changing the bare `tool_call` filter/counts.
+- **Preconditions:** A claude (or opencode) session containing at least one FAILED tool call — e.g. a `Bash` that exited non-zero or an errored tool. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__query(agent="claude", type="tool_call", session="<uuid>")`; inspect `is_error` on the events; cross-check the failed one against `read_session` (it should render `[tool_result ERROR: …]`).
+- **Expected:** `tool_call` events carry an `is_error` ref — `True` for the known-failed call, `False`/absent for succeeded ones; the bare `type="tool_call"` filter still returns EVERY tool call (the outcome ref does not add/drop events or change `count`).
+- **Pass criteria:** GO when `is_error` reflects the real outcome for Claude/OpenCode and the bare `tool_call` count is unchanged by the ref. Codex/Pi always reporting `is_error=False` (no source flag) and Antigravity emitting no tool results are **documented** cross-agent limitations (see `docs/methods.md` → *Output bounds & tool-call outcome*), not failures.
 
 ---
 
@@ -396,8 +404,8 @@ Read one session by `uuid`+`agent`, projected to the compact `{role, content}` M
 - **Goal:** A single session reads into the compact `{role, content}` projection with correct metadata and pagination echo.
 - **Preconditions:** A known session uuid + its agent (e.g. the newest from `list_sessions`). `[needs-real-vault]`.
 - **Steps:** `mcp__ai-r__read_session(uuid="<uuid>", agent="claude", offset=0, limit=20)`.
-- **Expected:** `{uuid, agent, title, date, message_count, kind, parent_uuid, messages:[{role, content, timestamp?}], total, offset, limit, messages_truncated}`; each message `role` is `user`/`assistant`; assistant tool-call turns surface a `[tool_use: <name> …]` summary in `content`; `messages` is the slice `[offset:offset+limit]` and `total` is the full projected count.
-- **Pass criteria:** GO when the metadata block is present, every message role is `user`/`assistant`, the slice honors `offset`/`limit`, and `total >= len(messages)`. (Known limitation, GO-with-caveats: tool results project to a bare `[tool_result]` placeholder — success/error of the underlying call is not surfaced here; use the raw transcript when that distinction matters.)
+- **Expected:** `{uuid, agent, title, date, message_count, kind, parent_uuid, messages:[{role, content, timestamp?}], total, offset, limit, messages_truncated}`; each message `role` is `user`/`assistant`; assistant tool-call turns surface a `[tool_use: <name> …]` summary in `content`; tool results render as `[tool_result ok: <snippet>]` or `[tool_result ERROR: <snippet>]` (not a bare `[tool_result]`); `messages` is the slice `[offset:offset+limit]` and `total` is the full projected count.
+- **Pass criteria:** GO when the metadata block is present, every message role is `user`/`assistant`, tool results render with an `ok`/`ERROR` outcome (never the bare `[tool_result]` placeholder), the slice honors `offset`/`limit`, and `total >= len(messages)`.
 
 ### READ-2 — pagination slice + `total` invariance
 - **Function:** `read_session`

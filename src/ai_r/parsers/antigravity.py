@@ -36,7 +36,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from ._common import _is_valid_uuid, _normalise_title, _parse_iso_timestamp
+from ._common import (
+    _is_valid_uuid,
+    _normalise_title,
+    _parse_iso_timestamp,
+    iter_jsonl_records,
+)
 from .models import AgentName, Message, Session
 
 
@@ -99,33 +104,20 @@ def _extract_title_from_overview(overview_path: Path) -> tuple[str, int, Optiona
     title = ""
     count = 0
     latest_ts: Optional[str] = None
-    try:
-        with overview_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                count += 1
-                ts = record.get("timestamp")
-                if isinstance(ts, str):
-                    latest_ts = ts
-                if not title and record.get("source") == "USER_EXPLICIT" \
-                        and record.get("type") == "USER_INPUT":
-                    raw_content = record.get("content", "")
-                    if isinstance(raw_content, str) and raw_content:
-                        match = _USER_REQUEST_RE.search(raw_content)
-                        if match:
-                            title = match.group(1)
-                        else:
-                            title = raw_content
-    except OSError:
-        return "", 0, None
+    for record in iter_jsonl_records(overview_path):
+        count += 1
+        ts = record.get("timestamp")
+        if isinstance(ts, str):
+            latest_ts = ts
+        if not title and record.get("source") == "USER_EXPLICIT" \
+                and record.get("type") == "USER_INPUT":
+            raw_content = record.get("content", "")
+            if isinstance(raw_content, str) and raw_content:
+                match = _USER_REQUEST_RE.search(raw_content)
+                if match:
+                    title = match.group(1)
+                else:
+                    title = raw_content
     return title, count, latest_ts
 
 
@@ -169,33 +161,20 @@ def _scan_brain(brain: Path) -> Optional[Session]:
             tpath = brain / candidate
             if not tpath.is_file():
                 continue
-            try:
-                with tpath.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if not isinstance(record, dict):
-                            continue
-                        count += 1
-                        ts = record.get("timestamp")
-                        if isinstance(ts, str):
-                            latest_ts = ts
-                        if not title and record.get("source") == "USER_EXPLICIT" \
-                                and record.get("type") == "USER_INPUT":
-                            raw_content = record.get("content", "")
-                            if isinstance(raw_content, str) and raw_content:
-                                match = _USER_REQUEST_RE.search(raw_content)
-                                if match:
-                                    title = match.group(1)
-                                else:
-                                    title = raw_content
-            except OSError:
-                continue
+            for record in iter_jsonl_records(tpath):
+                count += 1
+                ts = record.get("timestamp")
+                if isinstance(ts, str):
+                    latest_ts = ts
+                if not title and record.get("source") == "USER_EXPLICIT" \
+                        and record.get("type") == "USER_INPUT":
+                    raw_content = record.get("content", "")
+                    if isinstance(raw_content, str) and raw_content:
+                        match = _USER_REQUEST_RE.search(raw_content)
+                        if match:
+                            title = match.group(1)
+                        else:
+                            title = raw_content
             break  # first existing transcript wins
 
     if not title:
@@ -364,23 +343,10 @@ def _antigravity_message_from_record(record: dict) -> Optional[Message]:
 def _extract_messages_from_transcript(path: Path) -> List[Message]:
     """Read an Antigravity transcript/overview JSONL into messages."""
     messages: List[Message] = []
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                parsed = _antigravity_message_from_record(record)
-                if parsed is not None:
-                    messages.append(parsed)
-    except OSError:
-        return messages
+    for record in iter_jsonl_records(path):
+        parsed = _antigravity_message_from_record(record)
+        if parsed is not None:
+            messages.append(parsed)
     return messages
 
 

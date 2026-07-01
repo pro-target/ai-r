@@ -167,6 +167,97 @@ def test_iter_events_tool_call_refs(multi_turn_claude: str) -> None:
     assert tools == ["Edit"]
 
 
+@pytest.fixture
+def claude_tool_outcomes(tmp_sessions_dir: Path) -> str:
+    """Claude session: one failing Bash call + one succeeding Edit call.
+
+    Each call's outcome arrives in a following user record as a
+    ``tool_result`` block carrying ``is_error`` and the matching
+    ``tool_use_id`` (Claude's real correlation key).
+    """
+    session_id = "events-outcome-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-e"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu_bad", "name": "Bash",
+                         "input": {"command": "pytest"}},
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_bad",
+                     "is_error": True, "content": "boom: command failed"},
+                ]},
+                "timestamp": "2026-06-14T10:00:01Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu_ok", "name": "Edit",
+                         "input": {"file_path": "/repo/a.py",
+                                   "old_string": "x", "new_string": "y"}},
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:02Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_ok",
+                     "is_error": False, "content": "applied"},
+                ]},
+                "timestamp": "2026-06-14T10:00:03Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
+def test_tool_call_events_carry_is_error(claude_tool_outcomes: str) -> None:
+    """Success/error is visible on the existing ``tool_call`` events — the
+    outcome is correlated by ``tool_use_id`` and attached as an
+    ``is_error`` ref (no new event type is introduced)."""
+    events = list(iter_events("claude", session=claude_tool_outcomes))
+    # No new event type: only user_turn / tool_call(*) appear here.
+    assert {e.type for e in events} <= {
+        "tool_call(bash)", "tool_call(edit)",
+    }
+    bash = next(e for e in events if e.type == "tool_call(bash)")
+    edit = next(e for e in events if e.type == "tool_call(edit)")
+    bash_err = [r["is_error"] for r in bash.refs if "is_error" in r]
+    edit_err = [r["is_error"] for r in edit.refs if "is_error" in r]
+    assert bash_err == [True]
+    assert edit_err == [False]
+
+
+def test_bare_tool_call_filter_unaffected_by_outcomes(
+    claude_tool_outcomes: str,
+) -> None:
+    """A ``tool_call``-prefixed type filter still sees every call — attaching
+    outcomes did not change event ``type`` values or counts."""
+    events = list(iter_events("claude", session=claude_tool_outcomes))
+    calls = [e for e in events if e.type.startswith("tool_call(")]
+    assert len(calls) == 2
+
+
 def test_sha256_deterministic(multi_turn_claude: str) -> None:
     a = list(iter_events("claude", session=multi_turn_claude))
     b = list(iter_events("claude", session=multi_turn_claude))

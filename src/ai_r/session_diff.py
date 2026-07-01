@@ -167,23 +167,34 @@ def _diff_via_verb(
     ``hunks`` key, which is additive and not part of the ``session_diff``
     contract).  Byte-identical to the legacy scan for structured-edit agents.
     """
-    from ai_r.events import diff as _diff, query as _query
+    from ai_r.events import diff as _diff
+    from ai_r.events.model import iter_events as _iter_events
+    from ai_r.events.query import _attach_intents, _event_to_dict
 
-    rows: List[dict[str, Any]] = []
-    for ev in _query(
-        type="tool_call", session=session_uuid, agent=agent, with_intent=True
-    ):
+    # Materialize the session's event stream ONCE (one parse), then derive the
+    # edit rows from that in-memory list — instead of calling ``query`` (which
+    # would re-run ``iter_events``).  ``_attach_intents`` reuses ONE cached
+    # ``read_messages`` for the whole batch, and ``diff`` reuses ONE more for
+    # body resolution: the per-session parse count is O(1), not O(edit rows).
+    survivors = []
+    for ev in _iter_events(agent, session=session_uuid):
         # Only real edits: ``Edit``/``Write``/… normalize to edit|write; a
         # ``Read``/``View`` carries a file ref too but is NOT an edit, so it
         # must be excluded to match the legacy EDIT_TOOLS filter.
-        if ev.get("type") not in ("tool_call(edit)", "tool_call(write)"):
+        if ev.type not in ("tool_call(edit)", "tool_call(write)"):
             continue
-        files = [r.get("file", "") for r in ev.get("refs", ()) if "file" in r]
+        files = [r.get("file", "") for r in ev.refs if "file" in r]
         if not files:
             continue
         if path_filter is not None and not any(path_filter in f for f in files):
             continue
-        rows.append(ev)
+        survivors.append(ev)
+    # Reproduce ``query``'s default date order (ts-ascending, None-ts last,
+    # stable within session) so ``diff``'s first-appearance file grouping is
+    # byte-identical to the former ``query``-backed path.
+    survivors.sort(key=lambda e: (e.ts is None, e.ts or ""))
+    rows: List[dict[str, Any]] = [_event_to_dict(ev) for ev in survivors]
+    _attach_intents(rows)
 
     folded = _diff(rows)
     # Project onto the legacy shape: keep only file/edits/diff per file (drop

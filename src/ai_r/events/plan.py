@@ -274,7 +274,27 @@ def _resolve_plan_signal(event_id: str) -> Optional[_PlanSignal]:
     return None
 
 
-def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
+# Default char cap on a returned ``get_body`` body/text.  Generous — normal
+# plan bodies and turn texts are far smaller, so ordinary fetches are never
+# cut; this only bounds a pathological/adversarial multi-MB body.  A value <= 0
+# disables the cap.
+_BODY_CHARS_CAP = 500_000
+
+
+def _cap_body(text: object, max_chars: int) -> tuple[object, bool]:
+    """Return ``(text, truncated)`` bounding a body/text to ``max_chars``.
+
+    Only ``str`` values are capped; a value <= 0 disables the cap.  An
+    over-cap string is sliced with a trailing ``…[truncated]`` marker.
+    """
+    if max_chars and max_chars > 0 and isinstance(text, str) and len(text) > max_chars:
+        return text[:max_chars] + "…[truncated]", True
+    return text, False
+
+
+def get_body(
+    id: str, shallow: bool = False, *, max_chars: int = _BODY_CHARS_CAP
+) -> dict[str, Any]:
     """Return the on-demand body for an event / plan id.
 
     For a ``plan_event`` the body is the full plan text (Claude
@@ -288,10 +308,16 @@ def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
     dropping the bodies of any earlier ``draft`` revisions — the S6 scenario
     where a subagent gets one plan without the noise of superseded drafts.
 
+    ``max_chars`` bounds the returned ``body``/``text``; when it trips the
+    field is sliced with a ``…[truncated]`` marker and ``body_truncated: true``
+    is set.  The default (500_000) is generous — ordinary bodies are never
+    cut; pass ``0`` to disable.
+
     Returns:
         ``{"id", "type", "title"?, "body"?, "steps"?, "status"?, "path"?,
-        "shallow"}`` for a plan, or ``{"id", "type", "text"}`` for a turn.
-        ``{"error": ...}`` when the id cannot be resolved.
+        "shallow", "body_truncated"?}`` for a plan, or ``{"id", "type",
+        "text", "body_truncated"?}`` for a turn.  ``{"error": ...}`` when the
+        id cannot be resolved.
     """
     if not id or ":" not in id:
         return {"error": "invalid_argument", "message": f"invalid id {id!r}"}
@@ -303,7 +329,11 @@ def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
 
     if event.type != "plan_event":
         # Turn/tool body: the text already lives on the event.
-        return {"id": id, "type": event.type, "text": event.text}
+        text, body_truncated = _cap_body(event.text, max_chars)
+        out: dict[str, Any] = {"id": id, "type": event.type, "text": text}
+        if body_truncated:
+            out["body_truncated"] = True
+        return out
 
     sig = _resolve_plan_signal(id)
     title = _plan_ref_value(event.refs, "title") or event.text or ""
@@ -353,4 +383,8 @@ def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
                 if p.task_id == my.task_id and p.kind == "draft"
                 and p.id != result["id"]
             ]
+    if "body" in result:
+        result["body"], body_truncated = _cap_body(result["body"], max_chars)
+        if body_truncated:
+            result["body_truncated"] = True
     return result
