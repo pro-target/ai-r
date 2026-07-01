@@ -824,7 +824,7 @@ def search_sessions(
     operator: str = "AND",
     limit: int = 50,
     sort: str = "relevance",
-) -> List[dict[str, Any]]:
+) -> dict[str, Any]:
     """Case-insensitive search across sessions.
 
     Args:
@@ -853,48 +853,49 @@ def search_sessions(
               pre-ranking order).
 
     Returns:
-        A list of session summaries. When ``scope`` is ``"body"`` or
-        ``"all"`` and a match is found, the summary includes a
-        ``"snippet"`` field with the first matching message excerpt
-        (up to 200 chars).
+        A dict ``{"results": [...], "count": N}`` where ``results`` is the
+        list of session summaries and ``count`` is their total. When
+        ``scope`` is ``"body"`` or ``"all"`` and a match is found, each
+        summary includes a ``"snippet"`` field with the first matching
+        message excerpt (up to 200 chars) and may carry ``body_truncated``.
 
-    Errors are returned as ``{"error": ..., "message": ...}`` dicts in
-    the list (matches the existing convention).
+    Errors are returned as a top-level ``{"error": ..., "message": ...}``
+    dict (matches the existing convention).
     """
     needle = (query or "").strip()
     if not needle:
-        return []
+        return {"results": [], "count": 0}
 
     if scope not in ("title", "body", "all"):
-        return [{
+        return {
             "error": "invalid_argument",
             "message": f"unknown scope {scope!r}; expected title, body, or all",
-        }]
+        }
 
     op_upper = (operator or "AND").upper()
     if op_upper not in ("AND", "OR", "NOT"):
-        return [{
+        return {
             "error": "invalid_argument",
             "message": f"unknown operator {operator!r}; expected AND, OR, or NOT",
-        }]
+        }
 
     if not isinstance(limit, int) or limit < 0:
-        return [{
+        return {
             "error": "invalid_argument",
             "message": f"limit must be a non-negative integer, got {limit!r}",
-        }]
+        }
 
     sort_lower = (sort or "relevance").lower()
     if sort_lower not in ("relevance", "date"):
-        return [{
+        return {
             "error": "invalid_argument",
             "message": f"unknown sort {sort!r}; expected relevance or date",
-        }]
+        }
 
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
-        return [{"error": "invalid_argument", "message": str(exc)}]
+        return {"error": "invalid_argument", "message": str(exc)}
 
     positive, negative = _parse_query(needle)
     summaries: List[dict[str, Any]] = []
@@ -977,7 +978,7 @@ def search_sessions(
 
     if limit:
         summaries = summaries[:limit]
-    return summaries
+    return {"results": summaries, "count": len(summaries)}
 
 
 @mcp.tool()

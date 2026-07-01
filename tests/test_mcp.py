@@ -176,16 +176,17 @@ def test_mcp_search_claude() -> None:
     texts = _run(
         _call("search_sessions", {"query": "claude", "agent": "claude"})
     )
-    matches = [json.loads(t) for t in texts if t.strip().startswith("{")]
-    if matches:
-        m = matches[0]
+    payload = json.loads(texts[0])
+    results = payload["results"]
+    if results:
+        m = results[0]
         assert "uuid" in m and "title" in m
 
 
 def test_mcp_search_empty_query() -> None:
-    """An empty query short-circuits to an empty list."""
+    """An empty query short-circuits to an empty result set."""
     texts = _run(_call("search_sessions", {"query": ""}))
-    assert texts == [] or json.loads(texts[0]) == []
+    assert json.loads(texts[0]) == {"results": [], "count": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -650,14 +651,14 @@ def test_read_session_not_found_returns_error_dict() -> None:
 
 
 def test_search_sessions_empty_query_returns_empty() -> None:
-    """An empty query short-circuits to ``[]``."""
-    assert search_sessions(query="") == []
+    """An empty query short-circuits to an empty result set."""
+    assert search_sessions(query="") == {"results": [], "count": 0}
 
 
 def test_search_sessions_invalid_agent_returns_error_dict() -> None:
     result = search_sessions(query="x", agent="mystery")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
 
 
 # ---------------------------------------------------------------------------
@@ -1033,9 +1034,11 @@ def test_search_sessions_backward_compat_title_only(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("claude")
-    assert isinstance(result, list)
-    assert result, "expected at least one match against the title"
-    for s in result:
+    assert isinstance(result, dict)
+    rows = result["results"]
+    assert rows, "expected at least one match against the title"
+    assert result["count"] == len(rows)
+    for s in rows:
         assert "snippet" not in s
         assert "claude" in s["title"].lower()
 
@@ -1057,9 +1060,9 @@ def test_search_sessions_body_and_match(
     result = search_sessions(
         "pwa manifest", agent="claude", scope="body"
     )
-    assert isinstance(result, list)
-    assert result, "expected body match"
-    matched = [s for s in result if s["uuid"] == "body-and-1"]
+    assert isinstance(result, dict)
+    assert result["results"], "expected body match"
+    matched = [s for s in result["results"] if s["uuid"] == "body-and-1"]
     assert matched, "the synthesized session must be in the results"
     assert "snippet" in matched[0]
     assert "pwa manifest" in matched[0]["snippet"].lower()
@@ -1084,7 +1087,7 @@ def test_search_sessions_body_or_match(
         scope="body",
         operator="OR",
     )
-    matched = [s for s in result if s["uuid"] == "body-or-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-or-1"]
     assert matched, "OR: only pwa appears, must still match"
 
 
@@ -1116,9 +1119,10 @@ def test_search_sessions_body_marks_truncated(
 
     result = search_sessions("needle", agent="claude", scope="body")
 
-    assert result
-    assert result[0]["uuid"] == "body-truncated-1"
-    assert result[0]["body_truncated"] is True
+    rows = result["results"]
+    assert rows
+    assert rows[0]["uuid"] == "body-truncated-1"
+    assert rows[0]["body_truncated"] is True
 
 
 def test_search_sessions_body_not_match(
@@ -1137,7 +1141,7 @@ def test_search_sessions_body_not_match(
     result = search_sessions(
         "pwa", agent="claude", scope="body", operator="NOT"
     )
-    matched = [s for s in result if s["uuid"] == "body-not-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-not-1"]
     assert not matched, "NOT: pwa is in the body, must not match"
 
 
@@ -1158,13 +1162,13 @@ def test_search_sessions_body_negative_prefix(
     excluded = search_sessions(
         "pwa -manifest", agent="claude", scope="body"
     )
-    assert not [s for s in excluded if s["uuid"] == "body-neg-1"], (
+    assert not [s for s in excluded["results"] if s["uuid"] == "body-neg-1"], (
         "-manifest must exclude a session that contains manifest"
     )
     included = search_sessions(
         "pwa -claude", agent="claude", scope="body"
     )
-    assert [s for s in included if s["uuid"] == "body-neg-1"], (
+    assert [s for s in included["results"] if s["uuid"] == "body-neg-1"], (
         "-claude must NOT exclude a session that has no 'claude' in body"
     )
 
@@ -1186,7 +1190,7 @@ def test_search_sessions_all_negative_prefix_excludes_title(
     result = search_sessions(
         "pwa -claude", agent="claude", scope="all"
     )
-    assert not [s for s in result if s["uuid"] == "all-neg-title-1"]
+    assert not [s for s in result["results"] if s["uuid"] == "all-neg-title-1"]
 
 
 def test_search_sessions_body_quoted_phrase(
@@ -1203,7 +1207,7 @@ def test_search_sessions_body_quoted_phrase(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions('"foo bar"', agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-quote-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-quote-1"]
     assert matched, "quoted phrase 'foo bar' must be located as a single term"
 
 
@@ -1226,7 +1230,7 @@ def test_search_sessions_body_tool_use_match(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("pytest", agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-tool-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-tool-1"]
     assert matched, "tool_use input must be searchable"
     assert "snippet" in matched[0]
 
@@ -1249,7 +1253,8 @@ def test_search_sessions_limit(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("limitcap", agent="claude", limit=2)
-    assert len(result) <= 2
+    assert len(result["results"]) <= 2
+    assert result["count"] == len(result["results"])
 
 
 # ---------------------------------------------------------------------------
@@ -1322,7 +1327,7 @@ def test_search_sessions_relevance_beats_recency(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body")
-    uuids = [s["uuid"] for s in result]
+    uuids = [s["uuid"] for s in result["results"]]
     assert set(uuids) == {"rank-relevant-old", "rank-fresh-new"}
     # Relevance default: the older-but-denser match wins despite the other
     # being newer.
@@ -1353,7 +1358,7 @@ def test_search_sessions_sort_date_reproduces_pre_reform_order(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body", sort="date")
-    uuids = [s["uuid"] for s in result]
+    uuids = [s["uuid"] for s in result["results"]]
     # Newest-first: the fresher session leads even though it's less relevant.
     assert uuids == ["date-fresh-new", "date-relevant-old"]
 
@@ -1394,38 +1399,38 @@ def test_search_sessions_limit_applied_after_ranking(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body", limit=1)
-    assert len(result) == 1
+    assert len(result["results"]) == 1
     # The single survivor is the top-ranked (oldest, densest) session —
     # proof that the limit ran AFTER ranking, not before.
-    assert result[0]["uuid"] == "lim-top-old"
+    assert result["results"][0]["uuid"] == "lim-top-old"
 
 
 def test_search_sessions_invalid_sort() -> None:
     result = search_sessions("x", sort="bogus")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "sort" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "sort" in result["message"].lower()
 
 
 def test_search_sessions_invalid_scope() -> None:
     result = search_sessions("x", scope="bogus")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "scope" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "scope" in result["message"].lower()
 
 
 def test_search_sessions_invalid_operator() -> None:
     result = search_sessions("x", operator="XOR")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "operator" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "operator" in result["message"].lower()
 
 
 def test_search_sessions_invalid_limit() -> None:
     result = search_sessions("x", limit=-1)
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "limit" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "limit" in result["message"].lower()
 
 
 def test_search_sessions_snippet_truncated(
@@ -1443,7 +1448,7 @@ def test_search_sessions_snippet_truncated(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("needle", agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-long-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-long-1"]
     assert matched
     snippet = matched[0]["snippet"]
     assert len(snippet) <= 200

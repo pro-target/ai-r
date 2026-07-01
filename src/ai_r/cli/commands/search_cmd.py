@@ -108,11 +108,12 @@ def _run_search(args: argparse.Namespace) -> int:
         sort=sort,
     )
 
-    if raw and isinstance(raw[0], dict) and raw[0].get("error") == "invalid_argument":
-        return _exit_with_error(raw[0].get("message", "invalid argument"))
+    if isinstance(raw, dict) and raw.get("error") == "invalid_argument":
+        return _exit_with_error(raw.get("message", "invalid argument"))
 
+    results = raw["results"]
     filtered: List[dict[str, Any]] = []
-    for summary in raw:
+    for summary in results:
         try:
             sess = Session(
                 uuid=summary["uuid"],

@@ -434,21 +434,21 @@ Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`
 - **Goal:** A multi-word query defaults to AND over titles, ranked by BM25 relevance.
 - **Preconditions:** A vault with sessions whose titles share distinctive words. `[needs-real-vault]`.
 - **Steps:** `mcp__ai-r__search_sessions(query="<word-a> <word-b>", scope="title", sort="relevance", limit=10)`.
-- **Expected:** Every result's title contains BOTH terms (AND default); order is BM25 relevance, not date; each summary carries the session identity fields (`uuid`, `agent`, `title`, `date`, `kind`).
-- **Pass criteria:** GO when all survivors satisfy the AND-of-terms over the title and the top hit is the strongest textual match (relevance ordering, not chronological).
+- **Expected:** The call returns `{"results": [...], "count": N}`; `count` equals `len(results)`; every item in `results` has a title containing BOTH terms (AND default); order is BM25 relevance, not date; each summary carries the session identity fields (`uuid`, `agent`, `title`, `date`, `kind`).
+- **Pass criteria:** GO when the wrapper carries `results`/`count`, all survivors in `results` satisfy the AND-of-terms over the title, and the top hit is the strongest textual match (relevance ordering, not chronological).
 
 ### SRCH-2 — body scope returns a snippet
 - **Function:** `search_sessions`
 - **Goal:** `scope="body"` matches message text / tool input / tool result — not the title — and returns a matching `snippet`.
 - **Preconditions:** A vault with a distinctive term occurring in message bodies but NOT in any title. `[needs-real-vault]`.
 - **Steps:** `mcp__ai-r__search_sessions(query="<body-only term>", scope="body", limit=10)`; then the same term with `scope="title"` as a control.
-- **Expected:** Body-scope finds the term and each result carries a `snippet` (≤200 chars) containing it; the `scope="title"` control returns fewer/no hits.
-- **Pass criteria:** GO when body-scope finds the term, every match carries a snippet with the term, and the title control confirms the match came from the body (not the title).
+- **Expected:** The call returns `{"results": [...], "count": N}`; body-scope finds the term and each item in `results` carries a `snippet` (≤200 chars) containing it; the `scope="title"` control returns a wrapper with fewer/no `results`.
+- **Pass criteria:** GO when body-scope's `results` find the term, every match carries a snippet with the term, and the title control confirms the match came from the body (not the title).
 
 ### SRCH-3 — operators: OR widens, negative `-term` excludes, quoted phrase is contiguous
 - **Function:** `search_sessions`
 - **Goal:** `operator` and the Google-style prefixes change the result set exactly as specified.
 - **Preconditions:** A vault with overlapping terms. `[needs-real-vault]`.
 - **Steps:** run the same two terms with `operator="AND"` then `operator="OR"`; then a query with a `-<term>` negative prefix; then a `"quoted phrase"`.
-- **Expected:** `OR` never returns fewer than `AND` (`set(AND) ⊆ set(OR)`); a `-term` excludes every session containing that term regardless of operator; a quoted phrase matches only the contiguous phrase, not the words scattered.
-- **Pass criteria:** GO when `set(AND) ⊆ set(OR)`, the negative term removes all its matches, and the quoted phrase matches contiguously.
+- **Expected:** Each call returns `{"results": [...], "count": N}`; comparing the `results` lists, `OR` never returns fewer than `AND` (`set(AND) ⊆ set(OR)`); a `-term` excludes every session containing that term regardless of operator; a quoted phrase matches only the contiguous phrase, not the words scattered.
+- **Pass criteria:** GO when, over the `results` of each wrapper, `set(AND) ⊆ set(OR)`, the negative term removes all its matches, and the quoted phrase matches contiguously.
