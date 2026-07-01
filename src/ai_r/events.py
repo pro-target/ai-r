@@ -351,7 +351,12 @@ def _plan_signal_from_tool(
             status: Optional[str] = None
             title = "Plan"
             if isinstance(payload, dict):
-                raw_steps = payload.get("steps")
+                # Codex ``update_plan`` carries the step array under the
+                # ``plan`` key (verified across the vault); ``steps`` is kept
+                # only as a defensive fallback for any other shape.
+                raw_steps = payload.get("plan")
+                if not isinstance(raw_steps, list):
+                    raw_steps = payload.get("steps")
                 if isinstance(raw_steps, list):
                     steps = tuple(s for s in raw_steps if isinstance(s, dict))
                 raw_title = payload.get("name") or payload.get("explanation")

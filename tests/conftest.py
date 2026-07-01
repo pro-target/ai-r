@@ -575,8 +575,8 @@ def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
                     "name": "update_plan",
                     "arguments": json.dumps(
                         {"name": "ship the feature",
-                         "steps": [{"step": "a", "status": "pending"},
-                                   {"step": "b", "status": "pending"}]}
+                         "plan": [{"step": "a", "status": "pending"},
+                                  {"step": "b", "status": "pending"}]}
                     ),
                 },
             },
@@ -588,8 +588,8 @@ def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
                     "name": "update_plan",
                     "arguments": json.dumps(
                         {"name": "ship the feature",
-                         "steps": [{"step": "a", "status": "completed"},
-                                   {"step": "b", "status": "in_progress"}]}
+                         "plan": [{"step": "a", "status": "completed"},
+                                  {"step": "b", "status": "in_progress"}]}
                     ),
                 },
             },
@@ -601,8 +601,8 @@ def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
                     "name": "update_plan",
                     "arguments": json.dumps(
                         {"name": "ship the feature",
-                         "steps": [{"step": "a", "status": "completed"},
-                                   {"step": "b", "status": "completed"}]}
+                         "plan": [{"step": "a", "status": "completed"},
+                                  {"step": "b", "status": "completed"}]}
                     ),
                 },
             },
