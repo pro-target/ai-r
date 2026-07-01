@@ -6,109 +6,139 @@
 
 [English](README.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md)
 
-> **One read-only surface for every AI coding agent's session history** —
-> Claude, Codex, OpenCode, Antigravity, and Pi — over **MCP**, a **CLI**,
-> or a **Python SDK**.
->
-> Switch agents without losing the thread · Attribute any edit or command
-> to the agent that ran it · Replay a session · Extract the plan behind
-> the work — across all five agents, one interface.
+> `git` shows **what** made it into the code. `ai-r` shows **why**: which agent
+> did it, under which plan — and whether it quietly dropped the plan it actually
+> settled on. Read-only, across all five coding agents, one interface.
 
-```bash
-# one query, every agent — find the session where that auth bug came up
-ai-r search "auth token refresh" --scope body
+An agent reports: "done X, per plan Y." You have no way to check. The plan lives
+in one format, the edits in another. And if two agents worked the task, their
+histories don't reconcile at all — each writes its own way, in its own place.
+`ai-r` reads an agent's session history and pulls out the intent, the plan, and
+the authorship behind an edit.
+
+## Quick example — an agent asks about history
+
+The primary mode is **MCP**: an agent (Claude, Codex, …) calls `ai-r` directly
+and asks about history in plain language. For example — pull the plan the
+previous agent settled on, drafts discarded:
+
+```
+Show me the plan from the last session — final only, no intermediate revisions.
+→ ai-r: plan(session=…, kind="final")  →  get_body(id, shallow=true)
+        returns the final task + a list of dropped_drafts
 ```
 
-## The pain: five silos, no shared view
+Fast edit attribution — one terminal command, across every agent at once:
 
-Every AI coding agent keeps its own conversation history — in its own
-place, in its own format:
+```bash
+# who edited this file, and when — cross-agent, optionally time-boxed
+ai-r find-file-edits auth.py --since 2026-06-01
+```
 
-- **Claude** and **Codex** write JSONL,
-- **OpenCode** uses a SQLite DB,
-- **Antigravity** scatters "brain" directories,
-- **Pi** writes per-project JSONL.
+## What hurts
 
-Five formats, five layouts. So the moment you run more than one agent,
-your work goes **siloed per tool**. Switch agents and you lose the
-thread. You can't ask "what did the *other* agent already try?" And when
-a commit or a file edit shows up, there's no straight answer to **which
-agent actually did it** — the attribution lives in five incompatible
-logs you'd have to learn one by one.
+- "Done, I did X per plan Y" — with nothing to check it against: the agent keeps
+  the plan in one shape, the edits in another.
+- You switched agents mid-task and lost the thread. There's nowhere to ask "what
+  did the *other* agent already try?"
+- An edit shows up in a file — and it's unclear **which** agent made it, and on
+  what request.
+
+One cause: every agent writes its history **its own way** — Claude and Codex in
+JSONL, OpenCode in SQLite, Antigravity in "brain" directories, Pi in
+per-project JSONL. Five formats, five layouts — together they don't reconcile.
 
 ## The promise
 
-`ai-r` collapses all five into **one read-only interface**. Point any
-agent — or a script, or yourself — at any session, no matter which tool
-wrote it. Same query shape for every agent; the per-format differences
-are normalized away inside the parsers.
+`ai-r` folds all five into **one read-only interface**. Point any agent — or a
+script, or yourself — at any session, no matter which tool recorded it. One
+query shape per agent; format differences are normalized inside the parsers.
 
-## How it works
+## Key features
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Public API (3 surfaces)                                       │
-│   • ai-r        CLI (argparse)                                │
-│   • ai-r-mcp    MCP server (stdio JSON-RPC)                   │
-│   • from ai_r.parsers import ...   (Python SDK)               │
-└──────────────────────────────────────────────────────────────┘
-                          ▲
-┌──────────────────────────────────────────────────────────────┐
-│ Event core: one agent-neutral stream                          │
-│   user_turn · assistant_turn · tool_call(edit|write|read|…)   │
-│   · plan_event   → filtered/aggregated/diffed by verbs        │
-└──────────────────────────────────────────────────────────────┘
-                          ▲
-┌──────────────────────────────────────────────────────────────┐
-│ Per-agent parsers (read-only)                                 │
-│   claude · codex · opencode(SQLite) · antigravity · pi        │
-└──────────────────────────────────────────────────────────────┘
-```
+- **"Why?", not just "What?".** Extracts the plan, intent, and authorship behind
+  an edit — not just the diff text. `git diff` tells you *what* changed; `ai-r`
+  tells you under which plan and on whose request.
+- **The final plan, not the drafts.** `ai-r` pulls the plan the agent *settled
+  on*, and separately shows what it threw away along the way (`dropped_drafts`)
+  — across Claude / Codex / Antigravity, where the plan signals differ.
+- **Cross-agent attribution.** Any file edit or tool call → the agent that made
+  it, plus the request that triggered it (`find-file-edits` / `find-tool-calls`).
+- **Small answer, body on demand.** Records carry a reference to the content
+  (hash + length); the full edit text is fetched separately — the response
+  doesn't balloon.
+- **Works over MCP (13 tools).** An agent calls `ai-r` directly in plain
+  language; the same data is available from the terminal (CLI) and from code
+  (Python SDK).
+- **A reader, not a guard.** Extracts entities; you (or your tool) build the
+  knowledge graph and the memory. Read-only: it never runs or writes to an
+  agent's history.
 
-Each parser reads one agent's on-disk logs and emits typed `Session`
-and message models. Those normalize into a single, agent-neutral **event
-stream** — `user_turn` / `assistant_turn` / `tool_call(...)` /
-`plan_event` — and a small set of **verbs** filter, aggregate, and diff
-that stream. The differences between agents (`ExitPlanMode` vs
-`update_plan` vs `implementation_plan.md`) are hidden inside the
-parsers; callers see one shape.
+## What you use it for
 
-## Proof — it reads the sessions that built it
+- **Audit sessions with a fresh pair of eyes.** A new agent with an empty
+  context coldly checks past sessions on three axes: were promises and
+  requirements met; are the decisions sound and well-judged; how deeply was the
+  question explored — what the agent missed. On one real run, 271 dialogs were
+  reviewed this way in a week, catching agents that finished the task **but
+  misled on the planning** — something a live chat hides, and that steers you
+  into wrong decisions.
+- **Continue past a spent context — without losing detail.** `/compact` erases
+  the specifics. Instead, open a fresh session: it reads the previous session's
+  **logs** and continues from its conclusions, without re-burning context on
+  what's already been worked out. The original session stays intact — for audit
+  and search. The new session can run in **any** agent: the history reconciles
+  regardless of the tool.
+- **Feeds your memory system.** Keeping memory and summaries à la Karpathy, or
+  your own method? `ai-r` gives you, for AI chats, what you already do with
+  message history — parsed entities to build a lasting memory of the details
+  that matter.
+- **Recall what you did and why.** Why was this file edited? Why was this rule
+  added? Find the session where the file changed and read the request *before*
+  the edit.
 
-`ai-r` reads the very sessions that built `ai-r`. Across **5 agents** it
-is called routinely by real consumers that live on top of the parser API:
+## How it differs from session-search tools
 
-- **session-summarizer** / `export rounds` — render a session into a
-  CHANGELOG-style handoff doc.
-- **git-log-auditor** — a fresh agent whose only job is to coldly review
-  what a previous agent actually did and decided. This has caught agents
-  that quietly misled the planning.
-- **ai-local-reader** — a read-only skill that audits past sessions from
-  local disk across all five agents.
-- **MCP registrations** — the server is auto-registered into Claude,
-  Codex, OpenCode, and Antigravity; Pi gets a CLI skill.
+A handful of cross-agent tools now read more than one agent's history
+(`jazzyalex/agent-sessions`, `Dicklesworthstone/coding_agent_session_search`,
+`hacktivist123/agent-session-resume`). Almost all are about **search and
+timeline**: find a *session*, scroll the history.
 
-These consumers are **workflow-side** and live outside this repo; they
-call `ai-r`'s read-only parser API (`read_messages`, the MCP tools, the
-verbs). `ai-r` itself stays a reader.
+`ai-r` goes deeper: it extracts the **plan, intent, and authorship as ready-made
+entities** you build memory on. Search finds text — `ai-r` answers **why**.
+Technically a search tool could also dig a plan out of a session's text, but it
+doesn't hand it back parsed into a single, normalized shape — with `ai-r` that's
+the primary surface.
 
-## Quick start (1 request)
+| Capability | Single-agent viewers | Cross-agent search tools | `ai-r` |
+|---|---|---|---|
+| Reads >1 agent's logs | No | Yes | Yes — Claude, Codex, OpenCode, Antigravity, Pi |
+| Programmatic surface | Mostly GUI/TUI | Mostly TUI/CLI/app | **MCP + CLI + Python SDK** |
+| Attribution (edit/command → agent + intent) | — | Partial | Yes — `find-file-edits` / `find-tool-calls` |
+| Audit replay (reconstruct a session's changes, no git) | — | Rarely | Yes — `session_diff` |
+| Plan extraction (final vs draft, normalized) | — | — | Yes — `plan` |
+| Scope | Viewer | Search / resume / memory | **Read-only extraction core** |
 
-Prerequisites: Python 3.11+ with either `venv` (`python3-venv`) or `pip`
-(`python3-pip`/`pip3`), and `jq` (used to auto-register the Claude and
-Antigravity MCP configs — the others need no `jq`).
+*Competitor columns reflect their public docs as of 2026-07; where a capability
+is unclear we under-state rather than over-claim.*
 
-```bash
-git clone https://github.com/pro-target/ai-r.git ~/dev/ai-r
-cd ~/dev/ai-r && bash install.sh
-```
+We deliberately **don't** compete on agent breadth, speed, or TUI richness.
+`ai-r`'s wedge is extracting the "why" and structured entities for machine
+consumption.
 
-That's it. The installer:
-- Uses per-user mode by default; `opt` mode is explicit
-- Creates a venv, installs the runtime package
-- Patches MCP configs for **Claude**, **Codex**, **OpenCode**, **Antigravity** when those config files exist
-- Installs the **Pi** CLI skill at `~/.agents/skills/ai-r/SKILL.md` when absent
-- Runs smoke tests
+## Proven in practice
+
+`ai-r` already reads its own development history — across all five agents. Real
+tools run on it (they live separately, on top of its read-only API):
+
+- **auditor** — a fresh agent coldly checks what the previous one actually did
+  and decided. This caught agents that quietly fibbed about the plan.
+- **summarizer** (`export rounds`) — renders a session into a ready handoff doc.
+- **ai-local-reader** — a read-only skill: audits past sessions from disk across
+  all agents.
+
+These tools are workflow-side, outside this repo. `ai-r` itself only reads and
+returns data.
 
 ## Supported agents
 
@@ -116,29 +146,32 @@ That's it. The installer:
 |---|---|---|
 | Claude Code | `~/.claude/projects/` | JSONL |
 | Codex | `~/.codex/sessions/` | JSONL |
-| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite (auto-detects snap/flatpak) |
+| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite (snap/flatpak auto-detect) |
 | Antigravity | `~/.gemini/antigravity/brain/` | JSON / markdown brain directories |
 | Pi | `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` | JSONL |
 
-Not your agent? Adding a sixth is **one parser module** — the read-only
-pattern ports to any tool (Cursor, Cline, your own) in minutes. See
-[CONTRIBUTING.md](./CONTRIBUTING.md).
+Not your agent? Adding a sixth is **one parser module**; the read-only pattern
+ports to any tool in minutes. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Surfaces
 
-`ai-r` exposes the same reading power three ways:
+`ai-r` gives the same reading power three ways:
 
-- **MCP server** (`ai-r-mcp`) — 13 tools over stdio JSON-RPC, so any
-  MCP-capable agent can call it directly (recommended).
-- **CLI** (`ai-r`) — subcommands for scripts and manual use.
-- **Python SDK** (`from ai_r.parsers import ...`) — the parsers, typed
-  `Session`/message models, and event verbs, for building your own tools.
+- **MCP server** (`ai-r-mcp`) — 13 tools over stdio JSON-RPC, so any MCP agent
+  calls it directly (recommended). Registration — see
+  [docs/mcp-registration.md](./docs/mcp-registration.md).
+- **CLI** (`ai-r`) — subcommands for scripts and manual use (`list` / `read` /
+  `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
+  `detect-agent` / `export rounds`). Search operators —
+  [docs/search-operators.md](./docs/search-operators.md).
+- **Python SDK** (`from ai_r.parsers import ...`) — parsers, typed
+  `Session`/message models, and the event verbs, to build your own tools.
 
 ### Method vocabulary (SSOT)
 
-The block below is framed from [`docs/methods.md`](./docs/methods.md) —
-the single source of truth for the public verbs and presets. It is kept
-in sync with that file's marker block.
+The block below is framed from [`docs/methods.md`](./docs/methods.md) — the
+English source of truth for the public verbs and presets. It's kept in sync with
+that file's marker block.
 
 <!-- methods:start -->
 
@@ -192,380 +225,53 @@ Phase 3b enriched the verbs so old tools became thin presets **with byte-identic
 
 <!-- methods:end -->
 
-### What this branch adds — event core
+### Event core
 
-The verbs above are new: one **event-stream core** replaces a pile of
-one-off tools. Highlights:
+The verbs above are new: one **event core** replaces a pile of one-off tools.
+Each parser reads one agent's logs and emits typed models, normalized into a
+single agent-neutral stream — `user_turn` / `assistant_turn` / `tool_call(...)`
+/ `plan_event`. A small set of verbs filters, aggregates, and diffs that stream;
+agent differences (`ExitPlanMode` vs `update_plan` vs `implementation_plan.md`)
+stay hidden inside the parsers — the caller sees one shape.
 
-- **`query`** — the workhorse. Filter the unified event stream by
-  `type` / `agent` / `session` / date / `file` / `tool` / `text`. With
-  `sort="relevance"` the text match is BM25-ranked (same scorer as
-  `search_sessions`). With `relative_to`+`direction`+`n` it walks
-  neighbouring turns — the primitive behind both `intent` and
-  `reaction`.
-- **`intent` / `reaction` presets** — `intent(event)` = the user request
-  *behind* an event (walk back); `reaction(event)` = the user's response
-  *after* an assistant turn (walk forward — critique, correction,
-  approval).
-- **`plan`** — normalized plan atoms per session, grouped by task, tagged
-  `final` vs `draft` vs `completed_major`. So you can extract *the plan
-  the agent settled on* versus the discarded revisions — across Claude,
-  Codex, and Antigravity, whose plan signals differ. `get_body(..., 
-  shallow=True)` hands a subagent just the final plan, drafts elided.
-- **`aggregate` / `diff` / `detect_current`** — generic rollup, per-file
-  stitched diff, and runtime self-identity. `session_stats` and
-  `session_diff` are now thin presets over these, with byte-identical
-  output proven on real data (see the SSOT block above).
+An honest boundary: this is **extraction of entities only** — turns, tool calls,
+plans, intents, reactions. It is **not** a graph and **not** a memory store.
+What you do next (knowledge graph, Obsidian, persistent memory) is on your side,
+outside this repo. For the full layering and the MCP tool list, see
+[docs/architecture.md](./docs/architecture.md).
 
-Honest scope: this is **read-only entity extraction** — turns, tool
-calls, plans, intents, reactions. It is **not** a graph or a memory
-store. What a consumer does next (split into a knowledge graph, Obsidian,
-persistent memory) is deliberately **out of scope** and lives
-consumer-side.
+## Quick start (1 command)
 
-### MCP tools
-
-The MCP server exposes 13 tools. The reading essentials:
-
-| Tool | Purpose |
-|---|---|
-| `list_sessions(agent?, limit?, offset?)` | List discoverable sessions, optionally filtered by agent. Paginated. |
-| `read_session(uuid, agent, offset?, limit?)` | Read one session; up to 100 messages by default, `offset`/`limit` to page. |
-| `find_file_edits(path, agent?, since?, until?, limit?)` | Every file edit for a path, cross-agent by default, optionally time-boxed. |
-| `find_tool_calls(tool_name?, tool_name_pattern?, agent?, since?, until?, limit?)` | Every tool call — shell, file writes, web fetches, MCP calls — each carrying the triggering user request as `intent`. |
-| `search_sessions(query, agent?, scope?, operator?, limit?, sort?)` | Search title and/or body with `AND`/`OR`/`NOT` and Google-style `-term`; `sort=relevance` (BM25) or `date`. |
-| `session_stats(agent?, since?, until?, group_by?, top?)` | Group + rank sessions by `agent`/`dir`/`date`/`kind`. |
-| `session_diff(session_uuid, agent, path?)` | Reconstruct what a session changed, per-file, without git. |
-| `query`, `plan`, `get_body`, `aggregate`, `diff`, `detect_current` | The event-core verbs described above. |
-
-**Pagination** (`limit`/`offset`, plus a `truncated` flag when more pages
-remain) is exposed on the MCP tools and the Python SDK — see
-[architecture.md](docs/architecture.md).
-
-### CLI
+Requirements: Python 3.11+ with `venv` or `pip`, and `jq` (used to auto-patch
+the Claude and Antigravity MCP configs — the others don't need `jq`).
 
 ```bash
-# list / read / search
-ai-r list --agent pi
-ai-r read --agent pi <session-uuid>
-ai-r search "refactor"
-ai-r search "pwa manifest" --scope body --operator and --agent claude
-
-# who edited a file, across all agents, optionally time-boxed
-ai-r find-file-edits src/auth.py --since 2026-06-01 --until 2026-06-30
-ai-r find-file-edits "config" --agent claude --limit 20
-
-# what did agents run? exact tool name or substring pattern, time-boxed
-ai-r find-tool-calls Bash --since 2026-06-01
-ai-r find-tool-calls --pattern deploy --agent codex
-
-# which files change most? rank by edits / sessions / distinct requests / agents
-ai-r file-frequency --top 10
-ai-r file-frequency --path src/ --agent claude --since 2026-06-01
-
-# which agent / session am I in (scripts, orchestration, self-resume)
-ai-r detect-agent --quiet          # → e.g. "claude"
-ai-r detect-session --json         # → candidate session UUIDs
-
-# render a session as a CHANGELOG round (handoff doc / replay)
-ai-r export rounds <session-uuid> --include-round --output round.md
+git clone https://github.com/pro-target/ai-r.git ~/dev/ai-r
+cd ~/dev/ai-r && bash install.sh
 ```
 
-Add `--json` to most subcommands for machine-readable output. The
-event-core verbs (`query`/`plan`/`aggregate`/`diff`/`detect_current`) are
-available over MCP and the Python SDK; the CLI covers the subcommands
-listed above.
+The installer creates a venv, installs the runtime package, patches MCP configs
+for **Claude**, **Codex**, **OpenCode**, **Antigravity** (where the configs
+exist), installs the **Pi** CLI skill, and runs smoke tests.
 
-#### Search operators
+## Boundaries: a reader, not a guard
 
-`search_sessions` (MCP) and `ai-r search` (CLI) share the same query
-parser and operator parameter. Default behaviour (`scope="title"`,
-`operator="AND"`, `limit=50`) is the historical title-only substring
-search.
-
-**Query syntax**
-
-| Form | Example | Meaning |
-|---|---|---|
-| Bare words | `pwa manifest` | Both terms (operator controls how). |
-| Quoted phrase | `"exact phrase"` | Single literal term. |
-| Negative prefix | `-claude` | Google-style: this term must NOT appear. |
-
-Words `AND`, `OR`, and `NOT` inside the query are literal search terms.
-Boolean behaviour is selected with `--operator and|or|not` (CLI) or
-`operator="AND"|"OR"|"NOT"` (MCP).
-
-**Operator modes** (controls how positive terms combine)
-
-| Mode | `pwa manifest` semantics | `pwa -claude` semantics |
-|---|---|---|
-| `AND` (default) | both must appear | `pwa` appears, `claude` does not |
-| `OR` | at least one appears | one of `pwa` appears, `claude` does not |
-| `NOT` | neither appears | neither `pwa` nor `claude` appears |
-
-**Scope modes**
-
-| Scope | Where the search runs |
-|---|---|
-| `title` (default) | `session.title` only — matches the historical title-only behaviour. |
-| `body` | message text + `tool_use[*].input` + `tool_result[*].content` for every session. |
-| `all` | title OR body. |
-
-When `scope` is `body` or `all` and a match is found, the result includes
-a `snippet` field (CLI: printed in the table) — the first matching
-excerpt, up to 200 characters. Results are BM25-ranked by default
-(`sort=relevance`); pass `sort=date` to order by recency.
-
-**Performance note**: `body` and `all` invoke `read_messages` on every
-candidate session. On large vaults the first run can be slow; raise
-`--limit` to keep the result set bounded while iterating.
-
-**MCP example**
-
-```python
-search_sessions(
-    query='pwa -claude',
-    agent='claude',
-    scope='body',
-    operator='AND',
-    limit=20,
-)
-```
-
-**CLI examples**
-
-```bash
-# title-only (legacy, still default)
-ai-r search "refactor"
-
-# body search, all terms must appear, exclude claude
-ai-r search "pwa manifest -claude" --scope body --operator and
-
-# body search, any term, max 5 results
-ai-r search "pwa manifest" --scope body --operator or --limit 5
-
-# everything containing neither of these terms
-ai-r search "auth login" --scope body --operator not
-```
-
-### Python SDK
-
-```python
-from ai_r.parsers import AgentName, claude
-
-for session in claude.list_sessions():
-    print(session.uuid, session.title)
-
-session = claude.read_session("<session-uuid>")
-print(session.message_count)
-
-messages = claude.read_messages("<session-uuid>")
-print(messages[0].role, messages[0].text)
-```
-
-See [docs/architecture.md](./docs/architecture.md) for the full layering.
-
-## Use cases — one job per real consumer
-
-One reader across every agent unlocks jobs a single-agent log can't do:
-
-- **Cross-agent attribution — "which agent did this?"** Every edit to a
-  path, every tool call, across every agent and session, tagged with the
-  triggering request. Time-box it: "what did agents do to `src/auth.py`
-  last week?" — `find-file-edits` / `find-tool-calls`. Powers the
-  **git-log-auditor**.
-- **Audit & replay — coldly review what an agent actually did.** A fresh
-  agent reads a prior session and reports what it *ran*, not just what it
-  claimed. `session_diff` reconstructs the per-file change without git;
-  `export rounds` renders a CHANGELOG-style handoff. Powers
-  **session-summarizer** and **ai-local-reader**.
-- **Resume & handoff — switch agents mid-task, keep the thread.** Hit a
-  provider limit or run out of context window? Start a fresh session
-  (any agent), hand it the previous session's UUID, and continue. The
-  prior transcript is readable regardless of which tool wrote it —
-  `read_session`, `detect-session`.
-- **Find file edits + intents — why did this file keep changing?**
-  `file-frequency` rolls up which files churn most, ranked by edits,
-  distinct sessions, distinct requests, and agents involved; each edit
-  carries the user request behind it as `intent`.
-- **Plan extraction — recover the plan the agent settled on.** `plan`
-  returns normalized plan atoms per task, `final` versus `draft`, across
-  Claude / Codex / Antigravity. Hand a subagent just the final plan with
-  `get_body(..., shallow=True)`.
-
-## Differentiators vs alternatives
-
-*Validated via WebSearch, 2026-07-01.* The single-agent viewer space is
-crowded (claude-code-viewer, claude-code-history-viewer,
-claude-session-viewer, simonw/claude-code-transcripts, claude-view); a
-handful of newer tools *are* cross-agent (jazzyalex/agent-sessions,
-Dicklesworthstone/coding_agent_session_search, hacktivist123/
-agent-session-resume). Where `ai-r` differs:
-
-| Capability | Single-agent viewers | Cross-agent session tools | `ai-r` |
-|---|---|---|---|
-| Reads >1 agent's logs | No | Yes | Yes — Claude, Codex, OpenCode, Antigravity, Pi |
-| Programmatic surface | Mostly GUI/TUI | Mostly TUI/CLI/app | **MCP + CLI + Python SDK** |
-| Attribution (edit/command → agent + intent) | — | Partial (provenance in some) | Yes — `find-file-edits` / `find-tool-calls`, each with `intent` |
-| Audit-replay (reconstruct what a session changed, no git) | — | Rare | Yes — `session_diff` |
-| Plan extraction (final vs draft, normalized) | — | — | Yes — `plan` |
-| Scope | Viewer | Search / resume / memory | **Read-only extraction core** (graph/memory left to consumers) |
-
-Some cross-agent tools go the *other* direction — toward persistent
-memory or coordination layers (e.g. `cass_memory_system`,
-`mcp_agent_mail`). `ai-r` deliberately stops at read-only extraction:
-memory and graphs are consumer-side, not baked in. Where a competitor's
-exact capabilities are unclear from public docs, the table above
-understates rather than over-claims.
-
-## Design boundaries — a reader, not a guard
-
-- **Read-only.** `ai-r` never executes agent code and never writes to
-  agent session storage. It reads and returns.
-- **No graph, no memory.** It extracts entities (turns, tool calls,
-  plans, intents). Building a knowledge graph or persistent memory on
-  top is a consumer's job, out of this repo's scope.
-- **Not an access-control layer.** Any caller that can reach the CLI, the
-  MCP server, or the package can read any session — there is no
-  authorization in front of the parsers. Keep it where untrusted local
-  callers can't reach it.
-- **Session content is untrusted.** A reader's caller (auditor,
-  summarizer, replay agent) must treat session content as *data, not
-  instructions*. See [Security — untrusted session content](docs/security.md).
-
-Workflow-specific reviewers, summaries, and audits live outside this
-repo and consume the parser API (`read_messages`).
-
-### Known limitations
-
-- **Antigravity** — fixture coverage plus optional real-data smoke tests when a local brain directory exists.
-- **Codex CLI shell edits** — `find_file_edits` recovers codex file writes from `exec_command` / `local_shell_call` shell commands via a conservative quote-aware redirection scan (`>` / `>>`). Writes done through `tee` / `sed -i` / `cp` / `mv` / heredoc-only are not detected; structured edits (`apply_patch` / `write_file`) always are.
-
-See [docs/parsers.md](docs/parsers.md) for the full parser-coverage matrix.
-
-## MCP registration
-
-`ai-r-mcp` is a stdio MCP server. Register it once per host tool.
-Replace `USER` with your username (or drop the absolute path if
-`ai-r-mcp` is on your `PATH`). **Restart the host tool after editing
-its config** — none of them pick up MCP changes live.
-
-The snippets below use `/home/USER/.local/bin/ai-r-mcp`. Adjust the
-path if your install lives elsewhere (`which ai-r-mcp` tells you).
-
-### Claude Code
-
-Edit `~/.claude.json` (top-level `mcpServers` object):
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "type": "stdio",
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": [],
-      "env": {}
-    }
-  }
-}
-```
-
-For a single-project registration, commit a `.mcp.json` at the repo root
-(see [`.mcp.json`](./.mcp.json)).
-
-### Codex
-
-Edit `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.ai-r]
-command = "/home/USER/.local/bin/ai-r-mcp"
-args = []
-```
-
-### Gemini CLI
-
-Edit `~/.gemini/settings.json` (`mcpServers` object):
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": [],
-      "timeout": 60
-    }
-  }
-}
-```
-
-### OpenCode
-
-Edit `~/.config/opencode/opencode.jsonc` (top-level `mcp` object).
-OpenCode differs from the others in three ways: `type` is `"local"` (not
-`"stdio"`), `command` is a single fused array (command + args together),
-and the env key is `"environment"`.
-
-```json
-{
-  "mcp": {
-    "ai-r": {
-      "type": "local",
-      "command": ["/home/USER/.local/bin/ai-r-mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Antigravity
-
-Edit `~/.gemini/antigravity/mcp_config.json` (`mcpServers` object). This is
-distinct from the Gemini CLI config above — Antigravity keeps its MCP config
-under `~/.gemini/antigravity/`.
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-### Pi — skill, not MCP
-
-Pi (`@earendil-works/pi-coding-agent`) has **no MCP-server config** to edit.
-It uses an extension/skill model (`pi install <source>`, `pi config`), not an
-`mcpServers` map, so `ai-r-mcp` cannot be registered as an in-process
-MCP tool inside Pi (and spawning it in-process would violate Pi's design
-contract). Instead, `install/agent-configs.sh` drops a read-only **CLI skill**
-into `~/.agents/skills/ai-r/` — a directory Pi already scans. The skill
-teaches the model to call the `ai-r` CLI from a Pi bash session, with no
-MCP spawn involved. Pi sessions are also fully readable *by* `ai-r` via
-the CLI (`ai-r list --agent pi`, `ai-r read …`) or the Python SDK;
-both read the `~/.pi/agent/sessions/` files directly. For a `/ai-r` slash
-command, set `enableSkillCommands: true` in `~/.pi/agent/settings.json` (the
-skill's text works even with the default `false`).
-
-### Notes
-
-- `ai-r-mcp` must be on `PATH`, or use the absolute path as above.
-- JSON config patching uses `jq`. If `jq` is missing, the Codex, OpenCode,
-  and Pi registrations still complete; the Claude and Antigravity configs
-  are skipped — install `jq` or register them by hand with the snippets
-  above.
-- Restart the host tool after editing its config file.
-- The server is read-only; any caller that can reach it can read any
-  session. See [Design boundaries](#design-boundaries--a-reader-not-a-guard).
+- **Read-only.** It never runs an agent's code and never writes to its history —
+  it reads and returns.
+- **No graph, no memory.** It extracts entities (turns, calls, plans, intents).
+  Building a knowledge graph or memory out of them is your job, not its.
+- **Not an access-control layer.** Anyone who can reach the CLI, MCP server, or
+  package can read any session. There's no authorization in front of the
+  parsers; keep it where untrusted local processes can't reach.
+- **Session content is data, not commands.** Whoever reads (auditor, summarizer)
+  must treat session text as data, not instructions. See
+  [Security](docs/security.md).
 
 <!-- scenarios:start -->
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 32 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 37 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -580,8 +286,22 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 32 LLM-executed end-to-end
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
 | `find_tool_calls` | 1 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result. |
+| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
+| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
 
 <!-- scenarios:end -->
+
+## Next — documentation
+
+- Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
+  (English SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (Russian mirror)
+- Acceptance scenarios (32 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Architecture & layering — [`docs/architecture.md`](./docs/architecture.md)
+- Search operators — [`docs/search-operators.md`](./docs/search-operators.md)
+- Per-agent MCP registration — [`docs/mcp-registration.md`](./docs/mcp-registration.md)
+- Parser coverage & limitations — [`docs/parsers.md`](./docs/parsers.md)
+- Security (untrusted content) — [`docs/security.md`](./docs/security.md)
+- Add a sixth agent — [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ## Development
 
@@ -592,12 +312,10 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ tests, ≥80% coverage required by CI
+- 350+ tests, CI requires ≥80% coverage
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
-- See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
-- `src/ai_r/validators/` and `src/ai_r/templates/` are optional
-  standalone helpers (session-note markdown validation), not part of the
-  CLI or MCP surface.
+- On adding new agents, see [CONTRIBUTING.md](./CONTRIBUTING.md) and
+  [docs/parsers.md](./docs/parsers.md)
 
 <details>
 <summary>Keywords</summary>
@@ -617,8 +335,6 @@ MIT — see [LICENSE](./LICENSE).
 
 ---
 
-**Get started:** clone + `bash install.sh`, then register the MCP server
-for your agent ([Claude](#claude-code) · [Codex](#codex) ·
-[OpenCode](#opencode) · [Antigravity](#antigravity) · [Pi](#pi--skill-not-mcp))
-and restart the host tool. One read-only surface for every agent's
-history.
+**Get started:** clone + `bash install.sh`, then register the MCP server for your
+agent ([docs/mcp-registration.md](./docs/mcp-registration.md)) and restart the
+host tool. One read-only surface to every agent's history.

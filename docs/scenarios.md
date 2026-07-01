@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 32 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 37 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -55,6 +55,8 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 32 LLM-executed end-to-end
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
 | `find_tool_calls` | 1 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result. |
+| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
+| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
 
 <!-- scenarios:end -->
 
@@ -187,8 +189,8 @@ Rolls up rows (from `query` / `find_file_edits` / session inventory) → `{group
 - **Goal:** `kind_split=true` surfaces the `kind_split_available` flag + `note`.
 - **Preconditions:** Rows carrying a `kind`. `[hermetic-ok]`.
 - **Steps:** `mcp__ai-r__aggregate(rows=<rows>, group_by="kind", metrics=["sessions","edits"], kind_split=true)`.
-- **Expected:** Result includes `kind_split_available` (bool) and a `note`.
-- **Pass criteria:** GO when both `kind_split_available` and `note` are present and consistent with the data.
+- **Expected:** Result includes `kind_split_available` (bool); a `note` is present **only when the split is degenerate** (`kind_split_available=false` — e.g. no subagent sessions in scope), explaining the Claude-only detection (RISK-4).
+- **Pass criteria:** GO when `kind_split_available` is present and correct for the data, and a `note` appears exactly in the degenerate case. A non-degenerate split with no `note` is correct behavior, not a failure.
 
 ### AGG-4 — empty rows → empty result, no crash
 - **Function:** `aggregate`
@@ -300,7 +302,7 @@ projected to the legacy totals shape.
 - **Preconditions:** A **frozen** snapshot of the vault (the live vault mutates during a run → false mismatches; measure on a snapshot). `[needs-real-vault]`.
 - **Steps:** compute `mcp__ai-r__session_stats(group_by="<dim>")` and the manual `mcp__ai-r__aggregate(rows=<per-session inventory rows>, group_by="<dim>", rank_by="stats", kind_split=true)` on the same frozen snapshot; compare.
 - **Expected:** `groups` and shared totals (`sessions`/`edits`/`agents`/`agents_list`) are identical.
-- **Pass criteria:** GO when the projection matches the manual aggregate byte-for-byte on the frozen snapshot. (Divergence caused only by live-vault mutation between the two calls is a measurement artifact, not a defect — re-measure on a true snapshot.)
+- **Pass criteria:** GO when the projection matches the manual aggregate byte-for-byte on the frozen snapshot. (Divergence caused only by live-vault mutation between the two calls is a measurement artifact, not a defect — re-measure on a true snapshot.) **MCP-surface scope note:** the *enriched* totals (`edits`/`intents`/`messages`) fold an internal per-session inventory that no read-only MCP verb emits as `rows`, so the live MCP check can only prove parity of the **projection** (rank order + `kind_split` + `note` + `sessions` count); full enriched byte-parity is a pytest-internal guarantee. A GO-with-caveats at the MCP level (projection verified, enriched totals not feedable) is the expected verdict.
 
 ---
 
@@ -382,3 +384,55 @@ Cross-agent tool-call search by exact name or substring pattern, with a loud XOR
 - **Steps:** `mcp__ai-r__find_tool_calls(tool_name="Read", limit=20)`; then `mcp__ai-r__find_tool_calls(tool_name_pattern="edit", limit=20)`; then the invalid `mcp__ai-r__find_tool_calls()` (neither name nor pattern).
 - **Expected:** The exact call returns only `Read` calls (case-insensitive), spanning whichever agents recorded them; the pattern call returns calls whose tool name contains `edit` (case-insensitive); the argument-less call returns `{"error": "invalid_argument", "message": …}`.
 - **Pass criteria:** GO when exact and pattern searches both return correct cross-agent matches AND the neither-argument call returns the `invalid_argument` error shape — never a silent empty result.
+
+---
+
+## `read_session`
+
+Read one session by `uuid`+`agent`, projected to the compact `{role, content}` MCP shape, paginated.
+
+### READ-1 — read by uuid+agent → projected shape + pagination echo
+- **Function:** `read_session`
+- **Goal:** A single session reads into the compact `{role, content}` projection with correct metadata and pagination echo.
+- **Preconditions:** A known session uuid + its agent (e.g. the newest from `list_sessions`). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__read_session(uuid="<uuid>", agent="claude", offset=0, limit=20)`.
+- **Expected:** `{uuid, agent, title, date, message_count, kind, parent_uuid, messages:[{role, content, timestamp?}], total, offset, limit, messages_truncated}`; each message `role` is `user`/`assistant`; assistant tool-call turns surface a `[tool_use: <name> …]` summary in `content`; `messages` is the slice `[offset:offset+limit]` and `total` is the full projected count.
+- **Pass criteria:** GO when the metadata block is present, every message role is `user`/`assistant`, the slice honors `offset`/`limit`, and `total >= len(messages)`. (Known limitation, GO-with-caveats: tool results project to a bare `[tool_result]` placeholder — success/error of the underlying call is not surfaced here; use the raw transcript when that distinction matters.)
+
+### READ-2 — pagination slice + `total` invariance
+- **Function:** `read_session`
+- **Goal:** `offset`/`limit` page through the same projected list without changing `total`.
+- **Preconditions:** A session with more than `limit` projected messages. `[needs-real-vault]`.
+- **Steps:** call `read_session(uuid, agent, offset=0, limit=5)`, then `read_session(uuid, agent, offset=5, limit=5)`; compare.
+- **Expected:** The two pages are disjoint, consecutive slices of one ordered message list; `total` is identical across both calls (independent of the slice); the pagination echo (`offset`/`limit`) mirrors the request.
+- **Pass criteria:** GO when page 2 continues page 1 (no overlap, no gap), `total` is stable across both calls, and each response echoes the requested `offset`/`limit`.
+
+---
+
+## `search_sessions`
+
+Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`OR`/`NOT` + negative `-term` + quoted phrases, BM25 or date sort.
+
+### SRCH-1 — title scope, AND default, relevance sort
+- **Function:** `search_sessions`
+- **Goal:** A multi-word query defaults to AND over titles, ranked by BM25 relevance.
+- **Preconditions:** A vault with sessions whose titles share distinctive words. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__search_sessions(query="<word-a> <word-b>", scope="title", sort="relevance", limit=10)`.
+- **Expected:** Every result's title contains BOTH terms (AND default); order is BM25 relevance, not date; each summary carries the session identity fields (`uuid`, `agent`, `title`, `date`, `kind`).
+- **Pass criteria:** GO when all survivors satisfy the AND-of-terms over the title and the top hit is the strongest textual match (relevance ordering, not chronological).
+
+### SRCH-2 — body scope returns a snippet
+- **Function:** `search_sessions`
+- **Goal:** `scope="body"` matches message text / tool input / tool result — not the title — and returns a matching `snippet`.
+- **Preconditions:** A vault with a distinctive term occurring in message bodies but NOT in any title. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__search_sessions(query="<body-only term>", scope="body", limit=10)`; then the same term with `scope="title"` as a control.
+- **Expected:** Body-scope finds the term and each result carries a `snippet` (≤200 chars) containing it; the `scope="title"` control returns fewer/no hits.
+- **Pass criteria:** GO when body-scope finds the term, every match carries a snippet with the term, and the title control confirms the match came from the body (not the title).
+
+### SRCH-3 — operators: OR widens, negative `-term` excludes, quoted phrase is contiguous
+- **Function:** `search_sessions`
+- **Goal:** `operator` and the Google-style prefixes change the result set exactly as specified.
+- **Preconditions:** A vault with overlapping terms. `[needs-real-vault]`.
+- **Steps:** run the same two terms with `operator="AND"` then `operator="OR"`; then a query with a `-<term>` negative prefix; then a `"quoted phrase"`.
+- **Expected:** `OR` never returns fewer than `AND` (`set(AND) ⊆ set(OR)`); a `-term` excludes every session containing that term regardless of operator; a quoted phrase matches only the contiguous phrase, not the words scattered.
+- **Pass criteria:** GO when `set(AND) ⊆ set(OR)`, the negative term removes all its matches, and the quoted phrase matches contiguously.
