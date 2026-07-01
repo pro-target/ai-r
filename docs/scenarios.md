@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 39 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -54,7 +54,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 39 LLM-executed end-to-end
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
-| `find_tool_calls` | 2 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere). |
+| `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
 | `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
 
@@ -400,6 +400,22 @@ Cross-agent tool-call search by exact name or substring pattern, with a loud XOR
 - **Steps:** `mcp__ai-r__find_tool_calls(tool_name="Bash", limit=50)`; inspect `is_error` and `output` on the returned records; cross-check the failed one against `read_session` (it should render `[tool_result ERROR: …]`).
 - **Expected:** Every record carries `is_error` — `True` for the known-failed call, `False` for the succeeded one — and an `output` field holding the correlated tool-result content (char-capped at 2000; when sliced, `output` is listed in that record's `truncated_fields`). Correlation is by tool_use_id (Claude `tool_use.id` / OpenCode `callID`); the returned match set (which records) is unchanged by the two fields.
 - **Pass criteria:** GO when `is_error` reflects the real outcome and `output` carries the correlated result for Claude/OpenCode, and the exact-name match set is identical with or without inspecting the fields. Codex/Pi always reporting `is_error=False` (no source flag), Antigravity emitting no tool results, and an uncorrelated call defaulting to `is_error=False`/empty `output` are **documented** best-effort limitations (see `docs/methods.md` → *Output bounds & tool-call outcome*), not failures.
+
+### FTC-3 — flexible connective filtering (domain × error, minus noise)
+- **Function:** `find_tool_calls`
+- **Goal:** Composing `input_contains` + `is_error` (+ `output_excludes` for noise) returns only the real command failures of a chosen domain, not raw `is_error` noise — proving there is no need for a special "error + domain" verb.
+- **Preconditions:** A claude/opencode vault with failed calls of some domain (e.g. `git`) AND some failures whose `output` is harness noise carrying a stable marker (e.g. a security-gate line). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__find_tool_calls(input_contains="git", is_error=True, limit=50)`; note the count; then add the noise filter: `mcp__ai-r__find_tool_calls(input_contains="git", is_error=True, output_excludes="BOUNDARY_CHECKED", limit=50)` (substitute whatever harness marker the vault uses).
+- **Expected:** The filters intersect by AND: the first call returns only records whose input contains `git` **and** whose `is_error` is `True` — a count far below the raw `is_error=True` total (which spans every domain). Adding `output_excludes` drops the records whose `output` carries the marker, shrinking the set further. `git` is only an example domain, not a hard-coded case; the same holds for any `input_contains` value.
+- **Pass criteria:** GO when the composition yields the "domain × error" pairing (strictly fewer than either filter alone) AND `output_excludes` removes the marked noise records — never a special verb, never a hard-coded marker list.
+
+### FTC-4 — adaptive smart output truncation keeps a trailing error
+- **Function:** `find_tool_calls`
+- **Goal:** A long output with the error at the **end** must not lose the error to a head-only cut; the default adaptive mode (or explicit `output_mode="smart"`) surfaces the error line even when `output` is truncated.
+- **Preconditions:** A claude/opencode session with a failing call (`is_error=True`) whose tool result is longer than the 2000-char cap and whose error line (`error`/`fatal`/`traceback`) sits near the end. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__find_tool_calls(is_error=True, limit=20)`; pick a record whose `output` is in `truncated_fields`; inspect its `output` under the default (adaptive); then re-fetch with `mcp__ai-r__find_tool_calls(is_error=True, output_mode="head", limit=20)` and compare the same record's `output`.
+- **Expected:** Under the default (adaptive → `smart` for `is_error==True`) or explicit `output_mode="smart"`, the truncated `output` still contains the trailing error line, and `output` is listed in that record's `truncated_fields`. The same record under `output_mode="head"` may cut before the error line, losing it (head keeps only the first cap chars). Codex/Pi records (always `is_error=False`) fall to the `head` legacy path — expected, not a failure.
+- **Pass criteria:** GO when the adaptive/`smart` mode preserves the trailing error line for a failing call while `head` on the identical output drops it.
 
 ---
 
