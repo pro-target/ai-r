@@ -3,6 +3,9 @@
 > Русский перевод-зеркало английского SSOT `docs/methods.md`. README.ru фреймит этот файл (маркер-блок). Держать синхронным с `docs/methods.md` при каждой смене функционала.
 >
 > **Статус:** Phase 1–3b живые. Событийное ядро `query` + пресеты `intent`/`reaction`, `plan` + `get_body`, вербы `aggregate`/`diff`/`detect_current` (`src/ai_r/events.py`). **Phase 3b:** вербы обогащены (`query(with_intent)`, `aggregate(rank_by, kind_split)`, `diff` над intent-несущими rows) → **`session_stats` и `session_diff` теперь тонкие пресеты над вербами с доказанной byte-parity на РЕАЛЬНЫХ данных** (frozen-snapshot ~/.claude: session_stats 8/8 group_by×top EQUAL; session_diff 12/12 сессий EQUAL). Parity-тесты `tests/test_phase3b_parity.py` + весь legacy-сьют зелёный. `find_file_edits`/`find_tool_calls`/`search_sessions`/`detect-*` остаются отдельными (обоснование ниже). Фасеты `kind=subagent`/`parent` в `query` — заглушки (Phase 3).
+>
+> **Инвариант MCP-поверхности:** 13 тулов = 7 legacy + 5 event-core вербов + 1 пресет (`plan`).
+> Источник истины — код (`@mcp.tool()` в `mcp_server.py`); стережёт `tests/test_docs_sync.py`.
 
 <!-- methods:start -->
 

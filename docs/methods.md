@@ -3,6 +3,9 @@
 > Single source of truth for ai-r's public methods. README frames this file (marker block). Update on every functionality change. Russian mirror: `docs/methods.ru.md` (keep in sync).
 >
 > **Status:** Phase 1–3b live. Event core `query` + presets `intent`/`reaction`, `plan` + `get_body`, verbs `aggregate`/`diff`/`detect_current` (`src/ai_r/events.py`). **Phase 3b:** verbs enriched (`query(with_intent)`, `aggregate(rank_by, kind_split)`, `diff` over intent-carrying rows) → **`session_stats` and `session_diff` are now thin presets over verbs, with byte-parity proven on REAL data** (frozen snapshot ~/.claude: session_stats 8/8 group_by×top EQUAL; session_diff 12/12 sessions EQUAL). Parity tests `tests/test_phase3b_parity.py` + the full legacy suite are green. `find_file_edits`/`find_tool_calls`/`search_sessions`/`detect-*` remain separate (rationale below). Facets `kind=subagent`/`parent` in `query` are stubs (Phase 3).
+>
+> **MCP surface invariant:** 13 tools = 7 legacy + 5 event-core verbs + 1 preset (`plan`).
+> Source of truth is the code (`@mcp.tool()` in `mcp_server.py`); guarded by `tests/test_docs_sync.py`.
 
 <!-- methods:start -->
 
