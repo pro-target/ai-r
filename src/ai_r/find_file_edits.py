@@ -168,8 +168,9 @@ def _shell_redirect_targets(cmd: str) -> list[tuple[str, bool]]:
 
     Conservative by design: ``find_file_edits`` is an audit tool, so false
     negatives are preferred over false positives. Writes via ``tee`` /
-    ``sed -i`` / ``cp`` / ``mv`` / heredoc-only are NOT detected (documented
-    limitation) — the common codex pattern ``printf '...' > path`` is.
+    ``sed -i`` / ``cp`` / ``mv`` are NOT detected (documented limitation) —
+    redirect-head writes like ``printf '...' > path`` and ``cat > path
+    <<EOF`` are.
     """
     targets: list[tuple[str, bool]] = []
     i, n = 0, len(cmd)

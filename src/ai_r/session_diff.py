@@ -24,7 +24,7 @@ TWO honest blind spots — surfaced in the tool output as ``caveats``:
    user's decision.)
 2. RISK-3 — it inherits the shell-redirect blind spot of
    :func:`ai_r.find_file_edits._shell_redirect_targets`: writes via
-   ``tee`` / ``sed -i`` / ``cp`` / ``mv`` / heredoc-only are NOT detected,
+   ``tee`` / ``sed -i`` / ``cp`` / ``mv`` are NOT detected,
    so ``session_diff`` silently skips them too. (The disclaimer text is
    reused verbatim from that function's docstring / ``docs/parsers.md``.)
 """
@@ -56,9 +56,9 @@ __all__ = ["session_diff"]
 # ``ai_r.find_file_edits._shell_redirect_targets`` / ``docs/parsers.md``.
 _RISK3_CAVEAT: str = (
     "Inherits the find_file_edits shell-redirect blind spot: writes via "
-    "tee / sed -i / cp / mv / heredoc-only are NOT detected, so "
-    "session_diff silently skips them too. The common codex pattern "
-    "`printf '...' > path` IS detected."
+    "tee / sed -i / cp / mv are NOT detected, so "
+    "session_diff silently skips them too. Redirect-head writes such as "
+    "`printf '...' > path` and `cat > path <<EOF` ARE detected."
 )
 
 _GIT_CAVEAT: str = (
