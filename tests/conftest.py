@@ -33,6 +33,8 @@ _HOST_FIXTURES = frozenset(
         "real_opencode_db",
         "real_pi_dir",
         "real_antigravity_root",
+        "real_claude_home",
+        "frozen_claude_home",
     }
 )
 
@@ -396,6 +398,241 @@ def fake_antigravity_brain(tmp_sessions_dir: Path) -> Path:
         ],
     )
     return brain
+
+
+# ---------------------------------------------------------------------------
+# Plan-signal fixtures (Phase 2: plan_event + Plan atom + get_body)
+# ---------------------------------------------------------------------------
+
+
+def _claude_exit_plan(plan_text: str, ts: str) -> dict:
+    """A Claude assistant record carrying one ``ExitPlanMode`` tool_use."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "ExitPlanMode",
+                    "input": {"plan": plan_text},
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+def _claude_plan_write(file_path: str, content: str, ts: str) -> dict:
+    """A Claude assistant record writing a ``plans/<slug>.md`` file."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Write",
+                    "input": {"file_path": file_path, "content": content},
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+@pytest.fixture
+def fake_claude_plan_redraft(tmp_sessions_dir: Path) -> str:
+    """Claude session: one plan-file slug + DRIFTING titles → 1 final + N-1 draft.
+
+    Mirrors the real ``proud-snacking-ritchie`` defect: a single
+    ``plans/build-feature.md`` iteration chain whose title drifts as it gets
+    decorated ("Build Feature X" → "…(session…)" → "…final").  Grouping keys
+    on the slug (Write signals carry it; the interleaved ``ExitPlanMode``
+    calls, which have no path, inherit the nearest preceding Write's slug), so
+    despite the title drift this is ONE task: 1 final + 3 draft, 0 major.
+    """
+    session_id = "plan-redraft-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    slug = "/repo/plans/build-feature.md"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "build feature X"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            # Write establishes the slug; title = "Build Feature X".
+            _claude_plan_write(slug, "# Build Feature X\n\nDraft one.",
+                               "2026-06-14T10:00:05Z"),
+            # ExitPlanMode (no path) inherits the slug; title drifts.
+            _claude_exit_plan("# Build Feature X (session…)\n\nDraft two.",
+                              "2026-06-14T10:00:10Z"),
+            _claude_exit_plan("# Build Feature (внутр…)\n\nDraft three.",
+                              "2026-06-14T10:00:15Z"),
+            # Final Write to the SAME slug; title drifted further still.
+            _claude_plan_write(slug, "# Build Feature + смеж…\n\nFinal plan.",
+                               "2026-06-14T10:00:20Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_plan_multitask(tmp_sessions_dir: Path) -> str:
+    """Claude session: two DIFFERENT plan-file slugs → two separate tasks.
+
+    Split is by slug, not by title.  ``plans/task-a.md`` (earlier) becomes
+    ``completed_major``; ``plans/task-b.md`` (later) keeps ``final``.
+    """
+    session_id = "plan-multitask-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "do task A"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _claude_plan_write("/repo/plans/task-a.md",
+                               "# Task A\n\nPlan A body.",
+                               "2026-06-14T10:00:05Z"),
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "now task B"},
+                "timestamp": "2026-06-14T10:00:10Z",
+            },
+            _claude_plan_write("/repo/plans/task-b.md",
+                               "# Task B\n\nPlan B body.",
+                               "2026-06-14T10:00:15Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_plan_write(tmp_sessions_dir: Path) -> str:
+    """Claude session whose plan signal is a ``Write`` to ``plans/*.md``."""
+    session_id = "plan-write-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/repo/plans/feature.md",
+                                "content": "# Written Plan\n\nDetails.",
+                            },
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+            },
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
+    """Codex rollout with several ``update_plan`` calls → last one is final."""
+    uuid = "codex-plan-1"
+    jsonl = (
+        tmp_sessions_dir / ".codex" / "sessions" / "2026" / "06" / "14"
+        / f"rollout-2026-06-14T13-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T13:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": uuid, "cwd": "/tmp/work"},
+            },
+            {
+                "timestamp": "2026-06-14T13:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": json.dumps(
+                        {"name": "ship the feature",
+                         "steps": [{"step": "a", "status": "pending"},
+                                   {"step": "b", "status": "pending"}]}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-14T13:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": json.dumps(
+                        {"name": "ship the feature",
+                         "steps": [{"step": "a", "status": "completed"},
+                                   {"step": "b", "status": "in_progress"}]}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-14T13:00:06Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": json.dumps(
+                        {"name": "ship the feature",
+                         "steps": [{"step": "a", "status": "completed"},
+                                   {"step": "b", "status": "completed"}]}
+                    ),
+                },
+            },
+        ],
+    )
+    return uuid
+
+
+@pytest.fixture
+def fake_antigravity_plan_brain(tmp_sessions_dir: Path) -> str:
+    """Antigravity brain dir with an ``implementation_plan.md`` → one plan."""
+    uuid = "ag-plan-1"
+    brain = tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / uuid
+    (brain / ".system_generated" / "logs").mkdir(parents=True)
+    _write_jsonl(
+        brain / ".system_generated" / "logs" / "overview.txt",
+        [
+            {
+                "timestamp": "2026-06-14T10:00:00Z",
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>build the thing</USER_REQUEST>",
+            },
+        ],
+    )
+    (brain / "implementation_plan.md").write_text(
+        "# Antigravity Implementation Plan\n\nStep one.\nStep two.\n",
+        encoding="utf-8",
+    )
+    return uuid
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +1186,60 @@ _REAL_ANTIGRAVITY_DIRS: List[Path] = [
 def real_claude_dir() -> Path:
     if not _REAL_CLAUDE_DIR.is_dir():
         pytest.skip("no real Claude sessions on this host")
+    return _REAL_CLAUDE_DIR
+
+
+@pytest.fixture
+def frozen_claude_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """Snapshot the REAL ``~/.claude/projects`` into a temp ``AI_R_HOME``.
+
+    A byte-parity test that reads the *live* ``~/.claude`` twice (once per
+    side) can flake: the vault mutates between the two reads — most acutely the
+    session the test itself runs inside, which the harness is actively writing.
+    This fixture copies the projects tree into an immutable temp home and points
+    every parser there via ``AI_R_HOME``, so both sides of a comparison read
+    identical frozen bytes.  Skips (never fails) when the host has no Claude
+    data.  Auto-tagged ``host`` via :data:`_HOST_FIXTURES`.
+    """
+    import os
+    import shutil
+
+    if not _REAL_CLAUDE_DIR.is_dir():
+        pytest.skip("no real Claude sessions on this host")
+    dst = tmp_path / "frozen" / ".claude" / "projects"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Hardlink the files instead of byte-copying: the vault is read-only for
+    # these tests, so hardlinks give an immutable *view* at near-zero cost and
+    # avoid a multi-hundred-MB copy.  Fall back to a real copy if the temp dir
+    # is on a different filesystem (cross-device link → OSError).
+    try:
+        shutil.copytree(_REAL_CLAUDE_DIR, dst, copy_function=os.link)
+    except OSError:
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(_REAL_CLAUDE_DIR, dst)
+    monkeypatch.setenv("AI_R_HOME", str(tmp_path / "frozen"))
+    return dst
+
+
+@pytest.fixture
+def real_claude_home(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Let a host-marked test read the REAL ``~/.claude`` (not the fake home).
+
+    The autouse ``_isolate_ai_r_home`` fixture points every parser at a fake
+    temp ``AI_R_HOME`` — great for hermetic tests, but it means a test that
+    merely requests ``real_claude_dir`` still reads NOTHING (the parser
+    resolves ``AI_R_HOME`` first).  This fixture deletes ``AI_R_HOME`` so the
+    parser falls back to the real ``~/.claude/projects``.  It runs AFTER the
+    autouse fixture (it is explicitly requested), so its ``delenv`` wins.
+
+    Skips (never fails) when the host has no Claude data.  Auto-tagged
+    ``host`` via :data:`_HOST_FIXTURES`.
+    """
+    if not _REAL_CLAUDE_DIR.is_dir():
+        pytest.skip("no real Claude sessions on this host")
+    monkeypatch.delenv("AI_R_HOME", raising=False)
     return _REAL_CLAUDE_DIR
 
 
