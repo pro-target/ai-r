@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Event-core layer**: a unified event stream over every parser, exposing
+  five verbs — `query`, `get_body`, `aggregate`, `diff`, `detect_current` —
+  plus the `plan` preset. Reference-by-default: `query` returns lightweight
+  event references and message bodies are pulled on demand via `get_body`.
+- **MCP surface**: the event-core verbs and the `plan` preset are exposed as
+  MCP tools, raising the MCP tool count from 7 to 13 (`list_sessions`,
+  `read_session`, `search_sessions`, `find_file_edits`, `find_tool_calls`,
+  `session_stats`, `session_diff`, `query`, `plan`, `get_body`, `aggregate`,
+  `diff`, `detect_current`). See
+  [docs/architecture.md](./docs/architecture.md).
+
+### Changed
+
+- **`session_stats` / `session_diff`**: reduced to thin presets over the
+  event-core verbs — `session_stats` maps to `aggregate(rank_by="stats",
+  kind_split=True)`, `session_diff` to `diff` over an intent-carrying
+  `query`. Output stays byte-identical on real data, so the MCP surface is
+  backward compatible.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added
