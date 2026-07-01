@@ -43,6 +43,7 @@ __all__ = [
 _INPUT_CHARS_CAP = 4_000      # parsed/raw tool input, serialized
 _ASSISTANT_CHARS_CAP = 4_000  # assistant message text hosting the call
 _INTENT_CHARS_CAP = 1_000     # preceding user message text
+_OUTPUT_CHARS_CAP = 2_000     # correlated tool_result content
 
 # --- Total-response byte budget -------------------------------------------
 # Cumulative serialized size after which we stop appending records and set the
@@ -115,12 +116,21 @@ def find_tool_calls(
         ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
         input was a JSON string), ``intent`` (the immediately
         preceding user message text or ``None``), ``assistant``
-        (the assistant text of the message hosting the call) and
+        (the assistant text of the message hosting the call),
+        ``is_error`` (bool: the correlated call outcome — ``True`` when
+        the agent flagged the call as failed; authoritative for Claude
+        and OpenCode, best-effort ``False`` for Codex/Antigravity/Pi and
+        whenever no result correlates to the call) and ``output`` (the
+        correlated ``tool_result`` content, ``""`` when none) plus
         ``truncated_fields`` (list naming any of ``input``/``intent``/
-        ``assistant`` that were char-capped for this record; empty when
-        none tripped).  The ``input``/``intent``/``assistant`` fields are
-        each bounded to a per-field char cap; an over-cap value is sliced
-        with a ``…[truncated]`` marker.
+        ``assistant``/``output`` that were char-capped for this record;
+        empty when none tripped).  The
+        ``input``/``intent``/``assistant``/``output`` fields are each
+        bounded to a per-field char cap; an over-cap value is sliced with
+        a ``…[truncated]`` marker.  Call↔result correlation is by
+        ``tool_use_id`` (Claude ``tool_use.id`` / OpenCode ``callID``);
+        agents whose calls carry no id never correlate and keep
+        ``is_error=False`` with an empty ``output``.
 
     Raises:
         ValueError: on invalid arguments (neither or both of
@@ -166,6 +176,21 @@ def find_tool_calls(
             session_iso = iso(session.date)
             session_title = session.title
             session_ts: Optional[Any] = to_utc_aware(session.date)
+            # Correlate each tool call with its result (which lives on a
+            # DIFFERENT, following message) by ``tool_use_id``.  Both the
+            # ``tool_use`` call and its ``tool_result`` carry the same id when
+            # the source format exposes one (Claude ``tool_use.id``, OpenCode
+            # ``callID``).  ``is_error`` is authoritative for Claude/OpenCode
+            # and best-effort ``False`` elsewhere; agents whose ``tool_use``
+            # lacks an id simply won't correlate and default to no-outcome.
+            result_by_id: dict[str, dict[str, Any]] = {}
+            for m in messages:
+                for tr in getattr(m, "tool_result", ()) or ():
+                    if not isinstance(tr, dict):
+                        continue
+                    tr_id = tr.get("tool_use_id")
+                    if isinstance(tr_id, str) and tr_id:
+                        result_by_id[tr_id] = tr
             for idx, msg in enumerate(messages):
                 if msg.role != "assistant":
                     continue
@@ -214,11 +239,27 @@ def find_tool_calls(
                     capped_asst, asst_trunc = _cap_field(
                         msg.text or "", _ASSISTANT_CHARS_CAP
                     )
+                    # Correlated outcome (default: no result found → not an
+                    # error, empty output).  ``tool_use_id`` is present on the
+                    # call for Claude/OpenCode; other agents leave it absent so
+                    # this stays a no-op there.
+                    tu_id = tool.get("tool_use_id")
+                    result = (
+                        result_by_id.get(tu_id)
+                        if isinstance(tu_id, str) and tu_id
+                        else None
+                    )
+                    is_error = bool(result.get("is_error")) if result else False
+                    raw_output = result.get("content", "") if result else ""
+                    capped_output, output_trunc = _cap_field(
+                        raw_output, _OUTPUT_CHARS_CAP
+                    )
                     truncated_fields = [
                         f for f, hit in (
                             ("input", input_trunc),
                             ("intent", intent_trunc),
                             ("assistant", asst_trunc),
+                            ("output", output_trunc),
                         ) if hit
                     ]
                     records.append({
@@ -234,6 +275,8 @@ def find_tool_calls(
                         "input": capped_input,
                         "intent": capped_intent,
                         "assistant": capped_asst,
+                        "is_error": is_error,
+                        "output": capped_output,
                         "truncated_fields": truncated_fields,
                     })
 

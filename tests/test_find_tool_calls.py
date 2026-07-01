@@ -140,6 +140,102 @@ def _write_claude_tool_session(
     )
 
 
+def _write_claude_session_with_outcomes(
+    tmp_sessions_dir: Path,
+    uuid: str,
+) -> None:
+    """Write a Claude JSONL with two ``Bash`` calls, each correlated to a
+    ``tool_result`` on a following user record by ``tool_use_id``:
+
+    * ``bash-ok``   → ``tool_result`` ``is_error=False`` (success)
+    * ``bash-err``  → ``tool_result`` ``is_error=True``  (failure)
+
+    Mirrors the real Claude on-disk layout (call in an assistant record,
+    result in the next user record) so the correlation path is exercised
+    end to end rather than through a synthetic in-memory ``Message``.
+    """
+    records: list[dict] = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "run both commands"},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Running the good one."},
+                    {
+                        "type": "tool_use",
+                        "id": "bash-ok",
+                        "name": "Bash",
+                        "input": {"command": "true"},
+                    },
+                ],
+            },
+            "timestamp": "2026-06-14T10:00:05Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash-ok",
+                        "is_error": False,
+                        "content": "ok-stdout-here",
+                    }
+                ],
+            },
+            "timestamp": "2026-06-14T10:00:06Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Running the bad one."},
+                    {
+                        "type": "tool_use",
+                        "id": "bash-err",
+                        "name": "Bash",
+                        "input": {"command": "false"},
+                    },
+                ],
+            },
+            "timestamp": "2026-06-14T10:01:05Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "bash-err",
+                        "is_error": True,
+                        "content": "boom: command failed",
+                    }
+                ],
+            },
+            "timestamp": "2026-06-14T10:01:06Z",
+            "sessionId": uuid,
+        },
+    ]
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-ftc" / f"{uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -684,6 +780,137 @@ def test_find_tool_calls_intent_none_when_no_previous_user(
     result = find_tool_calls(tool_name="Bash", agent="claude")
     assert result["count"] == 1
     assert result["records"][0]["intent"] is None
+
+
+# ---------------------------------------------------------------------------
+# Outcome: is_error + output (correlated tool_result)
+# ---------------------------------------------------------------------------
+
+
+def test_find_tool_calls_surfaces_is_error_and_output(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call correlated to a failing ``tool_result`` surfaces
+    ``is_error=True`` + its ``output``; a call correlated to a
+    succeeding one surfaces ``is_error=False`` + its ``output``.
+
+    This is the honest-git-stats signal: Total/Success/Error is buildable
+    from the per-record ``is_error`` flag across sessions.
+    """
+    _write_claude_session_with_outcomes(tmp_sessions_dir, "ftc-outcome")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir",
+        lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
+    )
+    result = find_tool_calls(tool_name="Bash", agent="claude")
+    assert result["count"] == 2
+    by_input = {
+        json.dumps(r["input"], sort_keys=True): r for r in result["records"]
+    }
+    ok = by_input[json.dumps({"command": "true"}, sort_keys=True)]
+    err = by_input[json.dumps({"command": "false"}, sort_keys=True)]
+
+    assert ok["is_error"] is False
+    assert ok["output"] == "ok-stdout-here"
+    assert "output" not in ok["truncated_fields"]
+
+    assert err["is_error"] is True
+    assert err["output"] == "boom: command failed"
+
+
+def test_find_tool_calls_no_result_defaults_to_not_error(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call with no correlated ``tool_result`` (no id / no following
+    result) defaults to ``is_error=False`` with an empty ``output`` and
+    does not crash."""
+    _write_claude_tool_session(
+        tmp_sessions_dir, "ftc-noresult",
+        user_text="just call",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir",
+        lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
+    )
+    result = find_tool_calls(tool_name="Bash", agent="claude")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["is_error"] is False
+    assert hit["output"] == ""
+    assert "output" not in hit["truncated_fields"]
+
+
+def test_find_tool_calls_output_char_capped(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized ``tool_result`` content is sliced to the output cap
+    and flagged in ``truncated_fields``."""
+    from ai_r.find_tool_calls import _OUTPUT_CHARS_CAP
+
+    big = "z" * (_OUTPUT_CHARS_CAP + 500)
+    uuid = "ftc-bigout"
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "run it"},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Running."},
+                    {
+                        "type": "tool_use",
+                        "id": "big-call",
+                        "name": "Bash",
+                        "input": {"command": "cat huge"},
+                    },
+                ],
+            },
+            "timestamp": "2026-06-14T10:00:05Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "big-call",
+                        "is_error": False,
+                        "content": big,
+                    }
+                ],
+            },
+            "timestamp": "2026-06-14T10:00:06Z",
+            "sessionId": uuid,
+        },
+    ]
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-ftc" / f"{uuid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir",
+        lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
+    )
+    result = find_tool_calls(tool_name="Bash", agent="claude")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert isinstance(hit["output"], str)
+    assert len(hit["output"]) < len(big)
+    assert hit["output"].endswith("…[truncated]")
+    assert "output" in hit["truncated_fields"]
 
 
 # ---------------------------------------------------------------------------
