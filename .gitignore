@@ -47,6 +47,8 @@ data/
 
 # Internal working/audit notes — private, not for public repo
 _docs/
+AGENTS.md
+CLAUDE.md
 TODO.md
 
 # Maintainer-only commit pipeline (personal, depends on ~/.agents) — not for public repo
