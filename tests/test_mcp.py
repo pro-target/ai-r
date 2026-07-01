@@ -39,8 +39,11 @@ from ai_r.mcp_server import (
     _session_summary,
     _target_agents,
     find_file_edits,
+    get_body,
     list_sessions,
     mcp,
+    plan,
+    query,
     read_session,
     search_sessions,
 )
@@ -2429,3 +2432,112 @@ def test_find_file_edits_opencode_per_tool_timestamp(
     # ts must be the second part's tz-aware time.
     assert hit["timestamp"] is not None
     assert hit["timestamp"].endswith("+00:00")
+
+
+# ---------------------------------------------------------------------------
+# query (Phase-1 event verb): registration + facet/relative_to behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_query_tool_registered() -> None:
+    names = _run(_tool_names())
+    assert "query" in names
+    assert "query" in set(mcp._tool_manager._tools.keys())
+
+
+def test_query_type_facet_direct(fake_claude_session_with_tools: Path) -> None:
+    # The fixture: one user_turn, one assistant_turn, one tool_call(bash).
+    res = query(type="tool_call", agent="claude")
+    assert res["count"] == 1
+    assert res["events"][0]["type"] == "tool_call(bash)"
+
+
+def test_query_user_turns_direct(fake_claude_session_with_tools: Path) -> None:
+    res = query(type="user_turn", agent="claude")
+    assert res["count"] == 1
+    assert res["events"][0]["text"] == "Run the tests"
+
+
+def test_query_relative_prev_direct(
+    fake_claude_session_with_tools: Path,
+) -> None:
+    # Anchor on the bash tool_call; prev/1 user turn == "Run the tests".
+    tool_ev = query(type="tool_call", agent="claude")["events"][0]
+    res = query(relative_to=tool_ev["id"], direction="prev", n="1")
+    assert [e["text"] for e in res["events"]] == ["Run the tests"]
+
+
+def test_query_invalid_direction_returns_error_dict() -> None:
+    res = query(relative_to="x:0", direction="sideways")
+    assert res["error"] == "invalid_argument"
+
+
+def test_query_over_mcp_client(fake_claude_session_with_tools: Path) -> None:
+    out = _run(_call("query", {"type": "tool_call", "agent": "claude"}))
+    payload = json.loads(out[0])
+    assert payload["count"] == 1
+    assert payload["events"][0]["type"] == "tool_call(bash)"
+
+
+# ---------------------------------------------------------------------------
+# plan + get_body (Phase-2 verbs): registration + behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_plan_and_get_body_registered() -> None:
+    names = set(_run(_tool_names()))
+    assert {"plan", "get_body"}.issubset(names)
+    assert {"plan", "get_body"}.issubset(set(mcp._tool_manager._tools.keys()))
+
+
+def test_plan_tool_direct(fake_claude_plan_redraft: str) -> None:
+    res = plan(session=fake_claude_plan_redraft, agent="claude")
+    # One slug, drifting titles → 1 final + 3 draft (grouped by slug).
+    assert res["count"] == 4
+    kinds = [p["kind"] for p in res["plans"]]
+    assert kinds.count("final") == 1 and kinds.count("draft") == 3
+    assert kinds.count("completed_major") == 0
+
+
+def test_plan_tool_kind_filter(fake_claude_plan_redraft: str) -> None:
+    res = plan(session=fake_claude_plan_redraft, agent="claude", kind="final")
+    assert res["count"] == 1
+    assert res["plans"][0]["kind"] == "final"
+
+
+def test_plan_tool_invalid_group_returns_error(
+    fake_claude_plan_redraft: str,
+) -> None:
+    res = plan(session=fake_claude_plan_redraft, group="slug")
+    assert res["error"] == "invalid_argument"
+
+
+def test_get_body_tool_direct(fake_claude_plan_redraft: str) -> None:
+    final = plan(session=fake_claude_plan_redraft, kind="final")["plans"][0]
+    body = get_body(final["id"])
+    assert body["type"] == "plan_event"
+    assert "Final plan." in body["body"]
+
+
+def test_get_body_shallow_over_mcp_client(
+    fake_claude_plan_redraft: str,
+) -> None:
+    drafts = plan(session=fake_claude_plan_redraft, kind="draft")["plans"]
+    out = _run(
+        _call("get_body", {"id": drafts[0]["id"], "shallow": True})
+    )
+    payload = json.loads(out[0])
+    # Shallow → returns the final plan, drafts elided.
+    assert "Final plan." in payload["body"]
+    assert payload["dropped_drafts"]
+
+
+def test_get_body_empty_id_returns_error() -> None:
+    assert get_body("")["error"] == "invalid_argument"
+
+
+def test_plan_over_mcp_client(fake_codex_plan_session: str) -> None:
+    out = _run(_call("plan", {"session": fake_codex_plan_session, "agent": "codex"}))
+    payload = json.loads(out[0])
+    assert payload["count"] == 3
+    assert payload["plans"][-1]["kind"] == "final"

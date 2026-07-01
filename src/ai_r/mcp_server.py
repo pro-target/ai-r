@@ -11,6 +11,18 @@ Exposes these tools over the Model Context Protocol:
 * :func:`search_sessions` — case-insensitive search across title and/or
   message bodies with AND/OR/NOT operators and Google-style ``-term``
   negative prefixes.
+* :func:`query` — filter/search the unified session *event* stream
+  (user/assistant turns + normalized tool calls) by facets, including
+  the ``relative_to``+``direction``+``n`` neighbouring-turn walk.
+* :func:`plan` — normalized plan atoms for a session (final vs drafts,
+  grouped by task; per-agent plan signals normalized away).
+* :func:`get_body` — on-demand body for an event/plan id (``shallow`` for
+  final-plan-only, drafts elided).
+* :func:`aggregate` — generic rollup over ``query`` rows (reproduces
+  ``session_stats`` / ``file_frequency`` by ``group_by`` + ``metrics``).
+* :func:`diff` — stitch edit rows into a per-file unified diff (reproduces
+  ``session_diff``).
+* :func:`detect_current` — runtime identity (session + agent) from env/fs.
 
 Errors are returned as dicts (never raised) so the MCP client can
 surface them in a structured way.
@@ -51,6 +63,14 @@ from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import Session  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.events import (  # noqa: E402
+    query as _query_core,
+    plan as _plan_core,
+    get_body as _get_body_core,
+    aggregate as _aggregate_core,
+    diff as _diff_core,
+    detect_current as _detect_current_core,
+)
 
 __all__ = ["mcp", "main"]
 
@@ -913,6 +933,255 @@ def search_sessions(
     if limit:
         summaries = summaries[:limit]
     return summaries
+
+
+@mcp.tool()
+def query(
+    type: Optional[str] = None,
+    agent: Optional[str] = None,
+    session: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    file: Optional[str] = None,
+    tool: Optional[str] = None,
+    text: Optional[str] = None,
+    sort: str = "date",
+    relative_to: Optional[str] = None,
+    direction: str = "prev",
+    n: str = "1",
+    step_type: str = "user_turn",
+    limit: int = 0,
+    with_intent: bool = False,
+    kind: Optional[str] = None,
+    parent: Optional[str] = None,
+    group: Optional[str] = None,
+) -> dict[str, Any]:
+    """Filter/search the unified session **event** stream — the workhorse verb.
+
+    Every parser's messages + tool calls are normalized into one flat,
+    agent-neutral event stream (``user_turn`` / ``assistant_turn`` /
+    ``tool_call(<sub>)`` / ``plan_event``); this tool filters that stream
+    by facets — *all* behaviour is parameters, never hard-wired variants.
+
+    Facets:
+
+    * ``type`` — ``user_turn`` | ``assistant_turn`` | ``tool_call`` |
+      ``tool_call(edit|write|read|bash|other)`` | ``plan_event``.  Bare
+      ``tool_call`` matches every subtype.
+    * ``agent`` — one of claude/codex/opencode/antigravity/pi (all if omitted).
+    * ``session`` — restrict to a single session uuid.
+    * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on the event ts.
+    * ``file`` — substring matched against an event's referenced file path.
+    * ``tool`` — substring (pattern) matched against the referenced tool name.
+    * ``text`` — substring matched against event text.  With
+      ``sort="relevance"`` survivors are BM25-ranked using the **same
+      scorer** as ``search_sessions``; ``sort="date"`` (default) orders
+      by timestamp ascending.
+    * ``relative_to`` (event id) + ``direction`` (``prev``|``next``) +
+      ``n`` (``"1"`` | ``"all"``) — the neighbouring-turn walk.
+      Generalises the ``previous_user_intent`` used by ``find_file_edits``
+      to both directions and any count.  ``step_type`` chooses which
+      event type to collect (default ``user_turn``).  When
+      ``relative_to`` is set, other filter facets are ignored.
+
+    ``with_intent=True`` attaches a top-level ``intent`` (the request behind
+    the event, via the same ``previous_user_intent`` walk-back the legacy
+    tools use) to every returned event.  Default ``False`` keeps the base
+    event shape unchanged.
+
+    ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
+    **not yet implemented** (Phase 2/3: plan + subagent facets).
+
+    Returns ``{"events": [...], "count": N}`` or the standard
+    ``{"error": ..., "message": ...}`` dict on invalid arguments.
+    """
+    try:
+        events = _query_core(
+            type=type,
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            file=file,
+            tool=tool,
+            text=text,
+            sort=sort,
+            relative_to=relative_to,
+            direction=direction,
+            n=n,
+            step_type=step_type,
+            limit=limit,
+            with_intent=with_intent,
+            kind=kind,
+            parent=parent,
+            group=group,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+    return {"events": events, "count": len(events)}
+
+
+@mcp.tool()
+def plan(
+    session: Optional[str] = None,
+    kind: Optional[str] = None,
+    group: str = "task",
+    agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Normalized plan atoms for a session — final vs drafts, grouped by task.
+
+    Wraps ``query(type="plan_event", …)`` and normalizes every agent's plan
+    signal (Claude ``ExitPlanMode`` / ``Write plans/*.md``, Codex
+    ``update_plan``, Antigravity ``implementation_plan.md``) into a single
+    :class:`~ai_r.events.Plan` shape — the per-agent signal is an internal
+    detail, never surfaced.
+
+    Plans are grouped by *task* (normalized title, NOT slug/filename): within
+    a task the latest plan is ``final`` and earlier revisions are ``draft``;
+    plans of *earlier* completed tasks are ``completed_major``.
+
+    Args:
+        session: Restrict to one session uuid (recommended).
+        kind: Optional filter — ``draft`` | ``final`` | ``completed_major``.
+        group: Grouping strategy; only ``"task"`` is supported.
+        agent: Optional agent filter (claude/codex/opencode/antigravity/pi).
+
+    Returns:
+        ``{"plans": [...], "count": N}`` (each plan carries
+        ``id/session_id/agent/title/task_id/kind/path/steps/status/refs/
+        sha256``; bodies are on-demand via :func:`get_body`) or the standard
+        ``{"error": ..., "message": ...}`` dict on invalid arguments.
+    """
+    try:
+        plans = _plan_core(session=session, kind=kind, group=group, agent=agent)
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+    return {"plans": plans, "count": len(plans)}
+
+
+@mcp.tool()
+def get_body(id: str, shallow: bool = False) -> dict[str, Any]:
+    """Return the on-demand body for an event / plan ``id``.
+
+    For a ``plan_event`` id: the full plan text and/or Codex ``steps``
+    (bodies are deliberately kept off the event stream so callers pay for
+    them only when needed).  For a ``user_turn`` / ``assistant_turn`` id:
+    the turn text.
+
+    ``shallow=True`` (plans only) returns just the *final* plan of the id's
+    task, dropping the bodies of superseded ``draft`` revisions — the S6
+    case where a subagent receives one plan without the draft noise
+    (``dropped_drafts`` lists the ids that were elided).
+
+    Returns the body dict, or ``{"error": ..., "message": ...}`` on a bad id.
+    """
+    if not id or not str(id).strip():
+        return {"error": "invalid_argument", "message": "id must be non-empty"}
+    return _get_body_core(id, shallow=shallow)
+
+
+@mcp.tool()
+def aggregate(
+    rows: List[dict[str, Any]],
+    group_by: str,
+    metrics: Optional[List[str]] = None,
+    rank_by: str = "default",
+    kind_split: bool = False,
+) -> dict[str, Any]:
+    """Roll a list of row dicts up by ``group_by`` — the generic stats verb.
+
+    Reproduces ``session_stats`` (``group_by`` ∈ ``agent``/``dir``/``date``/
+    ``kind`` over a session inventory) and ``file_frequency``
+    (``group_by="file"`` over a ``find_file_edits`` record stream) as a pure
+    fold over already-materialized rows — no re-parsing.  ``session_stats`` is
+    now a thin preset over this verb (``rank_by="stats"`` + ``kind_split``).
+
+    Args:
+        rows: The row dicts to fold (``query`` output, ``find_file_edits``
+            records, or a session inventory).
+        group_by: The bucket key — a row field name (``agent`` / ``dir`` /
+            ``date`` / ``kind`` / ``file`` / …).  Missing/empty values bucket
+            under ``"(unknown)"``.
+        metrics: Which numbers each bucket carries.  One or more of
+            ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
+            ``messages`` / ``files``.  Defaults to ``["count"]``.
+        rank_by: Group ordering — ``"default"`` (edits→sessions→count→label,
+            the ``file_frequency`` order) or ``"stats"`` (sessions→edits→label,
+            the ``session_stats`` order).
+        kind_split: When ``True``, add the ``session_stats`` RISK-4 fields
+            (``kind_split_available`` + a degenerate-split ``note``).
+
+    Returns:
+        ``{"group_by", "groups": [...], "totals": {...}}`` (plus
+        ``kind_split_available``/``note`` when ``kind_split``) or the standard
+        ``{"error": ..., "message": ...}`` dict on an unknown metric/rank_by.
+    """
+    try:
+        return _aggregate_core(
+            rows,
+            group_by=group_by,
+            metrics=tuple(metrics) if metrics else ("count",),
+            rank_by=rank_by,
+            kind_split=kind_split,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def diff(
+    rows: List[dict[str, Any]],
+    per_file: bool = True,
+    format: str = "unified",
+) -> dict[str, Any]:
+    """Stitch edit rows into a per-file chronological diff — the diff verb.
+
+    Reproduces the synthesis of ``session_diff``: given the edit events of a
+    session (``query(type="tool_call(edit)", session=…)`` — plus ``write`` /
+    shell-redirect events), group them per file in chronological order and
+    render a stitched, readable diff.  Bodies are fetched on demand (via each
+    event's stored ``message_index``), never inlined on the row.
+
+    Args:
+        rows: Edit-event dicts (``query`` output).  Each must carry an ``id``
+            and a ``refs`` list with a ``file`` entry; unresolvable rows skip.
+        per_file: Group by file (the only mode today).
+        format: ``"unified"`` (the only rendering today).
+
+    Returns:
+        ``{"files": [{"file", "edits", "diff", "hunks"}], "count", "caveats"}``
+        (same shape + caveats as ``session_diff``) or the standard
+        ``{"error": ..., "message": ...}`` dict on an unsupported ``format``.
+    """
+    try:
+        return _diff_core(rows, per_file=per_file, format=format)
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
+    """Return the current runtime identity (session + agent) from env/fs.
+
+    NOT a session-query — this reads the runtime environment (env vars +
+    per-session flag files), reusing the exact cascade behind the
+    ``ai-r detect-agent`` / ``ai-r detect-session`` CLI subcommands.
+
+    Args:
+        agent: Optional hint (accepted for symmetry with the CLI's
+            deprecated ``--agent`` flag); the cascade scans all agents.
+
+    Returns:
+        ``{"session_id", "agent", "candidates": [...], "verified", "self"}``
+        where ``session_id`` / ``agent`` describe the highest-priority
+        candidate and ``candidates`` is the full cascade for disambiguation.
+        Returns ``{"error": ..., "message": ...}`` on an unknown ``agent``
+        hint.
+    """
+    try:
+        return _detect_current_core(agent=agent)
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
 
 
 def _parse_query(query: str) -> tuple[list[str], list[str]]:
