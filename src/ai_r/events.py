@@ -32,7 +32,7 @@ import hashlib
 import json
 import re
 from collections import OrderedDict as _OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import (
     Any,
@@ -50,7 +50,7 @@ from ai_r.find_file_edits import (
     previous_user_intent,
     to_utc_aware,
 )
-from ai_r.parsers import PARSERS, iso, target_agents
+from ai_r.parsers import PARSERS, Message, iso, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 
 __all__ = [
@@ -113,6 +113,15 @@ def classify_tool(name: str) -> str:
     if key in _BASH_NAMES:
         return "bash"
     return "other"
+
+
+# The complete vocabulary of normalized subtypes :func:`classify_tool` can
+# return.  A ``tool_call`` event's ``type`` is always ``tool_call(<sub>)`` for
+# one of these; exported so a consumer can enumerate/validate subtypes without
+# re-deriving the mapping.
+TOOL_SUBTYPE: frozenset[str] = frozenset(
+    {"edit", "write", "read", "bash", "other"}
+)
 
 
 @dataclass(frozen=True)
@@ -568,7 +577,7 @@ def _messages_to_events(
                 seq += 1
             # Emit any plan_event(s) triggered by this assistant message,
             # right after its tool_call(s) so the stream stays chronological.
-            for sig in signals_by_msg.get(idx, ()):  # type: ignore[arg-type]
+            for sig in signals_by_msg.get(idx, ()):
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=ts_iso,
                     event_type="plan_event",
@@ -689,10 +698,11 @@ def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
             for sess in parser.list_sessions():
                 if sess.uuid != session_id:
                     continue
+                messages: list[Message] = []
                 try:
                     messages = parser.read_messages(sess.uuid)
                 except (FileNotFoundError, ValueError, OSError):
-                    messages = ()
+                    messages = []
                 msgs_cache[session_id] = messages
                 return messages
         msgs_cache[session_id] = ()
@@ -800,9 +810,11 @@ def query(
       lets ``diff`` / the ``find_file_edits`` preset reproduce the legacy
       ``intent`` field byte-for-byte.
 
-    ``kind`` / ``parent`` / ``group`` are accepted but **not yet
-    implemented** (Phase 2/3 — plan/subagent facets); passing them today
-    has no effect beyond being ignored.
+    ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
+    — plan/subagent facets).  They are accepted in the signature for forward
+    compatibility, but passing a non-``None`` value raises
+    :class:`ValueError` (fail-loud) rather than silently no-op'ing, so an
+    external client is never misled into thinking a filter was applied.
 
     Returns a list of event dicts (see :func:`_event_to_dict`).  Invalid
     arguments raise :class:`ValueError` (the MCP wrapper converts these
@@ -837,8 +849,13 @@ def query(
     if not n_all and n_int < 1:
         raise ValueError(f"n must be >= 1 or 'all', got {n!r}")
 
-    # TODO(Phase 2/3): kind=subagent + parent tree, group for plan_event.
-    _ = (kind, parent, group)
+    # Phase 2/3 facets (kind=subagent + parent tree, group for plan_event) are
+    # not implemented yet.  Fail loud rather than silently ignore, so a caller
+    # is never misled into thinking the filter took effect.
+    if kind is not None or parent is not None or group is not None:
+        raise ValueError(
+            "kind/parent/group not yet supported (Phase 2/3 stub)"
+        )
 
     # --- relative_to walk: needs a single, contiguous, ordered stream ----
     if relative_to is not None:
@@ -1105,8 +1122,11 @@ def plan(
     Thin wrapper over ``query(type="plan_event", …)`` that groups the
     plan_events into tasks and tags each with ``draft`` | ``final`` |
     ``completed_major`` (see :func:`_assign_plan_kinds`).  ``group="task"``
-    (the only supported grouping today) keys by normalized title; the
-    agent-specific plan signal is already normalized away upstream.
+    (the only supported grouping today) keys by each plan's ``task_key`` —
+    the plan-file slug when the agent has one (Claude ``plans/<slug>.md``,
+    Antigravity ``implementation_plan.md`` path), falling back to the
+    normalized title only when no plan file exists (Codex ``update_plan``).
+    The agent-specific plan signal is already normalized away upstream.
 
     Args:
         session: Restrict to one session uuid (recommended); ``None`` scans

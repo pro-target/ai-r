@@ -295,14 +295,14 @@ def test_invalid_n_raises() -> None:
         query(relative_to="x:0", n=0)
 
 
-def test_phase2_facets_accepted_but_ignored(multi_turn_claude: str) -> None:
-    # kind/parent/group are placeholders — passing them must not error and
-    # must not change the result vs. omitting them.
-    base = query(session=multi_turn_claude)
-    with_ph = query(
-        session=multi_turn_claude, kind="subagent", parent="p", group="task"
-    )
-    assert base == with_ph
+def test_phase2_facets_rejected(multi_turn_claude: str) -> None:
+    # kind/parent/group are Phase 2/3 stubs — passing a non-None value must
+    # fail loud rather than silently return an unfiltered result (a silent
+    # no-op would mislead an external caller into trusting a wrong result).
+    query(session=multi_turn_claude)  # baseline: omitting them is fine.
+    for facet in ("kind", "parent", "group"):
+        with pytest.raises(ValueError, match="not yet supported"):
+            query(session=multi_turn_claude, **{facet: "x"})
 
 
 # ---------------------------------------------------------------------------

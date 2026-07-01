@@ -65,7 +65,8 @@ exclude_lines = [
 fail_under = 80
 
 # Lint config — lenient by design so `ruff check` / `mypy src` run clean on
-# the current codebase and tighten incrementally. Not wired into CI yet.
+# the current codebase and tighten incrementally. Enforced in CI (the `lint`
+# job runs `ruff check src/` + `mypy src/`).
 [tool.ruff]
 line-length = 100
 target-version = "py311"
