@@ -32,16 +32,10 @@ _SCENARIOS_DOC = _REPO / "docs" / "scenarios.md"
 # SHORT and justified — it is the escape hatch that keeps guard #2 honest. Empty
 # it by writing the scenario; grow it only with a written reason.
 #
-# NOTE (baseline on HEAD 409ca77): both entries below are a genuine gap, not a
-# considered exemption. Left here so the guard is green-on-merge; the correct
-# fix is to add LIST-1 / FTC-1 scenarios and delete these two lines.
-_SCENARIO_EXEMPT: frozenset[str] = frozenset(
-    {
-        "list_sessions",  # TODO(scenarios): add LIST-1 and remove
-        "find_tool_calls",  # TODO(scenarios): add FTC-1 and remove
-        
-    }
-)
+# Currently EMPTY: every one of the 13 MCP tools has at least one scenario in
+# scenarios.md (list_sessions → LIST-1, find_tool_calls → FTC-1 closed the last
+# gap). Add an entry here only alongside a written reason for the exemption.
+_SCENARIO_EXEMPT: frozenset[str] = frozenset()
 
 
 def _mcp_tool_names() -> set[str]:

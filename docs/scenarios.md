@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 30 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 32 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -53,6 +53,8 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 30 LLM-executed end-to-end
 | `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
+| `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
+| `find_tool_calls` | 1 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result. |
 
 <!-- scenarios:end -->
 
@@ -352,3 +354,31 @@ Cross-agent file-edit inventory. The MCP surface is **reference-by-default**.
 - **Steps:** take a record's referenced event id (via `session_uuid` + `message_index`, or the matching `query` event id) and call `mcp__ai-r__get_body(id="<id>")`.
 - **Expected:** The full edit body is returned, and its size matches the earlier `input_chars` for that record.
 - **Pass criteria:** GO when the on-demand body matches the reference (size/hash) from FFE-1 — proving reference-then-fetch works end-to-end.
+
+---
+
+## `list_sessions`
+
+Cross-agent session inventory: newest-first, paginated, each summary self-describing.
+
+### LIST-1 — paginated, date-sorted, agent-filterable inventory
+- **Function:** `list_sessions`
+- **Goal:** Enumerate discoverable sessions without dumping the whole vault; each summary carries enough identity to drill in.
+- **Preconditions:** A vault with sessions from at least one agent. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__list_sessions(limit=5)`; then `mcp__ai-r__list_sessions(agent="claude", limit=5)`.
+- **Expected:** At most 5 summaries, sorted by date newest-first; each carries a session id, `agent`, date, `kind` (`"agent"`/`"subagent"`) and `parent_uuid`; a `truncated` flag is set when more sessions remain. The `agent="claude"` call returns only Claude sessions.
+- **Pass criteria:** GO when results honor `limit`, are date-descending, the agent filter narrows the set, and every summary carries `kind` + `parent_uuid`. (Subagent-tree detection being Claude-only — non-Claude always `kind="agent"` — is a documented scope boundary, not a NO-GO.)
+
+---
+
+## `find_tool_calls`
+
+Cross-agent tool-call search by exact name or substring pattern, with a loud XOR contract.
+
+### FTC-1 — exact vs pattern search, cross-agent, fail-loud arg contract
+- **Function:** `find_tool_calls`
+- **Goal:** Locate tool invocations across every agent by exact name or substring, and reject an ambiguous argument set instead of returning a misleading empty list.
+- **Preconditions:** A vault where at least one agent recorded tool calls (e.g. `Read`, an edit tool). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__find_tool_calls(tool_name="Read", limit=20)`; then `mcp__ai-r__find_tool_calls(tool_name_pattern="edit", limit=20)`; then the invalid `mcp__ai-r__find_tool_calls()` (neither name nor pattern).
+- **Expected:** The exact call returns only `Read` calls (case-insensitive), spanning whichever agents recorded them; the pattern call returns calls whose tool name contains `edit` (case-insensitive); the argument-less call returns `{"error": "invalid_argument", "message": …}`.
+- **Pass criteria:** GO when exact and pattern searches both return correct cross-agent matches AND the neither-argument call returns the `invalid_argument` error shape — never a silent empty result.
