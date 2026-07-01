@@ -1720,7 +1720,7 @@ def test_find_file_edits_claude_match(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="README.md")
+    result = find_file_edits(path="README.md", include_input=True)
     assert result["count"] >= 1
     assert result["truncated"] is False
     hit = next(r for r in result["records"] if r["session_uuid"] == "cfe-1")
@@ -2088,7 +2088,7 @@ def test_find_file_edits_codex_exec_command_redirect(
     monkeypatch.setattr(
         "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
-    result = find_file_edits(path="codex-sh", agent="codex")
+    result = find_file_edits(path="codex-sh", agent="codex", include_input=True)
     assert result["count"] == 1
     hit = result["records"][0]
     assert hit["agent"] == "codex"
@@ -2112,7 +2112,7 @@ def test_find_file_edits_codex_exec_command_append(
     monkeypatch.setattr(
         "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
-    result = find_file_edits(path="codex-sh2", agent="codex")
+    result = find_file_edits(path="codex-sh2", agent="codex", include_input=True)
     assert result["count"] == 1
     assert result["records"][0]["file"] == "/tmp/codex-sh2/log.txt"
     assert result["records"][0]["input"]["edit"] == "append"

@@ -631,8 +631,17 @@ def find_file_edits(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
+    include_input: bool = False,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
+
+    Reference-by-default: to keep an audit listing small, each record does
+    **not** inline the full edit body.  Instead it carries a light-weight
+    reference — ``input_sha256`` (hash of the body) and ``input_chars`` (its
+    length) — so you can see a body exists and how big it is.  Fetch the body
+    on demand with ``get_body`` / ``read_session`` (keyed by ``session_uuid``
+    + ``message_index``).  Pass ``include_input=True`` to inline the full
+    body under ``input`` instead.
 
     Thin wrapper over :func:`ai_r.find_file_edits.find_file_edits`
     that translates the core ``ValueError`` contract into the
@@ -646,6 +655,7 @@ def find_file_edits(
             since=since,
             until=until,
             limit=limit,
+            include_input=include_input,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -990,7 +1000,9 @@ def query(
     event shape unchanged.
 
     ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
-    **not yet implemented** (Phase 2/3: plan + subagent facets).
+    **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
+    non-``None`` value is a fail-loud error (returns the standard
+    ``invalid_argument`` dict) rather than a silent no-op.
 
     Returns ``{"events": [...], "count": N}`` or the standard
     ``{"error": ..., "message": ...}`` dict on invalid arguments.
@@ -1036,9 +1048,12 @@ def plan(
     :class:`~ai_r.events.Plan` shape — the per-agent signal is an internal
     detail, never surfaced.
 
-    Plans are grouped by *task* (normalized title, NOT slug/filename): within
-    a task the latest plan is ``final`` and earlier revisions are ``draft``;
-    plans of *earlier* completed tasks are ``completed_major``.
+    Plans are grouped by *task* keyed on each plan's ``task_key`` — the
+    plan-file slug when the agent has one (Claude ``plans/<slug>.md``,
+    Antigravity ``implementation_plan.md`` path), falling back to the
+    normalized title only when no plan file exists (Codex ``update_plan``).
+    Within a task the latest plan is ``final`` and earlier revisions are
+    ``draft``; plans of *earlier* completed tasks are ``completed_major``.
 
     Args:
         session: Restrict to one session uuid (recommended).
