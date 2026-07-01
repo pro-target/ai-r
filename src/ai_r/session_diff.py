@@ -241,6 +241,51 @@ def _scan_session(
     return events
 
 
+def _diff_via_verb(
+    session_uuid: str, agent: str, path_filter: Optional[str]
+) -> dict[str, Any]:
+    """Reconstruct a session's per-file diff by delegating to the ``diff`` verb.
+
+    Builds the session's edit events (``tool_call(edit)`` / ``tool_call(write)``
+    with a ``file`` ref) via ``query(with_intent=True)`` — a single,
+    chronological stream so file grouping matches ``_scan_session``'s
+    first-appearance order — folds them with ``diff``, and projects the result
+    onto the exact legacy shape (dropping ``diff``'s extra file-level
+    ``hunks`` key, which is additive and not part of the ``session_diff``
+    contract).  Byte-identical to the legacy scan for structured-edit agents.
+    """
+    from ai_r.events import diff as _diff, query as _query
+
+    rows: List[dict[str, Any]] = []
+    for ev in _query(
+        type="tool_call", session=session_uuid, agent=agent, with_intent=True
+    ):
+        # Only real edits: ``Edit``/``Write``/… normalize to edit|write; a
+        # ``Read``/``View`` carries a file ref too but is NOT an edit, so it
+        # must be excluded to match the legacy EDIT_TOOLS filter.
+        if ev.get("type") not in ("tool_call(edit)", "tool_call(write)"):
+            continue
+        files = [r.get("file", "") for r in ev.get("refs", ()) if "file" in r]
+        if not files:
+            continue
+        if path_filter is not None and not any(path_filter in f for f in files):
+            continue
+        rows.append(ev)
+
+    folded = _diff(rows)
+    # Project onto the legacy shape: keep only file/edits/diff per file (drop
+    # the additive per-file ``hunks``), preserving order and caveats.
+    files = [
+        {"file": f["file"], "edits": f["edits"], "diff": f["diff"]}
+        for f in folded["files"]
+    ]
+    return {
+        "files": files,
+        "count": folded["count"],
+        "caveats": folded["caveats"],
+    }
+
+
 def session_diff(
     session_uuid: str,
     agent: str,
@@ -280,6 +325,21 @@ def session_diff(
     # ``coerce_agent`` raises ``ValueError`` on an unknown agent, which is
     # exactly the contract the MCP/CLI wrappers expect — let it propagate.
     agent_name = coerce_agent(agent)
+
+    # Structured-edit agents (claude / opencode / antigravity / pi) route their
+    # edits through real ``Edit`` / ``Write`` tool_use entries, which the
+    # unified event stream normalizes to ``tool_call(edit)`` / ``(write)``
+    # events carrying a ``file`` ref.  For those we DELEGATE to the ``diff``
+    # verb over ``query(with_intent=True)`` — byte-identical on real data
+    # (proven across the host vault).  Codex is the one exception: it writes
+    # files through a shell-exec tool whose redirect targets are recovered by a
+    # command-string scan the event stream does NOT run, so a codex session's
+    # shell-redirect edits would vanish from a ``query`` fold.  Codex therefore
+    # keeps the legacy ``_scan_session`` path, preserving byte-parity for every
+    # agent.
+    agent_lc = agent_name.value.lower()
+    if agent_lc != "codex":
+        return _diff_via_verb(session_uuid.strip(), agent_lc, path if path else None)
 
     path_filter = path if path else None
     events = _scan_session(agent_name, session_uuid.strip(), path_filter)
