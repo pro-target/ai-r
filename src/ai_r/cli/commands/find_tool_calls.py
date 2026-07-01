@@ -59,6 +59,50 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Maximum records to return. 0 = no cap (default: 100).",
     )
     ftc_p.add_argument(
+        "--input-contains",
+        dest="input_contains",
+        default=None,
+        metavar="SUBSTR",
+        help="Keep only calls whose serialized input contains SUBSTR (ci).",
+    )
+    ftc_p.add_argument(
+        "--output-contains",
+        dest="output_contains",
+        default=None,
+        metavar="SUBSTR",
+        help="Keep only calls whose output contains SUBSTR (ci).",
+    )
+    ftc_p.add_argument(
+        "--output-excludes",
+        dest="output_excludes",
+        default=None,
+        metavar="SUBSTR",
+        help="Drop calls whose output contains SUBSTR (ci).",
+    )
+    ftc_err_mutex = ftc_p.add_mutually_exclusive_group()
+    ftc_err_mutex.add_argument(
+        "--errors-only",
+        dest="errors_only",
+        action="store_true",
+        help="Keep only failed calls (is_error=True).",
+    )
+    ftc_err_mutex.add_argument(
+        "--success-only",
+        dest="success_only",
+        action="store_true",
+        help="Keep only succeeding calls (is_error=False).",
+    )
+    ftc_p.add_argument(
+        "--output-mode",
+        dest="output_mode",
+        choices=("head", "tail", "smart"),
+        default=None,
+        help=(
+            "Output truncation strategy (default: adaptive — smart on "
+            "errors, head otherwise)."
+        ),
+    )
+    ftc_p.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
@@ -75,6 +119,13 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
     """
     from ai_r.find_tool_calls import find_tool_calls as _ftc_core
 
+    if args.errors_only:
+        is_error = True
+    elif args.success_only:
+        is_error = False
+    else:
+        is_error = None
+
     try:
         result = _ftc_core(
             tool_name=args.tool_name,
@@ -83,6 +134,11 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
             since=args.since,
             until=args.until,
             limit=args.limit,
+            input_contains=args.input_contains,
+            output_contains=args.output_contains,
+            output_excludes=args.output_excludes,
+            is_error=is_error,
+            output_mode=args.output_mode,
         )
     except ValueError as exc:
         return _exit_with_error(str(exc), code=2)

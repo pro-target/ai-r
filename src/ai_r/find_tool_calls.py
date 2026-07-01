@@ -16,6 +16,7 @@ pattern, with the previous user message recorded as ``intent``.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, List, Optional
 
 from ai_r.find_file_edits import (
@@ -77,6 +78,74 @@ def _cap_field(value: Any, cap: int) -> tuple[Any, bool]:
     return value, False
 
 
+# --- Smart output truncation ----------------------------------------------
+# Lines matching this pattern are treated as "interesting" for the ``smart``
+# output-cap mode: on a failing call the useful signal is usually the
+# error/exception/traceback line, which a naive head-slice can drop when the
+# error sits at the tail of a long log.  ``smart`` mode surfaces those lines
+# up front (deduped) AND keeps the tail so the terminal error is never lost.
+_ERROR_LINE_RE = re.compile(
+    r"error|fatal|exception|traceback|failed|panic|exit code|denied|not found",
+    re.IGNORECASE,
+)
+_SMART_MAX_ERROR_LINES = 20
+
+
+def _cap_output(text: str, cap: int, mode: str) -> tuple[str, bool]:
+    """Bound ``text`` to ``cap`` chars, returning ``(capped, truncated)``.
+
+    ``mode`` selects the strategy when ``text`` exceeds ``cap``:
+
+    * ``"head"`` — keep the first ``cap`` chars (legacy behaviour).
+    * ``"tail"`` — keep the last ``cap`` chars (the terminal output, e.g.
+      the final error).
+    * ``"smart"`` — surface deduped error-ish lines (see ``_ERROR_LINE_RE``)
+      up front, then a ``…[truncated]…`` marker, then the tail of the text.
+      Guarantees an error line at the very end of ``text`` is preserved (it
+      appears both in the error-line block and the tail).
+
+    ``text`` at or under ``cap`` is returned unchanged with ``truncated``
+    ``False`` for every mode.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= cap:
+        return text, False
+    if mode == "tail":
+        return "…[truncated]" + text[-cap:], True
+    if mode == "smart":
+        seen: set[str] = set()
+        error_lines: List[str] = []
+        for line in text.split("\n"):
+            if not _ERROR_LINE_RE.search(line):
+                continue
+            stripped = line.strip()
+            if not stripped or stripped in seen:
+                continue
+            seen.add(stripped)
+            error_lines.append(line)
+            if len(error_lines) >= _SMART_MAX_ERROR_LINES:
+                break
+        tail = text[-(cap // 2):] if cap > 1 else text[-1:]
+        parts = []
+        if error_lines:
+            parts.append("\n".join(error_lines))
+        parts.append("…[truncated]…")
+        parts.append(tail)
+        result = "\n".join(parts)
+        safe_limit = 2 * cap
+        if len(result) > safe_limit:
+            result = result[:safe_limit] + "…[truncated]"
+        return result, True
+    # default / "head"
+    return text[:cap] + "…[truncated]", True
+
+
+def _match_ci(haystack: str, needle: str) -> bool:
+    """Case-insensitive substring test."""
+    return needle.lower() in haystack.lower()
+
+
 def find_tool_calls(
     *,
     tool_name: Optional[str] = None,
@@ -85,6 +154,11 @@ def find_tool_calls(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    output_excludes: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    output_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
 
@@ -103,6 +177,21 @@ def find_tool_calls(
             timestamp.  Pass ``""`` or ``None`` to leave open.
         limit: Maximum records to return.  ``0`` = no cap.  Default
             ``100``.
+        input_contains: Optional case-insensitive substring the
+            serialized tool ``input`` must contain.  Matched against the
+            FULL (pre-cap) serialized input.  ``None`` = no filter.
+        output_contains: Optional case-insensitive substring the
+            correlated ``output`` must contain.  Matched against the FULL
+            (pre-cap) output text.  ``None`` = no filter.
+        output_excludes: Optional case-insensitive substring; a record
+            whose FULL output contains it is DROPPED (e.g. harness noise
+            markers).  ``None`` = no filter.
+        is_error: Tri-state outcome filter.  ``None`` = all; ``True`` =
+            only failed calls; ``False`` = only succeeding calls.
+        output_mode: How to truncate an over-cap ``output``: ``"head"``
+            (first chars), ``"tail"`` (last chars), or ``"smart"``
+            (error lines + tail).  ``None`` = adaptive — ``"smart"`` for
+            error records, ``"head"`` otherwise.
 
     Returns:
         A dict ``{"records": [...], "count": N, "truncated": bool,
@@ -122,6 +211,9 @@ def find_tool_calls(
         and OpenCode, best-effort ``False`` for Codex/Antigravity/Pi and
         whenever no result correlates to the call) and ``output`` (the
         correlated ``tool_result`` content, ``""`` when none) plus
+        ``is_error_reliable`` (bool: ``True`` only for Claude/OpenCode,
+        whose outcome flag is authoritative; ``False`` for the other
+        agents where ``is_error`` is best-effort) and
         ``truncated_fields`` (list naming any of ``input``/``intent``/
         ``assistant``/``output`` that were char-capped for this record;
         empty when none tripped).  The
@@ -136,7 +228,8 @@ def find_tool_calls(
         ValueError: on invalid arguments (neither or both of
             ``tool_name``/``tool_name_pattern`` set, ``limit``
             negative, unparseable ``since``/``until``, unknown
-            ``agent``).
+            ``agent``, empty ``*_contains``/``output_excludes``,
+            non-bool ``is_error``, unknown ``output_mode``).
     """
     name_exact = tool_name
     name_substr = tool_name_pattern
@@ -155,6 +248,22 @@ def find_tool_calls(
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         raise ValueError(
             f"limit must be a non-negative integer, got {limit!r}"
+        )
+    for fname, fval in (
+        ("input_contains", input_contains),
+        ("output_contains", output_contains),
+        ("output_excludes", output_excludes),
+    ):
+        if fval is not None and (not isinstance(fval, str) or not fval.strip()):
+            raise ValueError(f"{fname} must be a non-empty string")
+    if is_error is not None and not isinstance(is_error, bool):
+        raise ValueError(
+            f"is_error must be None or a bool, got {is_error!r}"
+        )
+    if output_mode is not None and output_mode not in {"head", "tail", "smart"}:
+        raise ValueError(
+            "output_mode must be one of 'head', 'tail', 'smart', "
+            f"got {output_mode!r}"
         )
 
     since_dt = parse_iso_bound(since, "since")
@@ -230,15 +339,6 @@ def find_tool_calls(
                         call_ts is None or call_ts > until_dt
                     ):
                         continue
-                    capped_input, input_trunc = _cap_field(
-                        _coerce_input(tool.get("input", "")), _INPUT_CHARS_CAP
-                    )
-                    capped_intent, intent_trunc = _cap_field(
-                        intent, _INTENT_CHARS_CAP
-                    )
-                    capped_asst, asst_trunc = _cap_field(
-                        msg.text or "", _ASSISTANT_CHARS_CAP
-                    )
                     # Correlated outcome (default: no result found → not an
                     # error, empty output).  ``tool_use_id`` is present on the
                     # call for Claude/OpenCode; other agents leave it absent so
@@ -249,10 +349,61 @@ def find_tool_calls(
                         if isinstance(tu_id, str) and tu_id
                         else None
                     )
-                    is_error = bool(result.get("is_error")) if result else False
+                    call_is_error = (
+                        bool(result.get("is_error")) if result else False
+                    )
                     raw_output = result.get("content", "") if result else ""
-                    capped_output, output_trunc = _cap_field(
-                        raw_output, _OUTPUT_CHARS_CAP
+
+                    # --- Content filters (cheap; run BEFORE capping) --------
+                    # Match on the FULL, pre-cap text so a filter never misses
+                    # a hit that fell past the field cap.  Records that fail
+                    # any active filter are skipped before record assembly.
+                    coerced_input = _coerce_input(tool.get("input", ""))
+                    if isinstance(coerced_input, str):
+                        input_str = coerced_input
+                    else:
+                        try:
+                            input_str = json.dumps(
+                                coerced_input, ensure_ascii=False
+                            )
+                        except (TypeError, ValueError):
+                            input_str = str(coerced_input)
+                    output_str = (
+                        raw_output if isinstance(raw_output, str)
+                        else str(raw_output)
+                    )
+                    if is_error is not None and call_is_error != is_error:
+                        continue
+                    if input_contains is not None and not _match_ci(
+                        input_str, input_contains
+                    ):
+                        continue
+                    if output_contains is not None and not _match_ci(
+                        output_str, output_contains
+                    ):
+                        continue
+                    if output_excludes is not None and _match_ci(
+                        output_str, output_excludes
+                    ):
+                        continue
+
+                    capped_input, input_trunc = _cap_field(
+                        coerced_input, _INPUT_CHARS_CAP
+                    )
+                    capped_intent, intent_trunc = _cap_field(
+                        intent, _INTENT_CHARS_CAP
+                    )
+                    capped_asst, asst_trunc = _cap_field(
+                        msg.text or "", _ASSISTANT_CHARS_CAP
+                    )
+                    # Adaptive default: surface error lines on failures,
+                    # legacy head-slice on successes; explicit ``output_mode``
+                    # overrides.
+                    eff_mode = output_mode or (
+                        "smart" if call_is_error else "head"
+                    )
+                    capped_output, output_trunc = _cap_output(
+                        output_str, _OUTPUT_CHARS_CAP, eff_mode
                     )
                     truncated_fields = [
                         f for f, hit in (
@@ -275,7 +426,10 @@ def find_tool_calls(
                         "input": capped_input,
                         "intent": capped_intent,
                         "assistant": capped_asst,
-                        "is_error": is_error,
+                        "is_error": call_is_error,
+                        "is_error_reliable": (
+                            agent_name.value.lower() in {"claude", "opencode"}
+                        ),
                         "output": capped_output,
                         "truncated_fields": truncated_fields,
                     })

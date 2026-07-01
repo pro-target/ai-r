@@ -704,11 +704,26 @@ def find_tool_calls(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    output_excludes: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    output_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
 
     Exactly one of ``tool_name`` (exact, case-insensitive) or
     ``tool_name_pattern`` (substring, case-insensitive) must be set.
+
+    Optional filters combine with AND: ``input_contains`` /
+    ``output_contains`` (case-insensitive substring on the full,
+    pre-cap input/output), ``output_excludes`` (drop records whose
+    output contains it) and ``is_error`` (tri-state: ``None`` all,
+    ``True`` failures only, ``False`` successes only).  ``output_mode``
+    selects output truncation — ``"head"``/``"tail"``/``"smart"``;
+    ``None`` is adaptive (``"smart"`` on errors, ``"head"`` otherwise).
+    Each record also carries ``is_error_reliable`` (``True`` only for
+    Claude/OpenCode).
 
     Thin wrapper over :func:`ai_r.find_tool_calls.find_tool_calls`
     that translates the core ``ValueError`` contract into the
@@ -723,6 +738,11 @@ def find_tool_calls(
             since=since,
             until=until,
             limit=limit,
+            input_contains=input_contains,
+            output_contains=output_contains,
+            output_excludes=output_excludes,
+            is_error=is_error,
+            output_mode=output_mode,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
