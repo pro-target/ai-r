@@ -12,7 +12,7 @@
 #
 # Environment variables:
 #   INSTALL_MODE   opt | user | auto (default, same as user)
-#   PYTHON         python interpreter to use (default: python3)
+#   PYTHON         python interpreter to use (default: newest python3.x >= 3.11 on PATH)
 #   AI_R_CMD  override the absolute path of ai-r-mcp to register in
 #                  the agent MCP configs (default: ~/.local/bin/ai-r-mcp)
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
@@ -21,7 +21,25 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-${INSTALL_MODE:-auto}}"
-PYTHON="${PYTHON:-python3}"
+
+# ai-r requires Python >= 3.11 (pyproject requires-python). On distros whose
+# default python3 is older (e.g. Ubuntu 22.04 ships 3.10), probe for a newer
+# interpreter on PATH before giving up. PYTHON env var overrides the probe.
+MIN_PY_MINOR=11
+find_python() {
+    local cand
+    for cand in python3 python3.13 python3.12 python3.11; do
+        if command -v "$cand" >/dev/null 2>&1 &&
+           "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (3, ${MIN_PY_MINOR}) else 1)" 2>/dev/null; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+if [[ -z "${PYTHON:-}" ]]; then
+    PYTHON="$(find_python)" || PYTHON="python3"
+fi
 BIN_DIR="${HOME}/.local/bin"
 INSTALL_DIR=""
 VENV_PYTHON_BIN=""
@@ -64,6 +82,10 @@ detect_mode() {
 hdr "ai-r installer"
 log "Repo:    $REPO_DIR"
 log "Python:  $($PYTHON --version 2>&1)"
+
+if ! "$PYTHON" -c "import sys; sys.exit(0 if sys.version_info >= (3, ${MIN_PY_MINOR}) else 1)" 2>/dev/null; then
+    die "ai-r requires Python >= 3.${MIN_PY_MINOR}; '$PYTHON' is $($PYTHON --version 2>&1). Install a newer python (e.g. apt install python3.${MIN_PY_MINOR} python3.${MIN_PY_MINOR}-venv) or set PYTHON=/path/to/python3.x"
+fi
 
 MODE="$(detect_mode)"
 if [[ "$MODE" == "opt" ]]; then

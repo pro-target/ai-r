@@ -17,10 +17,15 @@ jobs:
         include:
           - image: ubuntu:22.04
             label: Ubuntu 22.04 (jammy)
+            # jammy's default python3 is 3.10 < ai-r's requires-python (3.11).
+            # universe ships python3.11; install.sh probes PATH and picks it up.
+            extra-packages: python3.11 python3.11-venv
           - image: ubuntu:24.04
             label: Ubuntu 24.04 (noble)
+            extra-packages: ""
           - image: ubuntu:devel
             label: Ubuntu devel (rolling)
+            extra-packages: ""
     container:
       image: ${{ matrix.image }}
     steps:
@@ -31,7 +36,8 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            python3 python3-venv python3-pip git ca-certificates sudo
+            python3 python3-venv python3-pip git ca-certificates sudo \
+            ${{ matrix.extra-packages }}
 
       - name: Run install.sh (auto mode)
         env:
