@@ -167,7 +167,7 @@ def _diff_via_verb(
     ``hunks`` key, which is additive and not part of the ``session_diff``
     contract).  Byte-identical to the legacy scan for structured-edit agents.
     """
-    from ai_r.events import diff as _diff
+    from ai_r.events.diff import diff as _diff
     from ai_r.events.model import iter_events as _iter_events
     from ai_r.events.query import _attach_intents, _event_to_dict
 

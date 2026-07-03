@@ -40,7 +40,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, Optional
 
-from ai_r.events import aggregate as _aggregate
+from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
 from ai_r.parsers import PARSERS, iso, target_agents
 
