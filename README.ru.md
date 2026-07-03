@@ -6,105 +6,139 @@
 
 [English](README.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md)
 
-> **Одно read-only окно в историю сессий каждого AI-агента** —
-> Claude, Codex, OpenCode, Antigravity и Pi — через MCP, CLI или
-> Python-пакет.
->
-> Переключайтесь между агентами, не теряя контекст · Проверяйте, что
-> агент сделал *и что запускал* · Ищите по всем сессиям сразу.
+> `git` показывает, **что** попало в код. `ai-r` показывает, **почему**: какой
+> агент это сделал, под каким планом — и не выронил ли он тихо тот план, на
+> котором сам же остановился. Read-only, по всем пяти агентам для кода, один
+> интерфейс.
 
-```bash
-# один запрос, все агенты — найдите сессию, где всплыл тот самый баг с auth
-ai-r search "auth token refresh" --scope body
+Агент отчитался: «сделал X по плану Y». Проверить нечем. План — в одном
+формате, правки — в другом. А если над задачей работали два агента, их истории
+вообще не сводятся: каждый пишет по-своему и в своём месте. `ai-r` читает
+историю сессий агента и достаёт из неё намерение, план и авторство за правкой.
+
+## Быстрый пример — агент спрашивает историю
+
+Главный режим — **MCP**: агент (Claude, Codex, …) зовёт `ai-r` напрямую и
+спрашивает про историю обычным языком. Например — вытащить план, на котором
+остановился прошлый агент, отбросив черновики:
+
+```
+Покажи план из прошлой сессии — только финальный, без промежуточных ревизий.
+→ ai-r: plan(session=…, kind="final")  →  get_body(id, shallow=true)
+        возвращает финальную задачу + список dropped_drafts
 ```
 
-## Зачем?
+Быстрая атрибуция правок — одна команда в терминале, сразу по всем агентам:
 
-Каждый AI-агент для кодинга хранит собственную историю разговоров — в
-своём месте, в своём формате. Claude и Codex пишут JSONL, OpenCode
-использует SQLite, Antigravity раскидывает «brain»-каталоги, Pi пишет
-JSONL по проектам. В итоге ваша работа **заперта внутри каждого
-инструмента**: сменили агента — потеряли нить; невозможно спросить «а что
-другой агент уже пробовал?».
+```bash
+# кто правил этот файл и когда — кросс-агентно, опционально за период
+ai-r find-file-edits auth.py --since 2026-06-01
+```
 
-`ai-r` схлопывает всё это в **один read-only интерфейс**. Наведите любого
-агента — или скрипт, или себя самого — на любую сессию, неважно, какой
-инструмент её записал. Это общая память для всех агентов, которых вы
-запускаете.
+## Что болит
 
-## Доказательство — я гоняю его на своей же работе
+- «Готово, сделал X по плану Y» — а проверить нечем: план агент держит в одном
+  виде, правки в другом.
+- Сменили агента посреди задачи — потеряли нить. Спросить «что *другой* агент
+  уже пробовал?» негде.
+- Всплыла правка в файле — непонятно, **какой** агент её сделал и по какому
+  запросу.
 
-`ai-r` читает те самые сессии, которые его и построили. По **5 агентам**
-и **684 записанным сессиям** его вызвали **~125 раз**: 49 чтений сессий,
-37 поисков по телу, 31 листинг, 9 трассировок правок файлов. Главный
-сценарий — **аудит**: свежий агент, чья единственная задача —
-хладнокровно проверить, что предыдущий агент на самом деле сделал и
-решил. Это уже ловило агентов, которые тихо вводили в заблуждение
-планирование (и меня); теперь такие промахи всплывают.
+Причина одна: каждый агент пишет историю **по-своему** — Claude и Codex в
+JSONL, OpenCode в SQLite, Antigravity в «brain»-директориях, Pi в JSONL по
+проектам. Пять форматов, пять раскладок — вместе они не сводятся.
 
-## Когда это полезно
+## Обещание
 
-Единый ридер поверх всех агентов открывает сценарии, недоступные журналу
-одного агента:
+`ai-r` сводит все пять в **один read-only интерфейс**. Наведите любого агента —
+или скрипт, или себя — на любую сессию, неважно, какой инструмент её записал.
+Одна форма запроса для каждого агента; различия форматов нормализуются внутри
+парсеров.
 
-- **Исчерпали лимит провайдера? Переключите агента и продолжайте.**
-  Закончилась квота Codex посреди задачи? Поднимите Antigravity, укажите
-  ему на сессию Codex и попросите продолжить — та же задача, другая
-  модель, без потери контекста.
-- **Закончилось контекстное окно? Начните заново и продолжите.** Откройте
-  новую сессию, передайте ей UUID предыдущей и скажите «продолжи отсюда».
-  Предыдущий транскрипт читаем вне зависимости от того, каким агентом он
-  был записан.
-- **Передача задач и триаж между агентами.** «Что сделал другой агент по
-  этому вопросу?» работает между Claude, Codex, OpenCode, Antigravity и
-  Pi без необходимости изучать пять разных форматов журналов.
-- **«Кто трогал этот файл и когда?»** Каждое изменение пути — по всем
-  агентам, по всем сессиям — с временными метками. Аудит за период: «что
-  агенты делали с `src/auth.py` на прошлой неделе?» (см.
-  `find-file-edits`).
-- **Аудит того, что агенты *запускали*, а не только что меняли.** Каждый
-  вызов тула — shell-команды, записи файлов, web-запросы, MCP-вызовы — по
-  всем агентам, и каждый помечен пользовательским запросом, который его
-  спровоцировал. «Запускал ли какой-нибудь агент деплой на прошлой
-  неделе?» «Покажи все shell-команды, что выполнял Codex.» (см.
+## Ключевые возможности
+
+- **«Почему?», не только «Что?».** Извлекает план, намерение и авторство за
+  правкой — не только текст диффа. `git diff` говорит, *что* изменилось;
+  `ai-r` — под каким планом и по чьему запросу.
+- **Финальный план, а не черновики.** `ai-r` достаёт план, на котором агент
+  *остановился*, и отдельно показывает, что он по дороге выбросил
+  (`dropped_drafts`) — по Claude / Codex / Antigravity, где сигналы плана у
+  каждого свои.
+- **Кросс-агентная атрибуция.** Любая правка файла или вызов инструмента →
+  агент, что её сделал, плюс запустивший её запрос (`find-file-edits` /
   `find-tool-calls`).
-- **Рендер сессии как раунда CHANGELOG.** Преобразуйте сессию в markdown
-  Цель / Статус / Изменённые файлы / Решения / Следующие шаги — документ
-  для передачи, который можно вставить в другого агента или в стендап
-  (см. `export rounds`).
-- **«Какой я агент и в какой я сессии?»** Скрипт или агент, стартующий
-  свежим, определяет собственный UUID сессии, затем читает себя или
-  своего предшественника, чтобы продолжить программно (см.
-  `detect-agent`, `detect-session`).
-- **Восстановление после краша.** Агент умер, терминал закрылся, машина
-  перезагрузилась? Определите сессию, в которой вы были, перечитайте её и
-  продолжите ровно с того места, где всё остановилось — ничего не
-  потеряно (см. `detect-session`).
-- **Поиск по телам сообщений, а не только по заголовкам.** «Найди все
-  сессии, где обсуждался `auth token`» — по всем пяти агентам, со
-  сниппетами — через body-поиск с режимами `operator` (`AND`/`OR`/`NOT`).
-  Идеально для «решал ли я это раньше?» — найдите прошлую сессию и
-  переиспользуйте найденный фикс вместо того, чтобы делать всё заново.
+- **Маленький ответ, тело по требованию.** Записи несут ссылку на содержимое
+  (хэш + длину), а полный текст правки берётся отдельным запросом — ответ не
+  раздувается.
+- **Работает через MCP (13 инструментов).** Агент зовёт `ai-r` напрямую
+  обычным языком; те же данные доступны из терминала (CLI) и из кода (Python
+  SDK).
+- **Читалка, не охранник.** Достаёт сущности; граф знаний и память строишь ты
+  (или твой инструмент). Только чтение: ничего не запускает и не пишет в
+  историю агента.
 
-## Быстрый старт (1 команда)
+## Зачем это
 
-Предварительно: Python 3.11+ с `venv` (`python3-venv`) или `pip`
-(`python3-pip`/`pip3`) и `jq` (нужен для авто-регистрации MCP-конфигов
-Claude и Antigravity — остальным `jq` не требуется).
+- **Аудит сессий свежим взглядом.** Новый агент с пустым контекстом холодно
+  проверяет прошлые сессии по трём осям: выполнены ли обещания и требования;
+  логичны ли решения и их качество; насколько глубоко изучен вопрос — что агент
+  упустил. На реальном прогоне так за неделю разобрали **271 диалог** и нашли
+  агентов, которые задачу сделали, **но при планировании ввели в заблуждение** —
+  в живом чате это проходит мимо и уводит в неверные решения.
+- **Продолжить, когда кончился контекст — без потери деталей.** `/compact`
+  затирает подробности. Вместо этого открой новую сессию: она прочитает **логи**
+  предыдущей и продолжит с её выводов, не сжигая контекст заново на то, что уже
+  изучено. Исходная сессия остаётся целой — для аудита и поиска. Новая сессия
+  может быть в **любом** агенте: история сводится независимо от инструмента.
+- **Питает твою систему памяти.** Ведёшь память и саммари по методу Карпатого
+  или своему? `ai-r` даёт для AI-чатов то же, что ты делаешь с перепиской, —
+  разобранные сущности, из которых строишь постоянную память важных деталей.
+- **Вспомнить, что и зачем делали.** Зачем правили этот файл? Почему завели это
+  правило? Находишь сессию, где файл менялся, и читаешь запрос *перед* правкой.
 
-```bash
-git clone https://github.com/pro-target/ai-r.git ~/dev/ai-r
-cd ~/dev/ai-r && bash install.sh
-```
+## Чем отличается от инструментов поиска сессий
 
-Готово. Установщик:
-- По умолчанию использует per-user режим; режим `opt` — явный.
-- Создаёт venv, устанавливает runtime-пакет.
-- Пропатчивает MCP-конфиги для **Claude**, **Codex**, **OpenCode**,
-  **Antigravity**, если эти файлы конфигов существуют.
-- Устанавливает CLI-скилл для **Pi** в `~/.agents/skills/ai-r/SKILL.md`,
-  если он отсутствует.
-- Запускает smoke-тесты.
+Появилась горстка кросс-агентных инструментов, читающих историю нескольких
+агентов (`jazzyalex/agent-sessions`,
+`Dicklesworthstone/coding_agent_session_search`, `hacktivist123/agent-session-resume`).
+Почти все они — про **поиск и таймлайн**: найти *сессию*, пролистать историю.
+
+`ai-r` идёт глубже: он извлекает **план, намерение и авторство как готовые
+сущности**, на которых ты строишь память. Поиск находит текст — `ai-r`
+отвечает, **почему**. Технически поисковый инструмент тоже мог бы выудить план
+из текста сессии, но он не отдаёт его наружу в разобранном, едином виде — у
+`ai-r` это главная поверхность.
+
+| Возможность | Вьюеры одного агента | Кросс-агентные search-тулы | `ai-r` |
+|---|---|---|---|
+| Читает логи >1 агента | Нет | Да | Да — Claude, Codex, OpenCode, Antigravity, Pi |
+| Программная поверхность | В основном GUI/TUI | В основном TUI/CLI/app | **MCP + CLI + Python SDK** |
+| Атрибуция (правка/команда → агент + intent) | — | Частично | Да — `find-file-edits` / `find-tool-calls` |
+| Аудит-реплей (реконструкция изменений сессии, без git) | — | Редко | Да — `session_diff` |
+| Извлечение плана (final vs draft, нормализовано) | — | — | Да — `plan` |
+| Скоуп | Вьюер | Поиск / резюм / память | **Read-only ядро извлечения** |
+
+*Столбцы конкурентов — по их публичным докам на 2026-07; где возможности
+неясны, мы скорее занижаем, чем переоцениваем.*
+
+Мы сознательно **не** соревнуемся по охвату агентов, скорости или богатству
+TUI. Клин `ai-r` — извлечение «почему» и структурные сущности для
+машинного потребления.
+
+## Проверено в деле
+
+`ai-r` уже читает собственную историю разработки — по всем пяти агентам. На нём
+держатся реальные инструменты (живут отдельно, поверх его read-only API):
+
+- **аудитор** — свежий агент холодно проверяет, что предыдущий реально сделал и
+  решил. Так ловили агентов, которые тихо привирали про план.
+- **суммаризатор** (`export rounds`) — рендерит сессию в готовый
+  документ-передачу (handoff).
+- **ai-local-reader** — read-only скилл: аудит прошлых сессий с диска по всем
+  агентам.
+
+Эти инструменты — на стороне рабочего процесса, вне этого репозитория. Сам
+`ai-r` только читает и отдаёт данные.
 
 ## Поддерживаемые агенты
 
@@ -112,318 +146,176 @@ cd ~/dev/ai-r && bash install.sh
 |---|---|---|
 | Claude Code | `~/.claude/projects/` | JSONL |
 | Codex | `~/.codex/sessions/` | JSONL |
-| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite (авто-определение snap/flatpak) |
-| Antigravity | `~/.gemini/antigravity/brain/` | JSON / markdown brain-каталоги |
+| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite (авто-детект snap/flatpak) |
+| Antigravity | `~/.gemini/antigravity/brain/` | JSON / markdown brain-директории |
 | Pi | `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` | JSONL |
 
-Вашего агента нет в списке? Добавить шестого — это **один parser-модуль**:
-read-only паттерн переносится на любой инструмент (Cursor, Cline, ваш
-собственный) за минуты. См. [CONTRIBUTING.md](./CONTRIBUTING.md).
+Не ваш агент? Добавить шестого — это **один модуль-парсер**; read-only паттерн
+портируется на любой инструмент за минуты. См.
+[CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## Архитектура
+## Поверхности
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Layer 1: Public API (3 surfaces)                             │
-│   • ai-r CLI (argparse)                                 │
-│   • ai-r-mcp (MCP server, stdio JSON-RPC)               │
-│   • from ai_r.parsers import ...  (Python SDK)          │
-└──────────────────────────────────────────────────────────────┘
-┌──────────────────────────────────────────────────────────────┐
-│ Layer 2: Core (parsers/, models)                             │
-│   • claude, codex, opencode (SQLite), antigravity, pi        │
-│   • Auto-detect snap/flatpak OpenCode DBs                    │
-└──────────────────────────────────────────────────────────────┘
-```
+`ai-r` даёт одну и ту же силу чтения тремя способами:
 
-## Это ещё и переиспользуемое ядро, а не только инструмент
+- **MCP-сервер** (`ai-r-mcp`) — 13 инструментов через stdio JSON-RPC, так что
+  любой MCP-агент дёргает его напрямую (рекомендуется). Регистрация — см.
+  [docs/mcp-registration.md](./docs/mcp-registration.md).
+- **CLI** (`ai-r`) — субкоманды для скриптов и ручного использования
+  (`list` / `read` / `search` / `find-file-edits` / `find-tool-calls` /
+  `file-frequency` / `detect-agent` / `export rounds`). Операторы поиска —
+  [docs/search-operators.md](./docs/search-operators.md).
+- **Python SDK** (`from ai_r.parsers import ...`) — парсеры, типизированные
+  модели `Session`/сообщений и событийные вербы, чтобы строить свои
+  инструменты.
 
-`ai-r` сделан так, чтобы его заимствовали. Парсеры, типизированные модели
-`Session` и сообщений, security-хелперы (работа с ненадёжным
-содержимым, ограничения размеров, сканирование shell-команд с учётом
-кавычек) — небольшие, с минимумом зависимостей и read-only по своей сути.
-Не видите своего агента выше? Возьмите ядро, наведите его на новый формат
-журнала — и вот у вас ридер для него; большинство агентов от вас в одном
-parser-модуле. Весь репозиторий заодно работает как готовый шаблон для
-«читать историю каждого агента, безопасно».
+### Словарь методов (SSOT)
 
-## Границы дизайна
+Блок ниже сфреймлен из [`docs/methods.ru.md`](./docs/methods.ru.md) —
+русского зеркала первоисточника ([`docs/methods.md`](./docs/methods.md),
+англ.) по публичным вербам и пресетам. Держится синхронным с
+маркер-блоком того файла.
 
-`ai-r` — это публичное ядро: парсеры, типизированные сообщения, CLI и MCP.
-Специфичные для рабочих процессов ревьюеры, саммари и аудиты живут вне
-этого репозитория и используют API парсеров (`read_messages`).
+<!-- methods:start -->
 
-`ai-r` — **ридер, а не страж.** Любой вызывающий код, имеющий доступ к
-CLI, MCP-серверу или пакету, может прочитать любую сессию — перед
-парсерами нет слоя контроля доступа. Держите его там, куда не дотянутся
-ненадёжные локальные вызывающие.
+## Verbs
 
-Содержимое сессий **ненадёжно** — вызывающий код ридера (аудитор,
-саммаризатор, агент-реплей) должен трактовать его как данные, а не как
-инструкции. См. [Безопасность — ненадёжное содержимое
-сессий](docs/security.md).
+| verb | назначение | параметры |
+|---|---|---|
+| `query` | фильтр/поиск событий сессий; `with_intent=True` → на каждое событие top-level `intent` (та же `previous_user_intent`, что у legacy); событие `tool_call` несёт ref `is_error` (исход вызова), когда его результат коррелируется (см. *Границы вывода и исход* ниже) | type, agent, session, since, until, file, tool, text, sort(relevance\|date), relative_to+direction(prev\|next)+n(1\|all), step_type, limit, with_intent; kind/parent/group — заглушки (Phase 3) |
+| `plan` | нормализованные plan-атомы сессии (final vs drafts, группировка по задачам) | session, kind(draft\|final\|completed_major), group=task, agent |
+| `get_body` | тело on-demand по id события/плана; возвращаемое тело/текст ограничено `max_chars` (по умолчанию 500k) → превышение режется с маркером и помечается `body_truncated` | id, shallow, max_chars |
+| `aggregate` | rollup над rows (query/find_file_edits/session-inventory) → `{groups, totals}`; `rank_by=stats` даёт session_stats-порядок (sessions→edits→label), `kind_split=True` добавляет `kind_split_available`/`note` | rows, group_by(field\|callable), metrics ⊆ count\|sessions\|edits\|intents\|agents\|messages\|files, rank_by(default\|stats), kind_split |
+| `diff` | стичинг edit-rows в per-file unified diff (тела on-demand через message_index; `intent` берётся из row при `query(with_intent)`) → `{files:[{file,edits,diff,hunks}], count, caveats}` | rows, per_file=True, format=unified |
+| `detect_current` | runtime-identity (env/fs, вне session-query) → `{session_id, agent, candidates[], verified, self}` | agent (hint) |
 
-## Известные ограничения
+## Presets (пресеты)
 
-- **Antigravity** — покрытие фикстурами плюс опциональные smoke-тесты на
-  реальных данных при наличии локального brain-каталога.
-- **shell-правки Codex CLI** — `find_file_edits` восстанавливает записи
-  файлов codex из shell-команд `exec_command` / `local_shell_call` через
-  консервативный анализ перенаправлений с учётом кавычек (`>` / `>>`).
-  Записи через `tee` / `sed -i` / `cp` / `mv` / только-heredoc не
-  обнаруживаются; структурные правки (`apply_patch` / `write_file`) —
-  всегда.
-
-Полная матрица покрытия парсеров — в [docs/parsers.md](docs/parsers.md).
-
-## Использование
-
-### Как MCP-сервер (рекомендуется)
-
-MCP-сервер авто-регистрируется в конфиге вашего агента. Доступные тулы:
-
-| Тул | Назначение |
+| preset | раскрытие |
 |---|---|
-| `list_sessions(agent?, limit?, offset?)` | Список обнаружимых сессий, опционально отфильтрованный по агенту. Пагинация: `limit=0` = без ограничения; ответ несёт `total`/`offset`/`limit`/`truncated`. |
-| `read_session(uuid, agent, offset?, limit?)` | Чтение одной сессии; по умолчанию до 100 сообщений. Передайте `offset`/`limit` для дальнейшей пагинации. |
-| `find_file_edits(path, agent?, since?, until?, limit?)` | Найти каждое изменение файла по пути, по всем агентам по умолчанию, опционально за период (`since`/`until` ISO 8601). |
-| `find_tool_calls(tool_name?, tool_name_pattern?, agent?, since?, until?, limit?)` | Найти каждый вызов тула — shell-команды, записи файлов, web-запросы, MCP-вызовы — по всем сессиям. Совпадение по точному имени тула (`tool_name`) или по подстроке (`tool_name_pattern`); по всем агентам и за период. Каждое попадание несёт спровоцировавший пользовательский запрос в `intent`. |
-| `search_sessions(query, agent?, scope?, operator?, limit?)` | Поиск по заголовку и/или телу сообщений, с режимом `operator` (`AND`/`OR`/`NOT`) и Google-стилем исключений `-term`. См. [Операторы поиска](#операторы-поиска). |
+| `intent(event, n)` | `query(relative_to=event, direction=prev, n)` |
+| `reaction(event, n)` | `query(relative_to=event, direction=next, n)` |
+| `plan(session, kind, group=task)` | `query(type=plan_event, …)` → normalized + kind-tagged (final/draft/completed_major) |
+| `session_stats(group_by)` | строит per-session inventory-rows → `aggregate(rows, group_by, rank_by=stats, kind_split=True)` → проекция на legacy-форму totals |
+| `session_diff(uuid, agent≠codex)` | `diff(query(type=edit\|write, session=uuid, with_intent=True) c file-ref))` → проекция (без file-level `hunks`) |
 
-**Пагинация** (`limit`/`offset` плюс флаг `truncated`, когда остаются ещё
-страницы) доступна в MCP-тулах и Python SDK — см. [architecture.md](docs/architecture.md).
+## Legacy-тулы: пресеты над вербами (Phase 3b)
 
-### Как CLI (тесты / скрипты)
+Phase 3b обогатила вербы, чтобы старые тулы стали тонкими пресетами **с byte-identical выходом, доказанным на РЕАЛЬНЫХ данных** (frozen snapshot `~/.claude`, чтобы живой vault не мутировал в середине прогона — это давало ложные mismatch'и). Legacy-сьюты (`test_session_stats`/`test_session_diff`) зелёные — вторая половина доказательства совместимости.
+
+**Переведены на вербы (byte-parity доказана):**
+
+| тул | пресет над вербом | доказательство |
+|---|---|---|
+| `session_stats` | `aggregate(rank_by=stats, kind_split=True)` над per-session inventory-rows | 8/8 (group_by∈agent\|dir\|date\|kind × top∈8\|0) EQUAL на snapshot; ключ — `rank_by=stats` воспроизводит sessions-first ранк, `kind_split` даёт `kind_split_available`/`note` |
+| `session_diff` (≠codex) | `diff(query(edit\|write, with_intent=True))` | 12/12 реальных Claude-сессий EQUAL; ключ — `with_intent` возвращает `intent`, единый chronological stream даёт тот же file-order, фильтр edit\|write исключает `Read` (иначе лишние файлы) |
+
+**Codex — исключение в `session_diff`:** codex пишет файлы через shell-exec, target восстанавливается сканом командной строки, которого событийный поток НЕ делает → shell-redirect-правки исчезли бы из `query`-fold. Поэтому codex-ветка `session_diff` сохраняет legacy `_scan_session` (byte-parity для всех агентов).
+
+**Остаются отдельными (обоснованно):**
+
+| тул | почему НЕ пресет |
+|---|---|
+| `find_file_edits` / `find_tool_calls` | запись несёт `session_title`/`session_date`/`assistant`/`input`, которых НЕТ в событии `query`; `find_tool_calls` дополнительно несёт per-record `is_error` (коррелированный исход tool-вызова) и `output` (коррелированное содержимое tool-result, с char-cap); воспроизвести их = заново читать сессию (не *тонкий* пресет, а второй парс поверх событий — строго медленнее) + потеря codex shell-redirect-правок. `intent` теперь воспроизводим (`with_intent`), но остальных полей — нет. SSOT богатой edit/tool-записи |
+| `search_sessions` | session-гранулярный + BM25-сниппеты сессий; `query` event-гранулярный (turn/tool) → чистого 1:1 нет |
+| `detect-agent`/`detect-session` (CLI) | CLI печатает `source` агента и 6 режимов вывода (list/first/strict/self/fingerprint/`--json`/`--count`) + WARN-строку; дикт `detect_current` этого не даёт |
+
+## Plan-атом (нормализованный, различия агентов скрыты)
+
+`Plan { id, session_id, agent, title, task_id, kind: draft\|final\|completed_major, path?, steps?, status?, refs[], sha256 }`. Тело/steps — on-demand через `get_body(id, shallow?)`. `shallow=True` → только final задачи, тела draft-черновиков отброшены (сценарий S6).
+
+**Группировка по задачам = `task_id` (стабильный ключ):** для Claude это slug плана `plans/<slug>.md` (Write несёт path напрямую; `ExitPlanMode` без path наследует slug ближайшего предшествующего plan-Write в сессии; если slug'а ещё не было — fallback на нормализованный title). Для Antigravity — путь `implementation_plan.md`. Для Codex (файла нет) — нормализованный title (непрерывный ран `update_plan`). Ключ по slug'у, а НЕ по title, потому что title дрейфует внутри одной итерации-цепочки (декорации меняют заголовок) — на реальных данных это резало одну задачу на несколько. В группе последний plan_event по (ts, seq) = `final`, ранние = `draft`; строго более ранние задачи (ДРУГОЙ slug) = `completed_major`. Внутренняя таблица parser→сигнал (`ExitPlanMode`/`Write plans/*.md`/`update_plan`/`implementation_plan.md`) — деталь реализации, наружу невидима.
+
+## Границы вывода и исход tool-вызова
+
+**Ограниченный вывод (untrusted-сессии бывают огромными — поверхность никогда не отдаёт неограниченные байты):** `find_tool_calls` режет у каждой записи поля `input`/`assistant`/`intent`/`output` (превышение обрезается маркером `…[truncated]` и перечисляется в per-record `truncated_fields`) и прекращает добавлять записи при достижении общего байт-бюджета ответа, выставляя `output_truncated`; это отдельно от count-based `truncated` (есть ещё записи). `get_body` ограничивает тело через `max_chars` (`body_truncated`). Tool-input больше 1 МБ никогда не JSON-декодится (возвращается как есть) — общий guard и на событийном потоке, и в `find_tool_calls`. `read_session` рендерит результат вызова как `[tool_result ok: <snippet>]` или `[tool_result ERROR: <snippet>]` (был голый `[tool_result]`).
+
+**Адаптивная обрезка вывода (`output_mode`):** cap на поле `output` каждой записи — `_OUTPUT_CHARS_CAP = 2000` символов. Как тратится этот бюджет, задаёт `output_mode ∈ {"head", "tail", "smart"}`. Дефолт (`output_mode=None`) — **адаптивно per record**: запись с `is_error == True` обрезается по `"smart"` (surface строк-ошибок — `error`/`fatal`/`traceback`/… — плюс хвост, чтобы ошибка в *конце* длинного лога не терялась при head-обрезке), а успешная запись — по `"head"` (legacy-поведение). Явный `output_mode` форсит одну стратегию для всех записей. `smart`/`tail` могут вернуть до ~2× cap, чтобы уместить и поднятые строки, и хвост; при любой обрезке `output` по-прежнему перечисляется в `truncated_fields` этой записи.
+
+**Фильтрация `find_tool_calls` (все опциональны, композируются по И):** помимо `tool_name`/`tool_name_pattern` записи сужаются через `input_contains` (case-insensitive substring по сериализованному tool-input / тексту команды), `output_contains` (ci substring по коррелированному `output`), `output_excludes` (отбросить запись, чей `output` содержит маркер — заданный вызывающим фильтр шума, напр. строка harness security-гейта, `"user rejected"`, `"MANUAL COMMIT BLOCKED"`; **такого списка в ядре НЕ зашито**) и `is_error` (tri-state: `None` = все, `True` = только ошибки, `False` = только успех). Все фильтры пересекаются (И). Отдельного verb'а «ошибка + домен» **нет**: эта связка — *композиция*, напр. `find_tool_calls(input_contains="git", is_error=True)` возвращает реальные сбои команд выбранного домена (`git` — лишь пример домена, не спец-случай).
+
+**`is_error` (исход tool-вызова) — cross-agent best-effort:** **Claude** и **OpenCode** несут реальный флаг успех/ошибка (у Claude — `tool_result.is_error`; у OpenCode — `state.status == "error"`). **Codex** и **Pi** не имеют поля ошибки в записях результата → `is_error` всегда `False` (отсутствие флага, не доказательство успеха). **Antigravity** вообще не эмитит tool-result-записей → сигнала исхода нет. Консьюмеры НЕ должны читать cross-agent `is_error=False` как «подтверждённый успех» для Codex/Pi/Antigravity. `find_tool_calls` теперь несёт тот же `is_error` в каждой записи плюс коррелированный `output` (содержимое tool-result, с char-cap) — корреляция по tool_use_id (у Claude `tool_use.id` / у OpenCode `callID`); с той же best-effort-оговоркой (`is_error` авторитетен только для Claude/OpenCode и по умолчанию `False` для Codex/Pi/Antigravity либо когда результат не коррелируется). Чтобы эта честность была машиночитаемой, каждая запись `find_tool_calls` дополнительно несёт `is_error_reliable` (bool): `True` для Claude/OpenCode (значение подкреплено реальным флагом), `False` для Codex/Pi/Antigravity (источника нет → `is_error` всегда `False` и может **недосчитывать** настоящие сбои). Консьюмер, фильтрующий `is_error=True`, должен читать `is_error_reliable`, чтобы понять, означает ли `False` «подтверждённый успех» или лишь «нет сигнала».
+
+<!-- methods:end -->
+
+### Событийное ядро
+
+Вербы выше — новые: одно **событийное ядро** заменяет кучу разовых
+инструментов. Каждый парсер читает логи одного агента и выдаёт типизированные
+модели, которые нормализуются в единый агент-нейтральный поток —
+`user_turn` / `assistant_turn` / `tool_call(...)` / `plan_event`. Небольшой
+набор вербов фильтрует, агрегирует и diff-ит этот поток; различия агентов
+(`ExitPlanMode` против `update_plan` против `implementation_plan.md`) скрыты
+внутри парсеров — вызывающий видит одну форму.
+
+Честно про границу: это **только извлечение сущностей** — реплики, вызовы
+инструментов, планы, намерения, реакции. Это **не** граф и **не** хранилище
+памяти. Что делать дальше (граф знаний, Obsidian, постоянная память) — уже на
+твоей стороне, вне этого репозитория. Полную слоёную схему и список
+MCP-инструментов см. в [docs/architecture.md](./docs/architecture.md).
+
+## Быстрый старт (1 команда)
+
+Требования: Python 3.11+ с `venv` или `pip`, и `jq` (для автопатча MCP-конфигов
+Claude и Antigravity — остальным `jq` не нужен).
 
 ```bash
-# list / read / search
-ai-r list --agent pi
-ai-r read --agent pi <session-uuid>
-ai-r search "refactor"
-ai-r search "pwa manifest" --scope body --operator and --agent claude
-
-# кто правил файл, по всем агентам, опционально за период
-ai-r find-file-edits src/auth.py --since 2026-06-01 --until 2026-06-30
-ai-r find-file-edits "config" --agent claude --limit 20
-
-# что агенты запускали? точное имя тула или подстрока-паттерн, за период
-ai-r find-tool-calls Bash --since 2026-06-01
-ai-r find-tool-calls --pattern deploy --agent codex
-
-# какой я агент / в какой я сессии (скрипты, оркестрация, self-resume)
-ai-r detect-agent --quiet          # → напр. "claude"
-ai-r detect-session --json         # → кандидатные UUID сессий
-
-# рендер сессии как раунд CHANGELOG (документ-передача / реплей)
-ai-r export rounds <session-uuid> --include-round --output round.md
+git clone https://github.com/pro-target/ai-r.git ~/dev/ai-r
+cd ~/dev/ai-r && bash install.sh
 ```
 
-Добавьте `--json` к большинству подкоманд для машиночитаемого вывода.
+Установщик создаёт venv, ставит runtime-пакет, патчит MCP-конфиги для
+**Claude**, **Codex**, **OpenCode**, **Antigravity** (где конфиги существуют),
+ставит CLI-скилл **Pi** и прогоняет смоук-тесты.
 
-### Операторы поиска
+## Границы: читалка, не охранник
 
-`search_sessions` (MCP) и `ai-r search` (CLI) используют общий парсер запросов и
-общий параметр operator. Поведение по умолчанию (`scope="title"`,
-`operator="AND"`, `limit=50`) не изменилось по сравнению с прежним поиском по
-подстроке в заголовке.
+- **Только чтение.** Никогда не запускает код агента и не пишет в его историю —
+  читает и возвращает.
+- **Ни графа, ни памяти.** Достаёт сущности (реплики, вызовы, планы,
+  намерения). Строить из них граф знаний или память — твоя задача, не его.
+- **Не контроль доступа.** Кто дотянулся до CLI, MCP-сервера или пакета — читает
+  любую сессию. Проверки прав перед парсерами нет; держи там, куда чужие
+  локальные процессы не дотянутся.
+- **Содержимое сессий — данные, не команды.** Кто читает (аудитор,
+  суммаризатор), обязан относиться к тексту сессии как к данным, а не
+  инструкциям. См. [Безопасность](docs/security.md).
 
-**Синтаксис запроса**
+<!-- scenarios:start -->
 
-| Форма | Пример | Значение |
+## Acceptance summary
+
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+
+| Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| Отдельные слова | `pwa manifest` | Оба терма (способ сочетания задаёт operator). |
-| Фраза в кавычках | `"exact phrase"` | Один литеральный терм. |
-| Отрицательный префикс | `-claude` | Google-стиль: этот терм НЕ должен встречаться. |
+| `query` | 8 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
+| `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
+| `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
+| `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
+| `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
+| `plan` | 5 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal. |
+| `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
+| `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
+| `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
+| `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
+| `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
+| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
+| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
 
-Слова `AND`, `OR` и `NOT` внутри запроса — литеральные термы поиска.
-Булево поведение выбирается через `--operator and|or|not` (CLI) или
-`operator="AND"|"OR"|"NOT"` (MCP).
+<!-- scenarios:end -->
 
-**Режимы operator** (как сочетаются положительные термы)
+## Дальше — документация
 
-| Режим | Семантика `pwa manifest` | Семантика `pwa -claude` |
-|---|---|---|
-| `AND` (по умолчанию) | оба должны встретиться | `pwa` встречается, `claude` — нет |
-| `OR` | хотя бы один встречается | один из `pwa` встречается, `claude` — нет |
-| `NOT` | ни один не встречается | ни `pwa`, ни `claude` не встречаются |
-
-**Режимы scope**
-
-| Scope | Где выполняется поиск |
-|---|---|
-| `title` (по умолчанию) | только `session.title` — совпадает с прежним поведением по заголовку. |
-| `body` | текст сообщений + `tool_use[*].input` + `tool_result[*].content` для каждой сессии. |
-| `all` | заголовок ИЛИ тело. |
-
-Когда `scope` равен `body` или `all` и найдено совпадение, результат включает
-поле `snippet` (CLI: печатается в таблице) — первый совпадающий фрагмент, до 200
-символов.
-
-**Замечание о производительности**: `body` и `all` вызывают `read_messages` на
-каждой сессии-кандидате. На больших хранилищах первый запуск может быть
-медленным; повышайте `--limit`, чтобы держать размер результата ограниченным при
-итерации.
-
-**Пример MCP**
-
-```python
-search_sessions(
-    query='pwa -claude',
-    agent='claude',
-    scope='body',
-    operator='AND',
-    limit=20,
-)
-```
-
-**Примеры CLI**
-
-```bash
-# только заголовок (legacy, по умолчанию)
-ai-r search "refactor"
-
-# body-поиск, все термы обязательны, исключить claude
-ai-r search "pwa manifest -claude" --scope body --operator and
-
-# body-поиск, любой терм, максимум 5 результатов
-ai-r search "pwa manifest" --scope body --operator or --limit 5
-
-# всё, что не содержит ни одного из этих термов
-ai-r search "auth login" --scope body --operator not
-```
-
-### Как Python SDK
-
-```python
-from ai_r.parsers import AgentName, claude
-
-for session in claude.list_sessions():
-    print(session.uuid, session.title)
-
-session = claude.read_session("<session-uuid>")
-print(session.message_count)
-
-messages = claude.read_messages("<session-uuid>")
-print(messages[0].role, messages[0].text)
-```
-
-Полное описание слоёв — в [docs/architecture.md](./docs/architecture.md).
-
-## Регистрация MCP
-
-`ai-r-mcp` — stdio MCP-сервер. Зарегистрируйте его один раз для каждого
-хост-тула. Замените `USER` на своё имя пользователя (или уберите абсолютный
-путь, если `ai-r-mcp` есть на `PATH`). **Перезапустите хост-тул после правки
-его конфига** — ни один из них не подхватывает изменения MCP на лету.
-
-Сниппеты ниже используют `/home/USER/.local/bin/ai-r-mcp`. Скорректируйте путь,
-если установка лежит в другом месте (`which ai-r-mcp` подскажет).
-
-### Claude Code
-
-Отредактируйте `~/.claude.json` (объект `mcpServers` верхнего уровня):
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "type": "stdio",
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": [],
-      "env": {}
-    }
-  }
-}
-```
-
-Для регистрации в рамках одного проекта закоммитьте `.mcp.json` в корне репозитория
-(см. [`.mcp.json`](./.mcp.json)).
-
-### Codex
-
-Отредактируйте `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.ai-r]
-command = "/home/USER/.local/bin/ai-r-mcp"
-args = []
-```
-
-### Gemini CLI
-
-Отредактируйте `~/.gemini/settings.json` (объект `mcpServers`):
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": [],
-      "timeout": 60
-    }
-  }
-}
-```
-
-### OpenCode
-
-Отредактируйте `~/.config/opencode/opencode.jsonc` (объект `mcp` верхнего
-уровня). OpenCode отличается от остальных тремя моментами: `type` — `"local"`
-(не `"stdio"`), `command` — единый слитый массив (команда + аргументы вместе),
-а ключ окружения — `"environment"`.
-
-```json
-{
-  "mcp": {
-    "ai-r": {
-      "type": "local",
-      "command": ["/home/USER/.local/bin/ai-r-mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Antigravity
-
-Отредактируйте `~/.gemini/antigravity/mcp_config.json` (объект `mcpServers`).
-Это отдельно от конфига Gemini CLI выше — Antigravity хранит свой MCP-конфиг
-в `~/.gemini/antigravity/`.
-
-```json
-{
-  "mcpServers": {
-    "ai-r": {
-      "command": "/home/USER/.local/bin/ai-r-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-### Pi — скилл, не MCP
-
-У Pi (`@earendil-works/pi-coding-agent`) **нет конфига MCP-сервера** для
-редактирования. Он использует модель расширений/скиллов (`pi install <source>`,
-`pi config`), а не карту `mcpServers`, поэтому `ai-r-mcp` нельзя
-зарегистрировать как in-process MCP-тул внутри Pi (а спавн его in-process нарушил
-бы дизайн-контракт Pi). Вместо этого `install/agent-configs.sh` кладёт read-only
-**CLI-скилл** в `~/.agents/skills/ai-r/` — директорию, которую Pi уже сканирует.
-Скилл учит модель вызывать CLI `ai-r` из bash-сессии Pi, без спавна MCP. Сессии
-Pi также полностью читаемы *через* `ai-r` через CLI (`ai-r list --agent pi`,
-`ai-r read …`) или Python SDK; оба читают файлы `~/.pi/agent/sessions/`
-напрямую. Для слеш-команды `/ai-r` установите `enableSkillCommands: true` в
-`~/.pi/agent/settings.json` (текст скилла работает и при дефолтном `false`).
-
-### Заметки
-
-- `ai-r-mcp` должен быть на `PATH`, либо используйте абсолютный путь как выше.
-- Патчинг JSON-конфигов использует `jq`. Если `jq` отсутствует, регистрации
-  Codex, OpenCode и Pi всё равно выполняются; конфиги Claude и Antigravity
-  пропускаются — установите `jq` или зарегистрируйте их вручную сниппетами выше.
-- Перезапустите хост-тул после правки его файла конфига.
-- Сервер read-only; любой вызывающий код, имеющий к нему доступ, может прочитать
-  любую сессию. См. [Границы дизайна](#границы-дизайна).
+- Словарь методов (вербы + пресеты) — [`docs/methods.md`](./docs/methods.md)
+  (англ. SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (рус. зеркало)
+- Приёмочные сценарии (32 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Архитектура и слои — [`docs/architecture.md`](./docs/architecture.md)
+- Операторы поиска — [`docs/search-operators.md`](./docs/search-operators.md)
+- Регистрация MCP по агентам — [`docs/mcp-registration.md`](./docs/mcp-registration.md)
+- Покрытие парсеров и ограничения — [`docs/parsers.md`](./docs/parsers.md)
+- Безопасность (недоверенное содержимое) — [`docs/security.md`](./docs/security.md)
+- Добавить шестого агента — [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ## Разработка
 
@@ -434,14 +326,30 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ тестов, покрытие ≥80% требуется CI.
-- Conventional Commits (`feat:`, `fix:`, `docs:`, …).
-- См. [CONTRIBUTING.md](./CONTRIBUTING.md) и [docs/parsers.md](./docs/parsers.md)
-  по добавлению новых агентов.
-- `src/ai_r/validators/` и `src/ai_r/templates/` — опциональные standalone
-  хелперы (валидация session-note markdown), не входят в поверхность CLI или
-  MCP.
+- 350+ тестов, CI требует покрытие ≥80%
+- Conventional Commits (`feat:`, `fix:`, `docs:`, …)
+- Про добавление новых агентов см. [CONTRIBUTING.md](./CONTRIBUTING.md) и
+  [docs/parsers.md](./docs/parsers.md)
+
+<details>
+<summary>Ключевые слова</summary>
+
+claude code session reader · claude code session parser · codex session parser ·
+opencode session reader · antigravity brain parser · pi agent session reader ·
+cross-agent attribution · ai coding agent audit · ai agent session history ·
+mcp session tools · read-only session reader · agent session replay ·
+resume agent session · agent handoff · plan extraction · tool-call audit ·
+file edit attribution · multi-agent coding · claude codex opencode antigravity pi
+
+</details>
 
 ## Лицензия
 
 MIT — см. [LICENSE](./LICENSE).
+
+---
+
+**Начать:** clone + `bash install.sh`, затем зарегистрируйте MCP-сервер для
+своего агента ([docs/mcp-registration.md](./docs/mcp-registration.md)) и
+перезапустите host-инструмент. Одна read-only поверхность к истории каждого
+агента.

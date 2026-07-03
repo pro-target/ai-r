@@ -39,8 +39,11 @@ from ai_r.mcp_server import (
     _session_summary,
     _target_agents,
     find_file_edits,
+    get_body,
     list_sessions,
     mcp,
+    plan,
+    query,
     read_session,
     search_sessions,
 )
@@ -173,16 +176,17 @@ def test_mcp_search_claude() -> None:
     texts = _run(
         _call("search_sessions", {"query": "claude", "agent": "claude"})
     )
-    matches = [json.loads(t) for t in texts if t.strip().startswith("{")]
-    if matches:
-        m = matches[0]
+    payload = json.loads(texts[0])
+    results = payload["results"]
+    if results:
+        m = results[0]
         assert "uuid" in m and "title" in m
 
 
 def test_mcp_search_empty_query() -> None:
-    """An empty query short-circuits to an empty list."""
+    """An empty query short-circuits to an empty result set."""
     texts = _run(_call("search_sessions", {"query": ""}))
-    assert texts == [] or json.loads(texts[0]) == []
+    assert json.loads(texts[0]) == {"results": [], "count": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -647,14 +651,14 @@ def test_read_session_not_found_returns_error_dict() -> None:
 
 
 def test_search_sessions_empty_query_returns_empty() -> None:
-    """An empty query short-circuits to ``[]``."""
-    assert search_sessions(query="") == []
+    """An empty query short-circuits to an empty result set."""
+    assert search_sessions(query="") == {"results": [], "count": 0}
 
 
 def test_search_sessions_invalid_agent_returns_error_dict() -> None:
     result = search_sessions(query="x", agent="mystery")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
 
 
 # ---------------------------------------------------------------------------
@@ -836,13 +840,66 @@ def test_read_session_claude_tool_only_messages_not_blank(
     msgs = result["messages"]
     # tool_use input "ls" is not valid JSON → raw-string fallback, so the
     # call surfaces as "[tool_use: Bash ls]".  timestamps are now attached.
+    # The result-only user record now surfaces the call outcome instead of a
+    # bare ``[tool_result]`` placeholder: a successful result renders as
+    # ``[tool_result ok: <snippet>]`` so read_session can tell success/error.
     assert [(m["role"], m["content"]) for m in msgs] == [
         ("assistant", "[tool_use: Bash ls]"),
-        ("user", "[tool_result]"),
+        ("user", "[tool_result ok: ok]"),
         ("assistant", "done"),
     ]
     assert msgs[0]["timestamp"] == "2026-06-14T10:00:00+00:00"
     assert all(m["content"] for m in msgs)
+
+
+def test_read_session_claude_tool_error_surfaced(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed tool call renders as ``[tool_result ERROR: <snippet>]`` so
+    read_session can answer "did this actually work?"."""
+    records = [
+        {
+            "type": "ai-title",
+            "aiTitle": "Tool error projection",
+            "timestamp": "2026-06-14T09:59:59Z",
+            "sessionId": "tool-err-1",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                             "input": {"command": "pytest"}}],
+            },
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": "tool-err-1",
+        },
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                 "content": "Traceback: boom\nAssertionError"},
+            ]},
+            "timestamp": "2026-06-14T10:00:01Z",
+            "sessionId": "tool-err-1",
+        },
+    ]
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-err" / "tool-err-1.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="tool-err-1", agent="claude")
+    contents = [m["content"] for m in result["messages"]]
+    err = next(c for c in contents if c.startswith("[tool_result ERROR"))
+    assert "Traceback: boom" in err
+    assert "ok" not in err
 
 
 def test_read_session_mcp_drops_tool_messages(
@@ -977,9 +1034,11 @@ def test_search_sessions_backward_compat_title_only(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("claude")
-    assert isinstance(result, list)
-    assert result, "expected at least one match against the title"
-    for s in result:
+    assert isinstance(result, dict)
+    rows = result["results"]
+    assert rows, "expected at least one match against the title"
+    assert result["count"] == len(rows)
+    for s in rows:
         assert "snippet" not in s
         assert "claude" in s["title"].lower()
 
@@ -1001,9 +1060,9 @@ def test_search_sessions_body_and_match(
     result = search_sessions(
         "pwa manifest", agent="claude", scope="body"
     )
-    assert isinstance(result, list)
-    assert result, "expected body match"
-    matched = [s for s in result if s["uuid"] == "body-and-1"]
+    assert isinstance(result, dict)
+    assert result["results"], "expected body match"
+    matched = [s for s in result["results"] if s["uuid"] == "body-and-1"]
     assert matched, "the synthesized session must be in the results"
     assert "snippet" in matched[0]
     assert "pwa manifest" in matched[0]["snippet"].lower()
@@ -1028,7 +1087,7 @@ def test_search_sessions_body_or_match(
         scope="body",
         operator="OR",
     )
-    matched = [s for s in result if s["uuid"] == "body-or-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-or-1"]
     assert matched, "OR: only pwa appears, must still match"
 
 
@@ -1060,9 +1119,10 @@ def test_search_sessions_body_marks_truncated(
 
     result = search_sessions("needle", agent="claude", scope="body")
 
-    assert result
-    assert result[0]["uuid"] == "body-truncated-1"
-    assert result[0]["body_truncated"] is True
+    rows = result["results"]
+    assert rows
+    assert rows[0]["uuid"] == "body-truncated-1"
+    assert rows[0]["body_truncated"] is True
 
 
 def test_search_sessions_body_not_match(
@@ -1081,7 +1141,7 @@ def test_search_sessions_body_not_match(
     result = search_sessions(
         "pwa", agent="claude", scope="body", operator="NOT"
     )
-    matched = [s for s in result if s["uuid"] == "body-not-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-not-1"]
     assert not matched, "NOT: pwa is in the body, must not match"
 
 
@@ -1102,13 +1162,13 @@ def test_search_sessions_body_negative_prefix(
     excluded = search_sessions(
         "pwa -manifest", agent="claude", scope="body"
     )
-    assert not [s for s in excluded if s["uuid"] == "body-neg-1"], (
+    assert not [s for s in excluded["results"] if s["uuid"] == "body-neg-1"], (
         "-manifest must exclude a session that contains manifest"
     )
     included = search_sessions(
         "pwa -claude", agent="claude", scope="body"
     )
-    assert [s for s in included if s["uuid"] == "body-neg-1"], (
+    assert [s for s in included["results"] if s["uuid"] == "body-neg-1"], (
         "-claude must NOT exclude a session that has no 'claude' in body"
     )
 
@@ -1130,7 +1190,7 @@ def test_search_sessions_all_negative_prefix_excludes_title(
     result = search_sessions(
         "pwa -claude", agent="claude", scope="all"
     )
-    assert not [s for s in result if s["uuid"] == "all-neg-title-1"]
+    assert not [s for s in result["results"] if s["uuid"] == "all-neg-title-1"]
 
 
 def test_search_sessions_body_quoted_phrase(
@@ -1147,7 +1207,7 @@ def test_search_sessions_body_quoted_phrase(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions('"foo bar"', agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-quote-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-quote-1"]
     assert matched, "quoted phrase 'foo bar' must be located as a single term"
 
 
@@ -1170,7 +1230,7 @@ def test_search_sessions_body_tool_use_match(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("pytest", agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-tool-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-tool-1"]
     assert matched, "tool_use input must be searchable"
     assert "snippet" in matched[0]
 
@@ -1193,7 +1253,8 @@ def test_search_sessions_limit(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("limitcap", agent="claude", limit=2)
-    assert len(result) <= 2
+    assert len(result["results"]) <= 2
+    assert result["count"] == len(result["results"])
 
 
 # ---------------------------------------------------------------------------
@@ -1266,7 +1327,7 @@ def test_search_sessions_relevance_beats_recency(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body")
-    uuids = [s["uuid"] for s in result]
+    uuids = [s["uuid"] for s in result["results"]]
     assert set(uuids) == {"rank-relevant-old", "rank-fresh-new"}
     # Relevance default: the older-but-denser match wins despite the other
     # being newer.
@@ -1297,7 +1358,7 @@ def test_search_sessions_sort_date_reproduces_pre_reform_order(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body", sort="date")
-    uuids = [s["uuid"] for s in result]
+    uuids = [s["uuid"] for s in result["results"]]
     # Newest-first: the fresher session leads even though it's less relevant.
     assert uuids == ["date-fresh-new", "date-relevant-old"]
 
@@ -1338,38 +1399,38 @@ def test_search_sessions_limit_applied_after_ranking(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("kafka", agent="claude", scope="body", limit=1)
-    assert len(result) == 1
+    assert len(result["results"]) == 1
     # The single survivor is the top-ranked (oldest, densest) session —
     # proof that the limit ran AFTER ranking, not before.
-    assert result[0]["uuid"] == "lim-top-old"
+    assert result["results"][0]["uuid"] == "lim-top-old"
 
 
 def test_search_sessions_invalid_sort() -> None:
     result = search_sessions("x", sort="bogus")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "sort" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "sort" in result["message"].lower()
 
 
 def test_search_sessions_invalid_scope() -> None:
     result = search_sessions("x", scope="bogus")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "scope" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "scope" in result["message"].lower()
 
 
 def test_search_sessions_invalid_operator() -> None:
     result = search_sessions("x", operator="XOR")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "operator" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "operator" in result["message"].lower()
 
 
 def test_search_sessions_invalid_limit() -> None:
     result = search_sessions("x", limit=-1)
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
-    assert "limit" in result[0]["message"].lower()
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "limit" in result["message"].lower()
 
 
 def test_search_sessions_snippet_truncated(
@@ -1387,7 +1448,7 @@ def test_search_sessions_snippet_truncated(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = search_sessions("needle", agent="claude", scope="body")
-    matched = [s for s in result if s["uuid"] == "body-long-1"]
+    matched = [s for s in result["results"] if s["uuid"] == "body-long-1"]
     assert matched
     snippet = matched[0]["snippet"]
     assert len(snippet) <= 200
@@ -1717,7 +1778,7 @@ def test_find_file_edits_claude_match(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="README.md")
+    result = find_file_edits(path="README.md", include_input=True)
     assert result["count"] >= 1
     assert result["truncated"] is False
     hit = next(r for r in result["records"] if r["session_uuid"] == "cfe-1")
@@ -2085,7 +2146,7 @@ def test_find_file_edits_codex_exec_command_redirect(
     monkeypatch.setattr(
         "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
-    result = find_file_edits(path="codex-sh", agent="codex")
+    result = find_file_edits(path="codex-sh", agent="codex", include_input=True)
     assert result["count"] == 1
     hit = result["records"][0]
     assert hit["agent"] == "codex"
@@ -2109,7 +2170,7 @@ def test_find_file_edits_codex_exec_command_append(
     monkeypatch.setattr(
         "ai_r.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
     )
-    result = find_file_edits(path="codex-sh2", agent="codex")
+    result = find_file_edits(path="codex-sh2", agent="codex", include_input=True)
     assert result["count"] == 1
     assert result["records"][0]["file"] == "/tmp/codex-sh2/log.txt"
     assert result["records"][0]["input"]["edit"] == "append"
@@ -2429,3 +2490,112 @@ def test_find_file_edits_opencode_per_tool_timestamp(
     # ts must be the second part's tz-aware time.
     assert hit["timestamp"] is not None
     assert hit["timestamp"].endswith("+00:00")
+
+
+# ---------------------------------------------------------------------------
+# query (Phase-1 event verb): registration + facet/relative_to behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_query_tool_registered() -> None:
+    names = _run(_tool_names())
+    assert "query" in names
+    assert "query" in set(mcp._tool_manager._tools.keys())
+
+
+def test_query_type_facet_direct(fake_claude_session_with_tools: Path) -> None:
+    # The fixture: one user_turn, one assistant_turn, one tool_call(bash).
+    res = query(type="tool_call", agent="claude")
+    assert res["count"] == 1
+    assert res["events"][0]["type"] == "tool_call(bash)"
+
+
+def test_query_user_turns_direct(fake_claude_session_with_tools: Path) -> None:
+    res = query(type="user_turn", agent="claude")
+    assert res["count"] == 1
+    assert res["events"][0]["text"] == "Run the tests"
+
+
+def test_query_relative_prev_direct(
+    fake_claude_session_with_tools: Path,
+) -> None:
+    # Anchor on the bash tool_call; prev/1 user turn == "Run the tests".
+    tool_ev = query(type="tool_call", agent="claude")["events"][0]
+    res = query(relative_to=tool_ev["id"], direction="prev", n="1")
+    assert [e["text"] for e in res["events"]] == ["Run the tests"]
+
+
+def test_query_invalid_direction_returns_error_dict() -> None:
+    res = query(relative_to="x:0", direction="sideways")
+    assert res["error"] == "invalid_argument"
+
+
+def test_query_over_mcp_client(fake_claude_session_with_tools: Path) -> None:
+    out = _run(_call("query", {"type": "tool_call", "agent": "claude"}))
+    payload = json.loads(out[0])
+    assert payload["count"] == 1
+    assert payload["events"][0]["type"] == "tool_call(bash)"
+
+
+# ---------------------------------------------------------------------------
+# plan + get_body (Phase-2 verbs): registration + behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_plan_and_get_body_registered() -> None:
+    names = set(_run(_tool_names()))
+    assert {"plan", "get_body"}.issubset(names)
+    assert {"plan", "get_body"}.issubset(set(mcp._tool_manager._tools.keys()))
+
+
+def test_plan_tool_direct(fake_claude_plan_redraft: str) -> None:
+    res = plan(session=fake_claude_plan_redraft, agent="claude")
+    # One slug, drifting titles → 1 final + 3 draft (grouped by slug).
+    assert res["count"] == 4
+    kinds = [p["kind"] for p in res["plans"]]
+    assert kinds.count("final") == 1 and kinds.count("draft") == 3
+    assert kinds.count("completed_major") == 0
+
+
+def test_plan_tool_kind_filter(fake_claude_plan_redraft: str) -> None:
+    res = plan(session=fake_claude_plan_redraft, agent="claude", kind="final")
+    assert res["count"] == 1
+    assert res["plans"][0]["kind"] == "final"
+
+
+def test_plan_tool_invalid_group_returns_error(
+    fake_claude_plan_redraft: str,
+) -> None:
+    res = plan(session=fake_claude_plan_redraft, group="slug")
+    assert res["error"] == "invalid_argument"
+
+
+def test_get_body_tool_direct(fake_claude_plan_redraft: str) -> None:
+    final = plan(session=fake_claude_plan_redraft, kind="final")["plans"][0]
+    body = get_body(final["id"])
+    assert body["type"] == "plan_event"
+    assert "Final plan." in body["body"]
+
+
+def test_get_body_shallow_over_mcp_client(
+    fake_claude_plan_redraft: str,
+) -> None:
+    drafts = plan(session=fake_claude_plan_redraft, kind="draft")["plans"]
+    out = _run(
+        _call("get_body", {"id": drafts[0]["id"], "shallow": True})
+    )
+    payload = json.loads(out[0])
+    # Shallow → returns the final plan, drafts elided.
+    assert "Final plan." in payload["body"]
+    assert payload["dropped_drafts"]
+
+
+def test_get_body_empty_id_returns_error() -> None:
+    assert get_body("")["error"] == "invalid_argument"
+
+
+def test_plan_over_mcp_client(fake_codex_plan_session: str) -> None:
+    out = _run(_call("plan", {"session": fake_codex_plan_session, "agent": "codex"}))
+    payload = json.loads(out[0])
+    assert payload["count"] == 3
+    assert payload["plans"][-1]["kind"] == "final"

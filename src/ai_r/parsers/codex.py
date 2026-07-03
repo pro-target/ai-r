@@ -43,6 +43,7 @@ from ._common import (
     _is_valid_uuid,
     _parse_iso_timestamp,
     _qa_from_codex,
+    iter_jsonl_records,
 )
 from .models import AgentName, Message, Session
 
@@ -127,59 +128,45 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     title: Optional[str] = None
     message_count = 0
 
-    try:
-        with jsonl_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
+    for record in iter_jsonl_records(jsonl_path):
+        line_ts = _parse_iso_timestamp(record.get("timestamp", ""))
+        if line_ts is not None:
+            timestamp = line_ts
 
-                line_ts = _parse_iso_timestamp(record.get("timestamp", ""))
-                if line_ts is not None:
-                    timestamp = line_ts
+        rec_type = record.get("type")
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
 
-                rec_type = record.get("type")
-                payload = record.get("payload") or {}
-                if not isinstance(payload, dict):
-                    continue
+        if rec_type == "session_meta" and uuid is None:
+            uuid = payload.get("id") if isinstance(payload.get("id"), str) else None
+            if not uuid:
+                # session_meta without a usable id is unusable
+                return None
+            cwd_val = payload.get("cwd")
+            if isinstance(cwd_val, str):
+                cwd = cwd_val
+            meta_ts = _parse_iso_timestamp(payload.get("timestamp", ""))
+            if meta_ts is not None:
+                timestamp = meta_ts
+            continue
 
-                if rec_type == "session_meta" and uuid is None:
-                    uuid = payload.get("id") if isinstance(payload.get("id"), str) else None
-                    if not uuid:
-                        # session_meta without a usable id is unusable
-                        return None
-                    cwd_val = payload.get("cwd")
-                    if isinstance(cwd_val, str):
-                        cwd = cwd_val
-                    meta_ts = _parse_iso_timestamp(payload.get("timestamp", ""))
-                    if meta_ts is not None:
-                        timestamp = meta_ts
-                    continue
-
-                if (
-                    rec_type == "response_item"
-                    and payload.get("type") == "message"
-                ):
-                    role = payload.get("role", "")
-                    text = _extract_text_from_parts(payload.get("content", []))
-                    if not text or _is_system_noise(text):
-                        continue
-                    message_count += 1
-                    if title is None and role == "user":
-                        candidate = text.strip()
-                        if candidate and not candidate.startswith("<") \
-                                and not candidate.startswith("#"):
-                            first_line = candidate.splitlines()[0].strip()
-                            if first_line:
-                                title = first_line
-    except OSError:
-        return None
+        if (
+            rec_type == "response_item"
+            and payload.get("type") == "message"
+        ):
+            role = payload.get("role", "")
+            text = _extract_text_from_parts(payload.get("content", []))
+            if not text or _is_system_noise(text):
+                continue
+            message_count += 1
+            if title is None and role == "user":
+                candidate = text.strip()
+                if candidate and not candidate.startswith("<") \
+                        and not candidate.startswith("#"):
+                    first_line = candidate.splitlines()[0].strip()
+                    if first_line:
+                        title = first_line
 
     if uuid is None:
         return None
@@ -254,27 +241,14 @@ def _find_session_file(
         raise ValueError(f"Invalid Codex session uuid: {uuid!r}")
     roots = _resolve_base_dir(base_dir)
     for path in _discover_files(roots):
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    if record.get("type") != "session_meta":
-                        continue
-                    payload = record.get("payload") or {}
-                    if not isinstance(payload, dict):
-                        continue
-                    if payload.get("id") == uuid:
-                        return path, _scan_file(path)  # type: ignore[return-value]
-        except OSError:
-            continue
+        for record in iter_jsonl_records(path):
+            if record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("id") == uuid:
+                return path, _scan_file(path)  # type: ignore[return-value]
     raise FileNotFoundError(f"Codex session {uuid!r} not found under {roots}")
 
 
@@ -312,8 +286,9 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     become user/assistant :class:`Message` objects.  ``function_call``
     payloads (and the ``local_shell_call`` family) become assistant
     ``tool_use`` entries; ``function_call_output`` payloads become
-    ``tool`` messages with a ``tool_result`` entry.  Other record types
-    are skipped.
+    ``tool`` messages with a ``tool_result`` entry.  Codex carries no
+    per-result error flag, so ``tool_result.is_error`` defaults ``False``
+    (best-effort).  Other record types are skipped.
 
     Lines that are not valid JSON are silently skipped; an
     :class:`OSError` returns whatever was collected so far.
@@ -325,106 +300,96 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     # so we buffer the questions and pair them by call_id when the output
     # lands (the answer text is keyed by question id, not positional).
     pending_questions: dict[str, list] = {}
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                rec_type = record.get("type")
-                payload = record.get("payload") or {}
-                if not isinstance(payload, dict):
-                    continue
+    for record in iter_jsonl_records(path):
+        rec_type = record.get("type")
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
 
-                if rec_type == "response_item":
-                    ptype = payload.get("type")
-                    env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
-                    if ptype == "message":
-                        role = payload.get("role")
-                        if role not in ("user", "assistant"):
-                            continue
-                        text = _codex_message_text(payload)
-                        if role == "user" and text:
-                            key = _dedup_key(text)
-                            if key in seen_user_texts:
-                                continue
-                            seen_user_texts.add(key)
-                        messages.append(Message(role=role, text=text, timestamp=env_ts))
-                    elif ptype in ("function_call", "local_shell_call"):
-                        name = payload.get("name") or ptype
-                        arguments = payload.get("arguments", "")
-                        if isinstance(arguments, str):
-                            input_str = arguments
-                        else:
-                            try:
-                                input_str = json.dumps(arguments, ensure_ascii=False)
-                            except (TypeError, ValueError):
-                                input_str = str(arguments)
-                        # request_user_input is Codex's interactive-question
-                        # tool: buffer its questions so the later output can
-                        # be paired into a question->answer ``qa``.
-                        if name == "request_user_input":
-                            call_id = payload.get("call_id")
-                            parsed_args = (
-                                arguments
-                                if isinstance(arguments, dict)
-                                else _safe_json(input_str)
-                            )
-                            if isinstance(call_id, str) and isinstance(parsed_args, dict):
-                                questions = parsed_args.get("questions")
-                                if isinstance(questions, list):
-                                    pending_questions[call_id] = questions
-                        messages.append(
-                            Message(
-                                role="assistant",
-                                text="",
-                                tool_use=({"name": name, "input": input_str},),
-                                timestamp=env_ts,
-                            )
-                        )
-                    elif ptype in ("function_call_output", "local_shell_call_output"):
-                        output = payload.get("output", "")
-                        if not isinstance(output, str):
-                            try:
-                                output = json.dumps(output, ensure_ascii=False)
-                            except (TypeError, ValueError):
-                                output = str(output)
-                        call_id = payload.get("call_id")
-                        qa: tuple = ()
-                        if isinstance(call_id, str) and call_id in pending_questions:
-                            questions = pending_questions.pop(call_id)
-                            answers_obj = _safe_json(output)
-                            qa = tuple(_qa_from_codex(questions, answers_obj))
-                        messages.append(
-                            Message(
-                                role="tool",
-                                text="",
-                                tool_result=({"content": output},),
-                                timestamp=env_ts,
-                                qa=qa,
-                            )
-                        )
-                # verified against Codex CLI 2026-05 snapshot; recheck on schema change
-                elif rec_type == "event_msg" and payload.get("type") == "user_message":
-                    msg = payload.get("message")
-                    if not isinstance(msg, str) or len(msg) <= 10:
-                        continue
-                    if _is_system_noise(msg):
-                        continue
-                    key = _dedup_key(msg)
+        if rec_type == "response_item":
+            ptype = payload.get("type")
+            env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
+            if ptype == "message":
+                role = payload.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                text = _codex_message_text(payload)
+                if role == "user" and text:
+                    key = _dedup_key(text)
                     if key in seen_user_texts:
                         continue
                     seen_user_texts.add(key)
-                    env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
-                    messages.append(Message(role="user", text=msg, timestamp=env_ts))
-    except OSError:
-        return messages
+                messages.append(Message(role=role, text=text, timestamp=env_ts))
+            elif ptype in ("function_call", "local_shell_call"):
+                name = payload.get("name") or ptype
+                arguments = payload.get("arguments", "")
+                if isinstance(arguments, str):
+                    input_str = arguments
+                else:
+                    try:
+                        input_str = json.dumps(arguments, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        input_str = str(arguments)
+                # request_user_input is Codex's interactive-question
+                # tool: buffer its questions so the later output can
+                # be paired into a question->answer ``qa``.
+                if name == "request_user_input":
+                    call_id = payload.get("call_id")
+                    parsed_args = (
+                        arguments
+                        if isinstance(arguments, dict)
+                        else _safe_json(input_str)
+                    )
+                    if isinstance(call_id, str) and isinstance(parsed_args, dict):
+                        questions = parsed_args.get("questions")
+                        if isinstance(questions, list):
+                            pending_questions[call_id] = questions
+                messages.append(
+                    Message(
+                        role="assistant",
+                        text="",
+                        tool_use=({"name": name, "input": input_str},),
+                        timestamp=env_ts,
+                    )
+                )
+            elif ptype in ("function_call_output", "local_shell_call_output"):
+                output = payload.get("output", "")
+                if not isinstance(output, str):
+                    try:
+                        output = json.dumps(output, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        output = str(output)
+                call_id = payload.get("call_id")
+                qa: tuple = ()
+                if isinstance(call_id, str) and call_id in pending_questions:
+                    questions = pending_questions.pop(call_id)
+                    answers_obj = _safe_json(output)
+                    qa = tuple(_qa_from_codex(questions, answers_obj))
+                messages.append(
+                    Message(
+                        role="tool",
+                        text="",
+                        # Codex ``function_call_output`` records carry no
+                        # explicit error flag (the output is a plain string),
+                        # so ``is_error`` is best-effort and defaults False.
+                        tool_result=({"content": output, "is_error": False},),
+                        timestamp=env_ts,
+                        qa=qa,
+                    )
+                )
+        # verified against Codex CLI 2026-05 snapshot; recheck on schema change
+        elif rec_type == "event_msg" and payload.get("type") == "user_message":
+            msg = payload.get("message")
+            if not isinstance(msg, str) or len(msg) <= 10:
+                continue
+            if _is_system_noise(msg):
+                continue
+            key = _dedup_key(msg)
+            if key in seen_user_texts:
+                continue
+            seen_user_texts.add(key)
+            env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
+            messages.append(Message(role="user", text=msg, timestamp=env_ts))
     return messages
 
 

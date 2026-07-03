@@ -16,6 +16,7 @@ tests keep working.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence
@@ -167,8 +168,9 @@ def _shell_redirect_targets(cmd: str) -> list[tuple[str, bool]]:
 
     Conservative by design: ``find_file_edits`` is an audit tool, so false
     negatives are preferred over false positives. Writes via ``tee`` /
-    ``sed -i`` / ``cp`` / ``mv`` / heredoc-only are NOT detected (documented
-    limitation) — the common codex pattern ``printf '...' > path`` is.
+    ``sed -i`` / ``cp`` / ``mv`` are NOT detected (documented limitation) —
+    redirect-head writes like ``printf '...' > path`` and ``cat > path
+    <<EOF`` are.
     """
     targets: list[tuple[str, bool]] = []
     i, n = 0, len(cmd)
@@ -216,6 +218,24 @@ def _shell_redirect_targets(cmd: str) -> list[tuple[str, bool]]:
     return targets
 
 
+def _input_reference(input_obj: Any) -> tuple[str, int]:
+    """Return ``(sha256, chars)`` for an edit's ``input`` payload.
+
+    Used by :func:`find_file_edits` when ``include_input=False`` to emit a
+    light-weight *reference* to the body instead of inlining it: the auditor
+    sees a body exists (``input_chars > 0``) and can fetch it on demand via
+    ``get_body`` / ``read_session`` keyed by ``session_uuid`` +
+    ``message_index``.  The hash is over the JSON-canonical form (sorted keys,
+    non-ASCII preserved) so it is deterministic across runs; ``chars`` is the
+    length of that same canonical form.
+    """
+    canonical = json.dumps(
+        input_obj, sort_keys=True, ensure_ascii=False, default=str
+    )
+    sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return sha, len(canonical)
+
+
 def previous_user_intent(
     messages: Sequence[Any], index: int
 ) -> Optional[str]:
@@ -238,6 +258,7 @@ def find_file_edits(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
+    include_input: bool = True,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
 
@@ -252,9 +273,20 @@ def find_file_edits(
         until: Optional ISO 8601 upper bound (inclusive) on edit
             timestamp. Pass ``""`` or ``None`` to leave open.
         limit: Maximum records to return. ``0`` = no cap. Default ``100``.
+        include_input: When ``True`` (the default — kept for backward
+            compatibility with in-repo consumers), each record inlines the
+            full edit body under ``"input"``.  When ``False``
+            (*reference-by-default*), the body is **not** inlined; instead the
+            record carries a light-weight reference — ``"input_sha256"``
+            (hash of the JSON-canonical body) and ``"input_chars"`` (its
+            length) — so an audit listing stays small while still signalling
+            a body exists.  Fetch the body on demand via ``get_body`` /
+            ``read_session`` keyed by ``session_uuid`` + ``message_index``.
 
     Returns:
-        A dict ``{"records": [...], "count": N, "truncated": bool}``.
+        A dict ``{"records": [...], "count": N, "truncated": bool}``.  Each
+        record carries ``"input"`` when ``include_input=True``, else
+        ``"input_sha256"`` + ``"input_chars"``.
 
     Raises:
         ValueError: on invalid arguments (``path`` empty, ``limit`` negative,
@@ -347,7 +379,7 @@ def find_file_edits(
                                 name,
                             )]
                     for file_path, input_obj, tool_label in candidates:
-                        records.append({
+                        record: dict[str, Any] = {
                             "agent": agent_name.value.lower(),
                             "session_uuid": session.uuid,
                             "session_title": session_title,
@@ -358,8 +390,16 @@ def find_file_edits(
                             "file": file_path,
                             "intent": intent,
                             "assistant": msg.text or "",
-                            "input": input_obj,
-                        })
+                        }
+                        if include_input:
+                            record["input"] = input_obj
+                        else:
+                            # Reference-by-default: signal the body exists
+                            # without inlining it (see ``include_input`` doc).
+                            sha, chars = _input_reference(input_obj)
+                            record["input_sha256"] = sha
+                            record["input_chars"] = chars
+                        records.append(record)
 
     records.sort(key=lambda r: (r["timestamp"] is None, r["timestamp"] or ""))
     total = len(records)

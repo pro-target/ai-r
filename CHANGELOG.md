@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Event-core layer**: a unified event stream over every parser, exposing
+  five verbs — `query`, `get_body`, `aggregate`, `diff`, `detect_current` —
+  plus the `plan` preset. Reference-by-default: `query` returns lightweight
+  event references and message bodies are pulled on demand via `get_body`.
+- **MCP surface**: the event-core verbs and the `plan` preset are exposed as
+  MCP tools, raising the MCP tool count from 7 to 13 (`list_sessions`,
+  `read_session`, `search_sessions`, `find_file_edits`, `find_tool_calls`,
+  `session_stats`, `session_diff`, `query`, `plan`, `get_body`, `aggregate`,
+  `diff`, `detect_current`). See
+  [docs/architecture.md](./docs/architecture.md).
+
+### Changed
+
+- **`session_stats` / `session_diff`**: reduced to thin presets over the
+  event-core verbs — `session_stats` maps to `aggregate(rank_by="stats",
+  kind_split=True)`, `session_diff` to `diff` over an intent-carrying
+  `query`. Output stays byte-identical on real data, so the MCP surface is
+  backward compatible.
+- **`find_file_edits`**: reference-by-default — the MCP tool now returns
+  lightweight references (`input_sha256` + `input_chars`) instead of inlining
+  full edit bodies; pass `include_input=true` for the full body. The core
+  default is unchanged, so internal callers are unaffected.
+- **`query` facets `kind`/`parent`/`group`**: now fail loud with a clear
+  error instead of being silently ignored — an unimplemented filter can no
+  longer mislead a caller into trusting an unfiltered result.
+- **CI**: `ruff` and `mypy` are now enforced gates.
+
+### Fixed
+
+- **Codex plan steps/status**: `update_plan` carries its step array under the
+  `plan` key; the parser read a non-existent `steps` key, so every Codex plan
+  surfaced `steps=null`/`status=null`. Now read from the correct key.
+
+### Docs
+
+- **LLM e2e acceptance scenarios**: `docs/scenarios.md` — 30 scenarios across
+  the public surface, framed into the READMEs via `<!-- scenarios:start/end -->`.
+
+### Scope / known limitations
+
+- **Single-plan, no subagent tree**: this release does NOT implement
+  subagent-tree filtering. The `query` facets `kind`/`parent`/`group` are
+  reserved and rejected (fail-loud) rather than silently ignored. Their
+  absence is a deliberate scope boundary, not a gap.
+- **Confidence tags dropped**: the earlier `EXTRACTED`/`INFERRED`/`AMBIGUOUS`
+  confidence-tag idea was replaced by reference-by-default (references are
+  exact; bodies are pulled on demand), and is not planned.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added

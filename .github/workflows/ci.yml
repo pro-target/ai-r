@@ -56,6 +56,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
       - name: Smoke-import every public module
         run: |
           python -c "import ai_r, ai_r.cli, ai_r.mcp_server"
@@ -63,3 +68,9 @@ jobs:
           python -c "import ai_r.parsers.claude, ai_r.parsers.codex"
           python -c "import ai_r.parsers.opencode, ai_r.parsers.antigravity"
           python -c "import ai_r.legacy_compat"
+      - name: Ruff lint
+        run: |
+          ruff check src/
+      - name: Mypy type-check
+        run: |
+          mypy src/

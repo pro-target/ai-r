@@ -276,6 +276,8 @@ def test_read_messages_preserves_tool_use_and_result(
     assert user_result.role == "user"
     assert len(user_result.tool_result) == 1
     assert user_result.tool_result[0]["content"] == "5 passed"
+    # No ``is_error`` in the source block → defaults to False.
+    assert user_result.tool_result[0]["is_error"] is False
 
 
 def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:

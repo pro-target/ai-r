@@ -959,7 +959,7 @@ def test_cli_search_json_order_matches_mcp(
     mcp_result = _mcp.search_sessions(
         query="kafka", agent="claude", scope="body"
     )
-    mcp_uuids = [item["uuid"] for item in mcp_result]
+    mcp_uuids = [item["uuid"] for item in mcp_result["results"]]
 
     assert cli_uuids == mcp_uuids
     # Sanity: the denser match leads under relevance default.

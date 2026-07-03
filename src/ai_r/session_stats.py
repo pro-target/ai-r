@@ -40,6 +40,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, Optional
 
+from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
 from ai_r.parsers import PARSERS, iso, target_agents
 
@@ -212,20 +213,13 @@ def session_stats(
     since_s = (since or "").strip() or None
     until_s = (until or "").strip() or None
 
-    groups: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {
-            "sessions": 0,
-            "edits": 0,
-            "intents": set(),
-            "agents": set(),
-            "messages": 0,
-        }
-    )
-    all_sessions = 0
-    all_edits = 0
-    all_agents: set[str] = set()
-    subagent_seen = False
-
+    # Build one row per inventoried session (after the since/until filter),
+    # carrying the exact fields the rollup folds: group label under EVERY
+    # dimension, plus the enrichment (edits / intents / agents / messages).
+    # ``aggregate`` then does the grouping, ranking and totals — this tool is
+    # a thin preset over it (``rank_by="stats"`` reproduces the historical
+    # sessions-first rank; ``kind_split=True`` adds the RISK-4 fields).
+    session_rows: list[dict[str, Any]] = []
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         for session in parser.list_sessions():
@@ -238,61 +232,42 @@ def session_stats(
             if until_s is not None and (stamp is None or stamp[: len(until_s)] > until_s):
                 continue
 
-            key = group_key(session, group_by)
-            bucket = groups[key]
-            bucket["sessions"] += 1
-            bucket["agents"].add(session.agent.value.lower())
-            bucket["messages"] += int(getattr(session, "message_count", 0) or 0)
             enrich = edits_by_session.get(session.uuid)
-            if enrich is not None:
-                bucket["edits"] += enrich["edits"]
-                bucket["intents"] |= enrich["intents"]
+            session_rows.append({
+                "session_uuid": session.uuid,
+                "agent": group_key(session, "agent"),
+                "dir": group_key(session, "dir"),
+                "date": group_key(session, "date"),
+                "kind": group_key(session, "kind"),
+                "edits": enrich["edits"] if enrich is not None else 0,
+                "intents": sorted(enrich["intents"]) if enrich is not None else [],
+                "messages": int(getattr(session, "message_count", 0) or 0),
+            })
 
-            all_sessions += 1
-            all_agents.add(session.agent.value.lower())
-            if session.kind == "subagent":
-                subagent_seen = True
-
-    for stats in groups.values():
-        all_edits += stats["edits"]
-
-    ranked = sorted(
-        groups.items(),
-        # sessions desc, then edits desc, then label asc (stable tie-break).
-        key=lambda kv: (-kv[1]["sessions"], -kv[1]["edits"], kv[0]),
+    rolled = _aggregate(
+        session_rows,
+        group_by=group_by,
+        metrics=["sessions", "edits", "intents", "agents", "messages"],
+        rank_by="stats",
+        kind_split=True,
     )
     if top:
-        ranked = ranked[:top]
+        rolled = {**rolled, "groups": rolled["groups"][:top]}
 
-    group_rows = [
-        {
-            "group": label,
-            "sessions": stats["sessions"],
-            "edits": stats["edits"],
-            "intents": len(stats["intents"]),
-            "agents": sorted(stats["agents"]),
-            "messages": stats["messages"],
-        }
-        for label, stats in ranked
-    ]
-
+    # Project the aggregate result onto the historical session_stats shape:
+    # totals carry only the four legacy keys (sessions/edits/agents/
+    # agents_list), and the RISK-4 flag/note ride along from ``kind_split``.
     result: dict[str, Any] = {
-        "group_by": group_by,
-        "groups": group_rows,
+        "group_by": rolled["group_by"],
+        "groups": rolled["groups"],
         "totals": {
-            "sessions": all_sessions,
-            "edits": all_edits,
-            "agents": len(all_agents),
-            "agents_list": sorted(all_agents),
+            "sessions": rolled["totals"]["sessions"],
+            "edits": rolled["totals"]["edits"],
+            "agents": rolled["totals"]["agents"],
+            "agents_list": rolled["totals"]["agents_list"],
         },
-        "kind_split_available": subagent_seen,
+        "kind_split_available": rolled["kind_split_available"],
     }
-    # RISK-4: never let an empty subagent split read as a verified "none".
-    if not subagent_seen:
-        result["note"] = (
-            "kind split is degenerate: no subagent sessions were in scope, so a "
-            "group_by='kind' result shows only an 'agent' bucket. This is NOT a "
-            "verified 'no subagents' — subagent detection is currently "
-            "Claude-only; other agents always report kind='agent'."
-        )
+    if "note" in rolled:
+        result["note"] = rolled["note"]
     return result

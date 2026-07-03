@@ -44,8 +44,14 @@ Thin wrapper over the parsers. Exits with distinct codes:
 - `3` — `FileNotFoundError` (session missing)
 
 ### `ai-r-mcp` (MCP server)
-Stdio JSON-RPC. Four tools: `list_sessions`, `read_session`,
-`search_sessions`, and `find_file_edits`. `list_sessions` and
+Stdio JSON-RPC. Thirteen tools in three groups:
+- 7 classic tools: `list_sessions`, `read_session`, `search_sessions`,
+  `find_file_edits`, `find_tool_calls`, `session_stats`, `session_diff`.
+- 5 event-core verbs: `query`, `get_body`, `aggregate`, `diff`,
+  `detect_current`.
+- 1 preset: `plan`.
+
+`list_sessions` and
 `read_session` are paginated (`limit`/`offset`, `limit=0` = uncapped)
 and report a `truncated` flag when more pages remain. Errors are
 returned as dicts (MCP prefers

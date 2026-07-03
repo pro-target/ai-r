@@ -46,6 +46,7 @@ from ._common import (
     _qa_entry,
     _qa_options_from_question,
     _qa_pairs_from_result_text,
+    iter_jsonl_records,
 )
 from .models import AgentName, Message, Session
 
@@ -102,29 +103,16 @@ def _scan_titles_from_jsonl(
     """Return ``(custom_title, ai_title)`` from a Claude JSONL file."""
     custom_title: Optional[str] = None
     ai_title: Optional[str] = None
-    try:
-        with jsonl_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                rec_type = record.get("type")
-                if rec_type == "custom-title" and custom_title is None:
-                    raw = record.get("customTitle", "")
-                    if isinstance(raw, str) and raw.strip():
-                        custom_title = raw.strip()
-                elif rec_type == "ai-title" and ai_title is None:
-                    raw = record.get("aiTitle", "")
-                    if isinstance(raw, str) and raw.strip():
-                        ai_title = raw.strip()
-    except OSError:
-        pass
+    for record in iter_jsonl_records(jsonl_path):
+        rec_type = record.get("type")
+        if rec_type == "custom-title" and custom_title is None:
+            raw = record.get("customTitle", "")
+            if isinstance(raw, str) and raw.strip():
+                custom_title = raw.strip()
+        elif rec_type == "ai-title" and ai_title is None:
+            raw = record.get("aiTitle", "")
+            if isinstance(raw, str) and raw.strip():
+                ai_title = raw.strip()
     return custom_title, ai_title
 
 
@@ -235,57 +223,43 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     is_sidechain = False
     inline_parent_uuid: Optional[str] = None
 
-    try:
-        with jsonl_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
+    for record in iter_jsonl_records(jsonl_path):
+        ts = _parse_iso_timestamp(record.get("timestamp", ""))
+        if ts is not None:
+            last_timestamp = ts
 
-                ts = _parse_iso_timestamp(record.get("timestamp", ""))
-                if ts is not None:
-                    last_timestamp = ts
+        # Inline sidechain detection: value must be True, the mere
+        # presence of the key is not enough (it is False everywhere
+        # on normal records).
+        if record.get("isSidechain") is True:
+            is_sidechain = True
+            if inline_parent_uuid is None:
+                raw_parent = record.get("parentUuid")
+                if isinstance(raw_parent, str) and raw_parent.strip():
+                    inline_parent_uuid = raw_parent.strip()
 
-                # Inline sidechain detection: value must be True, the mere
-                # presence of the key is not enough (it is False everywhere
-                # on normal records).
-                if record.get("isSidechain") is True:
-                    is_sidechain = True
-                    if inline_parent_uuid is None:
-                        raw_parent = record.get("parentUuid")
-                        if isinstance(raw_parent, str) and raw_parent.strip():
-                            inline_parent_uuid = raw_parent.strip()
-
-                rec_type = record.get("type")
-                if rec_type == "custom-title" and custom_title is None:
-                    raw = record.get("customTitle", "")
-                    if isinstance(raw, str) and raw.strip():
-                        custom_title = raw.strip()
-                elif rec_type == "ai-title" and ai_title is None:
-                    raw = record.get("aiTitle", "")
-                    if isinstance(raw, str) and raw.strip():
-                        ai_title = raw.strip()
-                elif rec_type == "user":
-                    message_count += 1
-                    text = _extract_text_from_user_message(
-                        record.get("message", {}) or {}
-                    )
-                    if (
-                        text
-                        and not text.startswith("<")
-                        and first_user_text is None
-                    ):
-                        first_user_text = text
-                elif rec_type == "assistant":
-                    message_count += 1
-    except OSError:
-        return None
+        rec_type = record.get("type")
+        if rec_type == "custom-title" and custom_title is None:
+            raw = record.get("customTitle", "")
+            if isinstance(raw, str) and raw.strip():
+                custom_title = raw.strip()
+        elif rec_type == "ai-title" and ai_title is None:
+            raw = record.get("aiTitle", "")
+            if isinstance(raw, str) and raw.strip():
+                ai_title = raw.strip()
+        elif rec_type == "user":
+            message_count += 1
+            text = _extract_text_from_user_message(
+                record.get("message", {}) or {}
+            )
+            if (
+                text
+                and not text.startswith("<")
+                and first_user_text is None
+            ):
+                first_user_text = text
+        elif rec_type == "assistant":
+            message_count += 1
 
     title = _resolve_title(custom_title, ai_title, first_user_text, jsonl_path)
     if title is None:
@@ -410,7 +384,8 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
     Assistant records yield ``text`` (from ``text`` blocks) and
     ``tool_use`` entries (from ``tool_use`` blocks).  User records yield
     ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
-    they carry (Claude embeds tool results in user-role records).
+    they carry (Claude embeds tool results in user-role records); each
+    result carries ``is_error`` from the block's ``is_error`` flag.
     """
     line = line.strip()
     if not line:
@@ -421,6 +396,17 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
         return None
     if not isinstance(record, dict):
         return None
+    return _message_from_record(record)
+
+
+def _message_from_record(record: dict) -> Optional[Message]:
+    """Build a :class:`Message` from a parsed Claude record, or skip it.
+
+    The record→Message half of :func:`_parse_jsonl_line`, factored out so
+    the generator-driven extraction loop can reuse it without a redundant
+    ``json.loads``.  Returns ``None`` for records whose ``type`` is not
+    ``"user"``/``"assistant"``.
+    """
     rec_type = record.get("type")
     if rec_type not in ("user", "assistant"):
         return None
@@ -454,6 +440,12 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
                     except (TypeError, ValueError):
                         input_str = str(raw_input)
                 entry = {"name": name, "input": input_str}
+                # Carry the call id (public, survives scrubbing) so the event
+                # layer can correlate this call with its tool_result and
+                # surface success/error on the tool_call event.
+                tu_id = part.get("id")
+                if isinstance(tu_id, str) and tu_id:
+                    entry["tool_use_id"] = tu_id
                 # Carry the AskUserQuestion id + structured questions so a
                 # later pass can pair them with the user's chosen answer
                 # (the answer text lives only in the matching tool_result).
@@ -477,10 +469,17 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
                     result_str = result_content
                 else:
                     result_str = ""
-                result_entry = {"content": result_str}
+                is_error = part.get("is_error")
+                result_entry = {
+                    "content": result_str,
+                    "is_error": bool(is_error),
+                }
                 tuid = part.get("tool_use_id")
                 if isinstance(tuid, str) and tuid:
-                    result_entry["_tool_use_id"] = tuid
+                    # Public id (no leading underscore): survives scrubbing so
+                    # the event layer can correlate result↔call.  The qa-pair
+                    # linker keys off this same field.
+                    result_entry["tool_use_id"] = tuid
                 tool_result.append(result_entry)
     elif isinstance(content, str):
         text_chunks.append(content)
@@ -501,14 +500,10 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
     whatever was collected so far.
     """
     messages: List[Message] = []
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                msg = _parse_jsonl_line(line)
-                if msg is not None:
-                    messages.append(msg)
-    except OSError:
-        return _link_ask_user_questions(messages)
+    for record in iter_jsonl_records(path):
+        msg = _message_from_record(record)
+        if msg is not None:
+            messages.append(msg)
     return _link_ask_user_questions(messages)
 
 
@@ -520,14 +515,15 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
     the user's reply as a ``tool_result`` in a following user-role
     record.  The chosen-answer text lives ONLY in that result string
     (``"question"="answer", ...``), so the pairing must join the two by
-    ``tool_use_id``.
+    ``tool_use_id`` (a public field kept on both the ``tool_use`` call and
+    the ``tool_result``).
 
     Returns a new list where every answer-bearing message gains a
     populated :attr:`~ai_r.parsers.models.Message.qa` tuple; internal
-    linkage keys (``_ask_id`` / ``_ask_questions`` / ``_tool_use_id``)
-    are stripped from the surfaced ``tool_use`` / ``tool_result`` entries
-    so they never leak downstream.  Messages without an answered question
-    are returned unchanged.
+    linkage keys (``_ask_id`` / ``_ask_questions``) are stripped from the
+    surfaced ``tool_use`` entries so they never leak downstream.  The
+    public ``tool_use_id`` is retained (the event layer correlates on it).
+    Messages without an answered question are returned unchanged.
     """
     # Map AskUserQuestion tool_use_id -> its structured questions list.
     ask_by_id: dict[str, list] = {}
@@ -560,7 +556,7 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
         for tr in msg.tool_result:
             if not isinstance(tr, dict):
                 continue
-            tuid = tr.get("_tool_use_id")
+            tuid = tr.get("tool_use_id")
             if not (isinstance(tuid, str) and tuid in ask_by_id):
                 continue
             questions = ask_by_id[tuid]

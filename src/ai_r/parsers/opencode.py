@@ -602,9 +602,12 @@ def _build_message(
                       part's ``time_created`` (UTC-aware); ``None`` when
                       the row lacked a part-time column.
     * ``tool_result`` = one entry per ``tool`` part that has a
-                      ``state.output`` (``{content: state.output}``).
-                      Error/running tools without output are omitted
-                      from results.
+                      ``state.output`` OR that errored
+                      (``{content, is_error, tool_use_id}``).  ``is_error``
+                      is ``True`` when ``state.status == "error"``.  An
+                      errored tool with no ``output`` still yields a result
+                      (empty content, ``is_error=True``) so the failure is
+                      visible; only ``running`` tools remain omitted.
     * ``file``/``patch`` = metadata-only ``tool_use`` entries. Inline
                       data URLs / binary-looking payload fields are
                       redacted, so manifests and patch summaries remain
@@ -649,12 +652,28 @@ def _build_message(
             state_raw = part.get("state")
             state: dict = state_raw if isinstance(state_raw, dict) else {}
             inp = state.get("input")
-            tool_use.append(
-                {"name": name, "input": _stringify(inp), "timestamp": ts_for_entry}
-            )
+            call_id = part.get("callID") or part.get("callId")
+            tu_entry: dict = {
+                "name": name,
+                "input": _stringify(inp),
+                "timestamp": ts_for_entry,
+            }
+            if isinstance(call_id, str) and call_id:
+                tu_entry["tool_use_id"] = call_id
+            tool_use.append(tu_entry)
             output = state.get("output")
-            if output is not None:
-                tool_result.append({"content": _stringify(output)})
+            is_error = state.get("status") == "error"
+            # Emit a result whenever there is output OR the call errored
+            # (errored calls frequently carry no ``output`` but the error
+            # itself is the load-bearing signal — surface it).
+            if output is not None or is_error:
+                tr_entry: dict = {
+                    "content": _stringify(output) if output is not None else "",
+                    "is_error": is_error,
+                }
+                if isinstance(call_id, str) and call_id:
+                    tr_entry["tool_use_id"] = call_id
+                tool_result.append(tr_entry)
             # OpenCode's ``question`` tool is its interactive-question
             # surface: the offered questions live in ``state.input`` and
             # the chosen answers in ``state.metadata.answers`` (a list

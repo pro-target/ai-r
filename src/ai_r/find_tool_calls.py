@@ -16,6 +16,7 @@ pattern, with the previous user message recorded as ``intent``.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, List, Optional
 
 from ai_r.find_file_edits import (
@@ -28,39 +29,121 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.security import coerce_tool_input as _coerce_input
 
 __all__ = [
     "find_tool_calls",
 ]
 
-# Refuse to JSON-decode tool inputs above this size.  Codex sessions
-# can carry ``function_call.arguments`` payloads in the tens of MB
-# (base64 blobs, etc.); decoding those is a memory-exhaustion vector.
-_MAX_INPUT_BYTES = 1_000_000  # 1 MB
+# --- Per-record field caps (chars) ----------------------------------------
+# ``limit`` bounds the record COUNT only, never bytes.  Without these caps a
+# single record can inline a multi-hundred-KB ``input`` / uncapped user
+# ``intent`` / uncapped ``assistant`` text, so a handful of records blow the
+# MCP response past any sane size.  Each field is truncated to its cap and
+# marked in the per-record ``truncated_fields`` list when it trips.
+_INPUT_CHARS_CAP = 4_000      # parsed/raw tool input, serialized
+_ASSISTANT_CHARS_CAP = 4_000  # assistant message text hosting the call
+_INTENT_CHARS_CAP = 1_000     # preceding user message text
+_OUTPUT_CHARS_CAP = 2_000     # correlated tool_result content
+
+# --- Total-response byte budget -------------------------------------------
+# Cumulative serialized size after which we stop appending records and set the
+# top-level ``output_truncated`` flag (DISTINCT from the count-based
+# ``truncated``: the former means "output capped by size", the latter "more
+# records matched than ``limit``").  Generous — only bites pathological output.
+_OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
 
 
-def _coerce_input(raw: Any) -> Any:
-    """Best-effort JSON decode of a tool input payload.
+def _cap_field(value: Any, cap: int) -> tuple[Any, bool]:
+    """Return ``(value, truncated)`` bounding a field to ``cap`` chars.
 
-    Some agents (codex ``function_call``) carry the input as a JSON
-    string; others (claude ``tool_use``) carry a dict directly.  When
-    ``raw`` is a non-empty string we try ``json.loads``; on success the
-    decoded value is returned, otherwise the original string is kept
-    (so non-JSON payloads still surface to the caller).  Non-string
-    inputs are returned unchanged.
-
-    Strings larger than :data:`_MAX_INPUT_BYTES` are returned as-is
-    without attempting ``json.loads`` to avoid unbounded memory use.
+    A ``str`` longer than ``cap`` is sliced with a trailing marker.  A
+    non-string value (parsed dict/list) is serialized to measure size; only
+    when its JSON form exceeds ``cap`` do we replace it with the truncated
+    string form (small structured inputs pass through unchanged as the parsed
+    object).  ``None`` and short values are returned untouched.
     """
-    if isinstance(raw, str):
-        if len(raw) > _MAX_INPUT_BYTES:
-            return raw
-        if raw.strip():
-            try:
-                return json.loads(raw)
-            except (ValueError, TypeError):
-                return raw
-    return raw
+    if value is None:
+        return value, False
+    if isinstance(value, str):
+        if len(value) > cap:
+            return value[:cap] + "…[truncated]", True
+        return value, False
+    try:
+        serialized = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    if len(serialized) > cap:
+        return serialized[:cap] + "…[truncated]", True
+    return value, False
+
+
+# --- Smart output truncation ----------------------------------------------
+# Lines matching this pattern are treated as "interesting" for the ``smart``
+# output-cap mode: on a failing call the useful signal is usually the
+# error/exception/traceback line, which a naive head-slice can drop when the
+# error sits at the tail of a long log.  ``smart`` mode surfaces those lines
+# up front (deduped) AND keeps the tail so the terminal error is never lost.
+_ERROR_LINE_RE = re.compile(
+    r"error|fatal|exception|traceback|failed|panic|exit code|denied|not found",
+    re.IGNORECASE,
+)
+_SMART_MAX_ERROR_LINES = 20
+
+
+def _cap_output(text: str, cap: int, mode: str) -> tuple[str, bool]:
+    """Bound ``text`` to ``cap`` chars, returning ``(capped, truncated)``.
+
+    ``mode`` selects the strategy when ``text`` exceeds ``cap``:
+
+    * ``"head"`` — keep the first ``cap`` chars (legacy behaviour).
+    * ``"tail"`` — keep the last ``cap`` chars (the terminal output, e.g.
+      the final error).
+    * ``"smart"`` — surface deduped error-ish lines (see ``_ERROR_LINE_RE``)
+      up front, then a ``…[truncated]…`` marker, then the tail of the text.
+      Guarantees an error line at the very end of ``text`` is preserved (it
+      appears both in the error-line block and the tail).
+
+    ``text`` at or under ``cap`` is returned unchanged with ``truncated``
+    ``False`` for every mode.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= cap:
+        return text, False
+    if mode == "tail":
+        return "…[truncated]" + text[-cap:], True
+    if mode == "smart":
+        seen: set[str] = set()
+        error_lines: List[str] = []
+        for line in text.split("\n"):
+            if not _ERROR_LINE_RE.search(line):
+                continue
+            stripped = line.strip()
+            if not stripped or stripped in seen:
+                continue
+            seen.add(stripped)
+            error_lines.append(line)
+            if len(error_lines) >= _SMART_MAX_ERROR_LINES:
+                break
+        tail = text[-(cap // 2):] if cap > 1 else text[-1:]
+        parts = []
+        if error_lines:
+            parts.append("\n".join(error_lines))
+        parts.append("…[truncated]…")
+        parts.append(tail)
+        result = "\n".join(parts)
+        safe_limit = 2 * cap
+        if len(result) > safe_limit:
+            result = result[:safe_limit] + "…[truncated]"
+        return result, True
+    # default / "head"
+    return text[:cap] + "…[truncated]", True
+
+
+def _match_ci(haystack: str, needle: str) -> bool:
+    """Case-insensitive substring test."""
+    return needle.lower() in haystack.lower()
 
 
 def find_tool_calls(
@@ -71,6 +154,11 @@ def find_tool_calls(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    output_excludes: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    output_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
 
@@ -89,21 +177,59 @@ def find_tool_calls(
             timestamp.  Pass ``""`` or ``None`` to leave open.
         limit: Maximum records to return.  ``0`` = no cap.  Default
             ``100``.
+        input_contains: Optional case-insensitive substring the
+            serialized tool ``input`` must contain.  Matched against the
+            FULL (pre-cap) serialized input.  ``None`` = no filter.
+        output_contains: Optional case-insensitive substring the
+            correlated ``output`` must contain.  Matched against the FULL
+            (pre-cap) output text.  ``None`` = no filter.
+        output_excludes: Optional case-insensitive substring; a record
+            whose FULL output contains it is DROPPED (e.g. harness noise
+            markers).  ``None`` = no filter.
+        is_error: Tri-state outcome filter.  ``None`` = all; ``True`` =
+            only failed calls; ``False`` = only succeeding calls.
+        output_mode: How to truncate an over-cap ``output``: ``"head"``
+            (first chars), ``"tail"`` (last chars), or ``"smart"``
+            (error lines + tail).  ``None`` = adaptive — ``"smart"`` for
+            error records, ``"head"`` otherwise.
 
     Returns:
-        A dict ``{"records": [...], "count": N, "truncated": bool}``.
+        A dict ``{"records": [...], "count": N, "truncated": bool,
+        "output_truncated": bool}``.  ``count`` is the total number of
+        matches; ``truncated`` is ``True`` when more records matched than
+        ``limit`` (count-based); ``output_truncated`` is ``True`` when the
+        cumulative serialized size hit the response byte budget and record
+        appending stopped early (size-based) — the two are independent.
         Each record carries ``agent``, ``session_uuid``,
         ``session_title``, ``session_date``, ``message_index``,
         ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
         input was a JSON string), ``intent`` (the immediately
-        preceding user message text or ``None``) and ``assistant``
-        (the assistant text of the message hosting the call).
+        preceding user message text or ``None``), ``assistant``
+        (the assistant text of the message hosting the call),
+        ``is_error`` (bool: the correlated call outcome — ``True`` when
+        the agent flagged the call as failed; authoritative for Claude
+        and OpenCode, best-effort ``False`` for Codex/Antigravity/Pi and
+        whenever no result correlates to the call) and ``output`` (the
+        correlated ``tool_result`` content, ``""`` when none) plus
+        ``is_error_reliable`` (bool: ``True`` only for Claude/OpenCode,
+        whose outcome flag is authoritative; ``False`` for the other
+        agents where ``is_error`` is best-effort) and
+        ``truncated_fields`` (list naming any of ``input``/``intent``/
+        ``assistant``/``output`` that were char-capped for this record;
+        empty when none tripped).  The
+        ``input``/``intent``/``assistant``/``output`` fields are each
+        bounded to a per-field char cap; an over-cap value is sliced with
+        a ``…[truncated]`` marker.  Call↔result correlation is by
+        ``tool_use_id`` (Claude ``tool_use.id`` / OpenCode ``callID``);
+        agents whose calls carry no id never correlate and keep
+        ``is_error=False`` with an empty ``output``.
 
     Raises:
         ValueError: on invalid arguments (neither or both of
             ``tool_name``/``tool_name_pattern`` set, ``limit``
             negative, unparseable ``since``/``until``, unknown
-            ``agent``).
+            ``agent``, empty ``*_contains``/``output_excludes``,
+            non-bool ``is_error``, unknown ``output_mode``).
     """
     name_exact = tool_name
     name_substr = tool_name_pattern
@@ -122,6 +248,22 @@ def find_tool_calls(
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         raise ValueError(
             f"limit must be a non-negative integer, got {limit!r}"
+        )
+    for fname, fval in (
+        ("input_contains", input_contains),
+        ("output_contains", output_contains),
+        ("output_excludes", output_excludes),
+    ):
+        if fval is not None and (not isinstance(fval, str) or not fval.strip()):
+            raise ValueError(f"{fname} must be a non-empty string")
+    if is_error is not None and not isinstance(is_error, bool):
+        raise ValueError(
+            f"is_error must be None or a bool, got {is_error!r}"
+        )
+    if output_mode is not None and output_mode not in {"head", "tail", "smart"}:
+        raise ValueError(
+            "output_mode must be one of 'head', 'tail', 'smart', "
+            f"got {output_mode!r}"
         )
 
     since_dt = parse_iso_bound(since, "since")
@@ -143,6 +285,21 @@ def find_tool_calls(
             session_iso = iso(session.date)
             session_title = session.title
             session_ts: Optional[Any] = to_utc_aware(session.date)
+            # Correlate each tool call with its result (which lives on a
+            # DIFFERENT, following message) by ``tool_use_id``.  Both the
+            # ``tool_use`` call and its ``tool_result`` carry the same id when
+            # the source format exposes one (Claude ``tool_use.id``, OpenCode
+            # ``callID``).  ``is_error`` is authoritative for Claude/OpenCode
+            # and best-effort ``False`` elsewhere; agents whose ``tool_use``
+            # lacks an id simply won't correlate and default to no-outcome.
+            result_by_id: dict[str, dict[str, Any]] = {}
+            for m in messages:
+                for tr in getattr(m, "tool_result", ()) or ():
+                    if not isinstance(tr, dict):
+                        continue
+                    tr_id = tr.get("tool_use_id")
+                    if isinstance(tr_id, str) and tr_id:
+                        result_by_id[tr_id] = tr
             for idx, msg in enumerate(messages):
                 if msg.role != "assistant":
                     continue
@@ -182,6 +339,80 @@ def find_tool_calls(
                         call_ts is None or call_ts > until_dt
                     ):
                         continue
+                    # Correlated outcome (default: no result found → not an
+                    # error, empty output).  ``tool_use_id`` is present on the
+                    # call for Claude/OpenCode; other agents leave it absent so
+                    # this stays a no-op there.
+                    tu_id = tool.get("tool_use_id")
+                    result = (
+                        result_by_id.get(tu_id)
+                        if isinstance(tu_id, str) and tu_id
+                        else None
+                    )
+                    call_is_error = (
+                        bool(result.get("is_error")) if result else False
+                    )
+                    raw_output = result.get("content", "") if result else ""
+
+                    # --- Content filters (cheap; run BEFORE capping) --------
+                    # Match on the FULL, pre-cap text so a filter never misses
+                    # a hit that fell past the field cap.  Records that fail
+                    # any active filter are skipped before record assembly.
+                    coerced_input = _coerce_input(tool.get("input", ""))
+                    if isinstance(coerced_input, str):
+                        input_str = coerced_input
+                    else:
+                        try:
+                            input_str = json.dumps(
+                                coerced_input, ensure_ascii=False
+                            )
+                        except (TypeError, ValueError):
+                            input_str = str(coerced_input)
+                    output_str = (
+                        raw_output if isinstance(raw_output, str)
+                        else str(raw_output)
+                    )
+                    if is_error is not None and call_is_error != is_error:
+                        continue
+                    if input_contains is not None and not _match_ci(
+                        input_str, input_contains
+                    ):
+                        continue
+                    if output_contains is not None and not _match_ci(
+                        output_str, output_contains
+                    ):
+                        continue
+                    if output_excludes is not None and _match_ci(
+                        output_str, output_excludes
+                    ):
+                        continue
+
+                    capped_input, input_trunc = _cap_field(
+                        coerced_input, _INPUT_CHARS_CAP
+                    )
+                    capped_intent, intent_trunc = _cap_field(
+                        intent, _INTENT_CHARS_CAP
+                    )
+                    capped_asst, asst_trunc = _cap_field(
+                        msg.text or "", _ASSISTANT_CHARS_CAP
+                    )
+                    # Adaptive default: surface error lines on failures,
+                    # legacy head-slice on successes; explicit ``output_mode``
+                    # overrides.
+                    eff_mode = output_mode or (
+                        "smart" if call_is_error else "head"
+                    )
+                    capped_output, output_trunc = _cap_output(
+                        output_str, _OUTPUT_CHARS_CAP, eff_mode
+                    )
+                    truncated_fields = [
+                        f for f, hit in (
+                            ("input", input_trunc),
+                            ("intent", intent_trunc),
+                            ("assistant", asst_trunc),
+                            ("output", output_trunc),
+                        ) if hit
+                    ]
                     records.append({
                         "agent": agent_name.value.lower(),
                         "session_uuid": session.uuid,
@@ -192,9 +423,15 @@ def find_tool_calls(
                             iso(call_ts) if call_ts is not None else None
                         ),
                         "tool": name,
-                        "input": _coerce_input(tool.get("input", "")),
-                        "intent": intent,
-                        "assistant": msg.text or "",
+                        "input": capped_input,
+                        "intent": capped_intent,
+                        "assistant": capped_asst,
+                        "is_error": call_is_error,
+                        "is_error_reliable": (
+                            agent_name.value.lower() in {"claude", "opencode"}
+                        ),
+                        "output": capped_output,
+                        "truncated_fields": truncated_fields,
                     })
 
     records.sort(key=lambda r: (r["timestamp"] is None, r["timestamp"] or ""))
@@ -203,4 +440,28 @@ def find_tool_calls(
     if limit and len(records) > limit:
         records = records[:limit]
         truncated = True
-    return {"records": records, "count": total, "truncated": truncated}
+
+    # Size-based safeguard: stop emitting records once the cumulative
+    # serialized size exceeds the response byte budget.  Distinct from the
+    # count-based ``truncated`` above — ``output_truncated`` means "output
+    # capped by size", so a caller can tell "more records exist" (raise
+    # ``limit``) from "output too big" (fields already field-capped, but the
+    # sheer record count blew the budget).
+    output_truncated = False
+    budgeted: List[dict[str, Any]] = []
+    running = 0
+    for rec in records:
+        running += len(json.dumps(rec, ensure_ascii=False, default=str))
+        if running > _OUTPUT_BYTES_BUDGET and budgeted:
+            output_truncated = True
+            break
+        budgeted.append(rec)
+    if output_truncated:
+        records = budgeted
+
+    return {
+        "records": records,
+        "count": total,
+        "truncated": truncated,
+        "output_truncated": output_truncated,
+    }

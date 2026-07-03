@@ -15,9 +15,119 @@ variants (e.g. Pi's tz-pinning ``_parse_iso_timestamp`` or Claude's
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Iterator, List, Optional, Tuple
+
+
+# --- JSONL reading caps -------------------------------------------------
+#
+# Every per-agent parser reads newline-delimited JSON (one record per
+# line).  A single pathological file must not be able to exhaust memory:
+# a .jsonl with no newlines would otherwise be slurped whole by
+# ``for line in fh``.  These caps bound both a single line and the
+# cumulative bytes read.  They are exposed as module constants so the
+# streaming/event layer (a later refactor) can align on the same limits.
+
+# Largest single line (bytes, measured on the decoded text) we will
+# hand to ``json.loads``.  A line longer than this is SKIPPED whole — we
+# do not truncate, because a truncated JSON object is not valid JSON and
+# would only ever raise ``json.loads`` failure; skipping is the same
+# observable outcome without the wasted parse.  16 MiB comfortably fits
+# any legitimate transcript record (large tool outputs included) while
+# refusing a runaway newline-free blob.
+MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
+
+# Largest cumulative decoded size we will read from one file before
+# stopping iteration.  Generous (1 GiB) — real session files are orders
+# of magnitude smaller; this only trips on corruption/abuse.
+MAX_JSONL_TOTAL_BYTES = 1024 * 1024 * 1024
+
+
+def iter_jsonl_records(
+    path: Path,
+    *,
+    max_line_bytes: int = MAX_JSONL_LINE_BYTES,
+    max_total_bytes: int = MAX_JSONL_TOTAL_BYTES,
+    errors: str = "replace",
+) -> Iterator[dict]:
+    """Yield each valid ``dict`` record from a JSONL file, guarded.
+
+    This is the single source of truth for the read loop every parser
+    historically copied: ``strip → skip blank → json.loads → skip on
+    failure → skip non-dict``.  Two hardening properties over the old
+    hand-rolled loops:
+
+    * **Bounded per line.** The file is read in chunks and split on
+      ``\\n`` so a single newline-free multi-gigabyte file cannot be
+      slurped into memory.  Any line whose decoded length exceeds
+      ``max_line_bytes`` is skipped whole (a truncated JSON object is
+      not valid JSON, so truncating would only ever fail to parse).
+
+    * **Encoding-tolerant.** Opened with ``errors="replace"`` so a stray
+      non-UTF-8 byte yields a replacement character rather than raising
+      ``UnicodeDecodeError`` and making the whole session vanish.
+
+    Reading stops once ``max_total_bytes`` of decoded text has been
+    consumed.  ``OSError`` while reading is swallowed (iteration simply
+    ends) so callers keep whatever they collected — matching the prior
+    per-parser ``except OSError`` behaviour.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors=errors) as fh:
+            total = 0
+            pending = ""
+            over_long = False  # current physical line already exceeded cap
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_total_bytes:
+                    break
+                pending += chunk
+                # Emit every complete line (all but the trailing fragment).
+                while True:
+                    nl = pending.find("\n")
+                    if nl == -1:
+                        break
+                    raw = pending[:nl]
+                    pending = pending[nl + 1 :]
+                    if over_long:
+                        # We already decided this physical line is too
+                        # long; discard its tail up to the newline.
+                        over_long = False
+                        continue
+                    yield from _parse_jsonl_line_str(raw, max_line_bytes)
+                # Guard the still-incomplete fragment: if it alone already
+                # blew the cap, mark it so we drop the rest of the line.
+                if not over_long and len(pending) > max_line_bytes:
+                    over_long = True
+                    pending = ""
+            # Flush any final line without a trailing newline.
+            if pending and not over_long:
+                yield from _parse_jsonl_line_str(pending, max_line_bytes)
+    except OSError:
+        return
+
+
+def _parse_jsonl_line_str(raw: str, max_line_bytes: int) -> Iterator[dict]:
+    """Parse one physical JSONL line into at most one ``dict`` record."""
+    if len(raw) > max_line_bytes:
+        return
+    line = raw.strip()
+    if not line:
+        return
+    try:
+        record = json.loads(line)
+    except ValueError:
+        # ValueError is the base of json.JSONDecodeError; also covers the
+        # rare non-decode ValueError from json.loads.
+        return
+    if isinstance(record, dict):
+        yield record
 
 
 # Maximum number of characters retained in a normalised session title.

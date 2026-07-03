@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from ._common import _is_valid_uuid, _normalise_title
+from ._common import _is_valid_uuid, _normalise_title, iter_jsonl_records
 from .models import AgentName, Message, Session
 
 
@@ -129,58 +129,44 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     session_name: Optional[str] = None
     message_count = 0
 
-    try:
-        with jsonl_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
+    for entry in iter_jsonl_records(jsonl_path):
+        rec_type = entry.get("type")
+        if rec_type == "session":
+            if uuid is None and isinstance(entry.get("id"), str):
+                uuid = entry["id"]
+            if isinstance(entry.get("cwd"), str):
+                cwd = entry["cwd"]
+            if isinstance(entry.get("parentSession"), str):
+                parent_session = entry["parentSession"]
+            ts = _parse_iso_timestamp(entry.get("timestamp"))
+            if ts is not None:
+                header_timestamp = ts
+                last_timestamp = ts
+            continue
 
-                rec_type = entry.get("type")
-                if rec_type == "session":
-                    if uuid is None and isinstance(entry.get("id"), str):
-                        uuid = entry["id"]
-                    if isinstance(entry.get("cwd"), str):
-                        cwd = entry["cwd"]
-                    if isinstance(entry.get("parentSession"), str):
-                        parent_session = entry["parentSession"]
-                    ts = _parse_iso_timestamp(entry.get("timestamp"))
-                    if ts is not None:
-                        header_timestamp = ts
-                        last_timestamp = ts
-                    continue
+        ts = _entry_timestamp(entry)
+        if ts is not None:
+            last_timestamp = ts
 
-                ts = _entry_timestamp(entry)
-                if ts is not None:
-                    last_timestamp = ts
+        if rec_type == "session_info":
+            name = entry.get("name")
+            if isinstance(name, str):
+                session_name = name.strip() or None
+            continue
 
-                if rec_type == "session_info":
-                    name = entry.get("name")
-                    if isinstance(name, str):
-                        session_name = name.strip() or None
-                    continue
-
-                if rec_type != "message":
-                    continue
-                message = entry.get("message") or {}
-                if not isinstance(message, dict):
-                    continue
-                role = message.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                message_count += 1
-                if role == "user" and first_user_text is None:
-                    text = _extract_text(message.get("content", "")).strip()
-                    if text and not text.lstrip().startswith("<"):
-                        first_user_text = text.splitlines()[0].strip()
-    except OSError:
-        return None
+        if rec_type != "message":
+            continue
+        message = entry.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        message_count += 1
+        if role == "user" and first_user_text is None:
+            text = _extract_text(message.get("content", "")).strip()
+            if text and not text.lstrip().startswith("<"):
+                first_user_text = text.splitlines()[0].strip()
 
     if uuid is None:
         return None
@@ -311,7 +297,9 @@ def _pi_extract_message(
         return Message(
             role="tool",
             text="",
-            tool_result=({"content": result_text},),
+            # Pi ``toolResult`` records carry no error flag, so ``is_error``
+            # is best-effort and defaults False (absent signal).
+            tool_result=({"content": result_text, "is_error": False},),
             timestamp=timestamp,
         )
     return None
@@ -327,29 +315,16 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
     whatever was collected so far.
     """
     messages: List[Message] = []
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("type") != "message":
-                    continue
-                message = record.get("message") or {}
-                if not isinstance(message, dict):
-                    continue
-                ts = _entry_timestamp(record)
-                parsed = _pi_extract_message(message, timestamp=ts)
-                if parsed is not None:
-                    messages.append(parsed)
-    except OSError:
-        return messages
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "message":
+            continue
+        message = record.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        ts = _entry_timestamp(record)
+        parsed = _pi_extract_message(message, timestamp=ts)
+        if parsed is not None:
+            messages.append(parsed)
     return messages
 
 

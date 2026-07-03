@@ -254,9 +254,15 @@ def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -
     patch_input = json.loads(assistant.tool_use[3]["input"])
     assert patch_input["hash"] == "abc123"
     assert patch_input["files"] == [{"path": "src/app.py", "added": 3, "removed": 1}]
-    # Only the completed tool produced an output → one tool_result.
-    assert len(assistant.tool_result) == 1
+    # The completed tool produced an output; the errored tool (no output)
+    # now surfaces too, carrying ``is_error=True`` so the failure is visible.
+    assert len(assistant.tool_result) == 2
     assert assistant.tool_result[0]["content"] == "5 passed"
+    assert assistant.tool_result[0]["is_error"] is False
+    assert assistant.tool_result[0]["tool_use_id"] == "c1"
+    assert assistant.tool_result[1]["is_error"] is True
+    assert assistant.tool_result[1]["content"] == ""
+    assert assistant.tool_result[1]["tool_use_id"] == "c2"
 
 
 def test_tool_use_entries_carry_per_part_timestamp(
