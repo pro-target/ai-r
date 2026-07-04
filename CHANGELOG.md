@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Claude Desktop source root (F1.3)**: the Claude parser now scans the
+  Claude Desktop app's own session store
+  (`~/.config/Claude/claude-code-sessions`, honouring `AI_R_HOME`) as a
+  second root. The store holds per-session *metadata* JSONs (not
+  transcripts) that reference the backing CLI JSONL via `cliSessionId`,
+  so the two roots are merged with uuid-keyed deduplication: a session
+  visible in both is returned once, enriched — the Desktop `title` wins
+  (the CLI-derived title is kept in `extra["cli_title"]`), which makes
+  Desktop-launched sessions findable by the title the user actually sees
+  in the app. Origin is marked in `extra["source_root"]`
+  (`"cli"`|`"desktop"` — a launch-surface signal, groundwork for F1.4
+  `launch_surface`). A metadata-only session (transcript deleted)
+  surfaces as a zero-message reference; a missing root is skipped, never
+  an error; `source_roots()` reports both roots for empty-result
+  diagnostics. See `docs/methods.md` → *Claude session sources (CLI +
+  Desktop overlay)*.
 - **Session-level `noise` filter (F1.2)**: `query`, `list_sessions` and
   `search_sessions` take `noise=exclude|include|only` (default `include`
   — fully backward-compatible). A session is *noise* when it is a spawned

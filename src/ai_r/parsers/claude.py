@@ -1,6 +1,6 @@
 """Claude Code session parser.
 
-Source layout::
+Source layout (CLI root)::
 
     ~/.claude/projects/<project-slug>/<session-uuid>.jsonl
 
@@ -31,12 +31,55 @@ explicitly to the module-level functions.  When unset, the directory
 is read from the ``AI_R_HOME`` environment variable (used as
 ``$AI_R_HOME/.claude/projects``), falling back to
 ``~/.claude/projects``.
+
+Desktop root (metadata overlay, F1.3)
+-------------------------------------
+
+Claude Desktop keeps its OWN per-session store::
+
+    ~/.config/Claude/claude-code-sessions/<device-uuid>/<workspace-uuid>/local_<id>.json
+
+Each file is a SINGLE JSON object (not JSONL) of session *metadata* — no
+transcript.  Relevant keys observed on disk: ``sessionId``
+(``"local_<id>"``), ``cliSessionId`` (the uuid of the backing CLI JSONL
+transcript under ``~/.claude/projects``), ``title`` + ``titleSource``
+(the user-visible Desktop title), ``cwd``/``originCwd``,
+``createdAt``/``lastActivityAt``/``lastFocusedAt`` (epoch **milliseconds**),
+``model``, ``permissionMode``, ``isArchived``.
+
+Desktop-launched sessions therefore normally exist in BOTH roots: the
+transcript in the CLI root, the metadata in the Desktop root.  The parser
+scans both and deduplicates by uuid (``cliSessionId`` == the JSONL stem):
+
+* transcript found in the CLI root **and** matched by a Desktop metadata
+  file → ONE session, enriched: the Desktop ``title`` wins (it is what the
+  user sees in the app; the CLI-derived title is kept as
+  ``extra["cli_title"]``) and ``extra["source_root"]`` flips to
+  ``"desktop"``;
+* transcript only → ``extra["source_root"] == "cli"``;
+* metadata only (transcript deleted/never synced) → a reference-only
+  session built from the metadata (``message_count == 0``, ``path`` points
+  at the metadata JSON, ``source_root == "desktop"``).
+
+``extra["source_root"]`` is deliberately a *launch-surface* signal ("was
+this session driven from the Desktop app?") for the upcoming F1.4
+``launch_surface`` work, NOT a "where did the bytes come from" flag.
+
+The Desktop root honours the same overrides: an explicit ``desktop_dir``
+argument, else ``$AI_R_HOME/.config/Claude/claude-code-sessions``, else
+``~/.config/Claude/claude-code-sessions``.  A missing root is silently
+skipped (not an error).  To keep explicit-``base_dir`` callers hermetic
+(tests point ``base_dir`` at a fixture tree and must not see the real
+HOME), the Desktop root participates only when ``desktop_dir`` is given
+explicitly OR ``base_dir`` was NOT given (both roots env-resolved).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -71,14 +114,57 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     return Path("~/.claude/projects").expanduser()
 
 
-def source_roots(base_dir: Optional[str] = None) -> List[str]:
+def _resolve_desktop_dir(desktop_dir: Optional[str]) -> Path:
+    """Return the Claude Desktop session-metadata directory.
+
+    Lookup order (mirrors :func:`_resolve_base_dir` so hermetic tests that
+    fake ``AI_R_HOME`` redirect BOTH roots):
+
+    1. Explicit ``desktop_dir`` argument.
+    2. ``$AI_R_HOME/.config/Claude/claude-code-sessions``.
+    3. ``~/.config/Claude/claude-code-sessions``.
+    """
+    if desktop_dir:
+        return Path(desktop_dir).expanduser()
+    env_home = os.environ.get("AI_R_HOME")
+    if env_home:
+        return (
+            Path(env_home).expanduser()
+            / ".config"
+            / "Claude"
+            / "claude-code-sessions"
+        )
+    return Path("~/.config/Claude/claude-code-sessions").expanduser()
+
+
+def _desktop_scan_enabled(
+    base_dir: Optional[str], desktop_dir: Optional[str]
+) -> bool:
+    """Whether the Desktop overlay participates in this call.
+
+    ``True`` when ``desktop_dir`` is explicit, or when NEITHER root is
+    explicit (both env-resolved — the normal production path).  An
+    explicit ``base_dir`` alone pins the scan to that one root, keeping
+    existing fixture-scoped callers hermetic (no real-HOME leak).
+    """
+    return desktop_dir is not None or base_dir is None
+
+
+def source_roots(
+    base_dir: Optional[str] = None, desktop_dir: Optional[str] = None
+) -> List[str]:
     """Candidate source root(s) for Claude sessions.
 
-    Returns the directory the parser *would* scan — whether or not it
-    exists.  Used by :mod:`ai_r.diagnostics` to explain empty results
-    ("source directory not found" vs "source present but empty").
+    Returns the directories the parser *would* scan — whether or not they
+    exist.  Used by :mod:`ai_r.diagnostics` to explain empty results
+    ("source directory not found" vs "source present but empty").  The
+    Desktop metadata root is included under the participation rule of
+    :func:`_desktop_scan_enabled`.
     """
-    return [str(_resolve_base_dir(base_dir))]
+    roots = [str(_resolve_base_dir(base_dir))]
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        roots.append(str(_resolve_desktop_dir(desktop_dir)))
+    return roots
 
 
 def _extract_text_from_user_message(message: dict) -> str:
@@ -306,41 +392,207 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         message_count=message_count,
         parent_uuid=parent_uuid,
         kind="subagent" if is_subagent else "agent",
-        extra={"project_slug": project_slug},
+        extra={"project_slug": project_slug, "source_root": "cli"},
     )
 
 
-def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
-    """Return every Claude session visible under ``base_dir``.
+# ---------------------------------------------------------------------------
+# Claude Desktop metadata overlay (F1.3)
+# ---------------------------------------------------------------------------
+
+
+def _load_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
+    """Map session uuid -> ``(metadata, json_path)`` from the Desktop root.
+
+    Scans ``<root>/**/*.json`` (observed layout is
+    ``<device-uuid>/<workspace-uuid>/local_<id>.json`` but the depth is not
+    load-bearing).  A file must parse as a JSON *object* carrying a usable
+    id to be indexed; anything else is silently skipped.  The key is
+    ``cliSessionId`` when present (== the stem of the backing CLI JSONL,
+    which makes deduplication a plain dict lookup), else ``sessionId``.
+    A missing root yields an empty index — never an error.
+    """
+    if not root.is_dir():
+        return {}
+    index: dict[str, Tuple[dict, Path]] = {}
+    for json_path in sorted(root.rglob("*.json")):
+        if not json_path.is_file():
+            continue
+        try:
+            record = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        uuid = ""
+        for key in ("cliSessionId", "sessionId"):
+            raw = record.get(key)
+            if isinstance(raw, str) and raw.strip():
+                uuid = raw.strip()
+                break
+        if not uuid:
+            continue
+        index[uuid] = (record, json_path)
+    return index
+
+
+def _desktop_timestamp(record: dict, json_path: Path) -> Optional[datetime]:
+    """Best-effort last-activity time from Desktop metadata (UTC).
+
+    ``lastActivityAt``/``createdAt`` are epoch **milliseconds**; file
+    mtime is the fallback.
+    """
+    for key in ("lastActivityAt", "createdAt"):
+        raw = record.get(key)
+        if isinstance(raw, (int, float)) and raw > 0:
+            try:
+                return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                continue
+    try:
+        return datetime.fromtimestamp(
+            json_path.stat().st_mtime, tz=timezone.utc
+        )
+    except OSError:
+        return None
+
+
+def _desktop_extra(record: dict) -> dict:
+    """Common ``extra`` payload derived from one Desktop metadata record."""
+    extra: dict = {"source_root": "desktop"}
+    session_id = record.get("sessionId")
+    if isinstance(session_id, str) and session_id:
+        extra["desktop_session_id"] = session_id
+    cwd = record.get("cwd") or record.get("originCwd")
+    if isinstance(cwd, str) and cwd:
+        extra["cwd"] = cwd
+    return extra
+
+
+def _session_from_desktop_meta(
+    uuid: str, record: dict, json_path: Path
+) -> Optional[Session]:
+    """Build a reference-only :class:`Session` from Desktop metadata alone.
+
+    Used for sessions visible ONLY in the Desktop root (the backing CLI
+    transcript is gone).  ``path`` points at the metadata JSON — reading
+    messages through it yields an empty list (the file holds no
+    transcript), which is the honest answer.
+    """
+    date = _desktop_timestamp(record, json_path)
+    if date is None:
+        return None
+    raw_title = record.get("title")
+    title = (
+        _normalise_title(raw_title)
+        if isinstance(raw_title, str) and raw_title.strip()
+        else _resolve_title(None, None, None, json_path)
+    )
+    if not title:
+        return None
+    extra = _desktop_extra(record)
+    cwd = extra.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        # Mirror the CLI slug convention (path with separators/dots
+        # flattened to dashes) so slug-based grouping stays uniform.
+        extra["project_slug"] = re.sub(r"[/.]", "-", cwd)
+    return Session(
+        uuid=uuid,
+        agent=AgentName.CLAUDE,
+        title=title,
+        date=date,
+        path=str(json_path),
+        message_count=0,
+        parent_uuid=None,
+        kind="agent",
+        extra=extra,
+    )
+
+
+def _enrich_from_desktop(session: Session, record: dict) -> Session:
+    """Overlay Desktop metadata onto a CLI-discovered session.
+
+    The Desktop ``title`` wins (it is the title the user sees in the app,
+    hence what they will search for); the CLI-derived title is preserved
+    as ``extra["cli_title"]``.  ``extra["source_root"]`` flips to
+    ``"desktop"`` — the session was driven from the Desktop app even
+    though its transcript lives in the CLI root.
+    """
+    extra = dict(session.extra)
+    extra.update(_desktop_extra(record))
+    title = session.title
+    raw_title = record.get("title")
+    if isinstance(raw_title, str) and raw_title.strip():
+        desktop_title = _normalise_title(raw_title)
+        if desktop_title and desktop_title != session.title:
+            extra["cli_title"] = session.title
+            title = desktop_title
+    return dataclasses.replace(session, title=title, extra=extra)
+
+
+def _apply_desktop_overlay(
+    sessions: List[Session], desktop_root: Path
+) -> List[Session]:
+    """Merge the Desktop metadata index into a CLI session list.
+
+    Deduplication key is the session uuid (Desktop ``cliSessionId`` ==
+    CLI JSONL stem): a uuid present on both sides yields ONE enriched
+    session, a Desktop-only uuid appends a reference-only session.
+    """
+    index = _load_desktop_index(desktop_root)
+    if not index:
+        return sessions
+    by_uuid = {s.uuid: i for i, s in enumerate(sessions)}
+    for uuid, (record, json_path) in index.items():
+        pos = by_uuid.get(uuid)
+        if pos is not None:
+            sessions[pos] = _enrich_from_desktop(sessions[pos], record)
+            continue
+        extra_session = _session_from_desktop_meta(uuid, record, json_path)
+        if extra_session is not None:
+            sessions.append(extra_session)
+    return sessions
+
+
+def list_sessions(
+    base_dir: Optional[str] = None, desktop_dir: Optional[str] = None
+) -> List[Session]:
+    """Return every Claude session visible under the CLI + Desktop roots.
 
     Sessions are sorted by date (most recent first).  Files that fail
     to parse are silently skipped — Claude JSONL records are noisy
-    and one bad line should not break enumeration.
+    and one bad line should not break enumeration.  The Desktop metadata
+    root (see module docstring) is overlaid under the participation rule
+    of :func:`_desktop_scan_enabled`; a missing root contributes nothing.
     """
     root = _resolve_base_dir(base_dir)
-    if not root.is_dir():
-        return []
-
     sessions: List[Session] = []
-    seen: set[str] = set()
-    # Two discovery passes:
-    #  1. ``<slug>/<uuid>.jsonl`` — top-level sessions (and inline-sidechain
-    #     files, which live alongside their parent and are classified by
-    #     ``_scan_file`` via the ``isSidechain`` marker).
-    #  2. ``**/subagents/agent-*.jsonl`` — directory-form subagent sessions,
-    #     which the shallow ``*/*.jsonl`` glob never reaches.
-    globs = ("*/*.jsonl", "**/subagents/agent-*.jsonl")
-    for pattern in globs:
-        for jsonl_path in root.glob(pattern):
-            if not jsonl_path.is_file():
-                continue
-            key = str(jsonl_path)
-            if key in seen:
-                continue
-            seen.add(key)
-            session = _scan_file(jsonl_path)
-            if session is not None:
-                sessions.append(session)
+    if root.is_dir():
+        seen: set[str] = set()
+        # Two discovery passes:
+        #  1. ``<slug>/<uuid>.jsonl`` — top-level sessions (and
+        #     inline-sidechain files, which live alongside their parent and
+        #     are classified by ``_scan_file`` via the ``isSidechain``
+        #     marker).
+        #  2. ``**/subagents/agent-*.jsonl`` — directory-form subagent
+        #     sessions, which the shallow ``*/*.jsonl`` glob never reaches.
+        globs = ("*/*.jsonl", "**/subagents/agent-*.jsonl")
+        for pattern in globs:
+            for jsonl_path in root.glob(pattern):
+                if not jsonl_path.is_file():
+                    continue
+                key = str(jsonl_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                session = _scan_file(jsonl_path)
+                if session is not None:
+                    sessions.append(session)
+
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        sessions = _apply_desktop_overlay(
+            sessions, _resolve_desktop_dir(desktop_dir)
+        )
 
     sessions.sort(key=lambda s: s.date, reverse=True)
     return sessions
@@ -370,19 +622,45 @@ def _find_session_file(uuid: str, base_dir: Optional[str]) -> Path:
     )
 
 
-def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
+def read_session(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    desktop_dir: Optional[str] = None,
+) -> Session:
     """Read and return a single Claude session by ``uuid``.
 
+    The Desktop metadata overlay applies here too (same participation
+    rule as :func:`list_sessions`): a CLI-backed session is enriched with
+    its Desktop title/``source_root``; a uuid known ONLY to the Desktop
+    root resolves to the reference-only metadata session instead of
+    raising.
+
     Raises:
-        FileNotFoundError: the session does not exist.
+        FileNotFoundError: the session does not exist in either root.
         ValueError: ``uuid`` is malformed.
     """
-    path = _find_session_file(uuid, base_dir)
+    desktop_enabled = _desktop_scan_enabled(base_dir, desktop_dir)
+    try:
+        path = _find_session_file(uuid, base_dir)
+    except FileNotFoundError:
+        if desktop_enabled:
+            index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+            entry = index.get(uuid)
+            if entry is not None:
+                session = _session_from_desktop_meta(uuid, *entry)
+                if session is not None:
+                    return session
+        raise
     session = _scan_file(path)
     if session is None:
         raise FileNotFoundError(
             f"Claude session {uuid!r} at {path} yielded no parseable data"
         )
+    if desktop_enabled:
+        index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+        entry = index.get(uuid)
+        if entry is not None:
+            session = _enrich_from_desktop(session, entry[0])
     return session
 
 
@@ -683,12 +961,26 @@ def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     ]
 
 
-def session_exists(uuid: str, base_dir: Optional[str] = None) -> bool:
-    """Return ``True`` if a Claude session with this uuid is on disk."""
+def session_exists(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    desktop_dir: Optional[str] = None,
+) -> bool:
+    """Return ``True`` if a Claude session with this uuid is on disk.
+
+    Checks the CLI transcript root first, then (under the participation
+    rule) the Desktop metadata root — a Desktop-only session exists too.
+    """
     if not uuid or "/" in uuid or "\\" in uuid or ".." in uuid:
         return False
     try:
         _find_session_file(uuid, base_dir)
-    except (FileNotFoundError, ValueError):
+        return True
+    except ValueError:
         return False
-    return True
+    except FileNotFoundError:
+        pass
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+        return uuid in index
+    return False

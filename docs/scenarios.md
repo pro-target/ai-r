@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 48 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 50 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -53,7 +53,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 48 LLM-executed end-to-end
 | `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 2 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND. |
+| `list_sessions` | 4 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
 | `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
@@ -396,6 +396,22 @@ Cross-agent session inventory: newest-first, paginated, each summary self-descri
 - **Steps:** `mcp__ai-r__list_sessions(agent="<agent>")`; then `noise="exclude"`; then `noise="only"`; then the contradictory `kind="agent", noise="only"`; then `noise="bogus"`.
 - **Expected:** Default (`include`) lists both sessions; `exclude` lists only the top-level one; `only` lists only the subagent (its summary carries `kind="subagent"` and the correct `parent_uuid`); `exclude`+`only` partition `include` (disjoint, union == all); the contradictory combination returns `total == 0` **with** `diagnostics`; `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
 - **Pass criteria:** GO when the three modes partition the inventory exactly, `kind` and `noise` AND together, and the unknown mode is a loud error.
+
+### LIST-3 — Claude Desktop overlay: dedup by uuid + `source_root` origin
+- **Function:** `list_sessions` (Claude CLI + Desktop source roots)
+- **Goal:** The Claude parser merges the CLI transcript root and the Claude Desktop metadata root into ONE inventory: no duplicate uuids, the Desktop title wins on the merged session, origin is marked in `extra["source_root"]`, and a metadata-only session is still visible as a reference.
+- **Preconditions:** `[hermetic-ok]` — under a fake `AI_R_HOME` seed (a) one CLI JSONL transcript whose uuid is referenced by a Desktop metadata JSON (`cliSessionId` + a distinct `title`), (b) one Desktop metadata JSON whose `cliSessionId` has NO backing transcript, (c) one plain CLI transcript.
+- **Steps:** `mcp__ai-r__list_sessions(agent="claude")`; then `mcp__ai-r__read_session(session_id=<desktop-only uuid>)`; then `mcp__ai-r__search_sessions(query=<a word unique to the Desktop title>, agent="claude", scope="title")`.
+- **Expected:** Exactly 3 sessions, all uuids unique; the merged session carries the Desktop `title` (CLI-derived title preserved as `extra["cli_title"]`) and `source_root="desktop"`; the plain CLI session carries `source_root="cli"`; the Desktop-only session appears with `message_count=0` and reading it yields zero messages (not an error); the title search finds the merged session by its Desktop title.
+- **Pass criteria:** GO when dedup holds (no uuid twice), both origin marks are correct, the Desktop title is searchable, and the metadata-only session reads as an empty reference. NO-GO on a duplicated session or a crash on the missing transcript.
+
+### LIST-4 — live Claude Desktop store visible `[needs-real-vault]`
+- **Function:** `list_sessions` (real `~/.config/Claude/claude-code-sessions`)
+- **Goal:** On a host where the Claude Desktop app has been used, Desktop-launched sessions appear in the inventory marked `source_root="desktop"` and are findable by their Desktop-app title (the motivating bug: a Desktop session was invisible to title search because only its raw first-message title existed CLI-side).
+- **Preconditions:** Real `~/.config/Claude/claude-code-sessions` with at least one `local_*.json`. `[needs-real-vault]` — skip (not fail) when absent.
+- **Steps:** `mcp__ai-r__list_sessions(agent="claude", limit=50)`; pick one Desktop metadata `title` from the store; `mcp__ai-r__search_sessions(query=<its distinctive words>, agent="claude", scope="title")`.
+- **Expected:** At least one session with `extra["source_root"]="desktop"`; no uuid appears twice; the search by the Desktop-app title returns that session.
+- **Pass criteria:** GO when a desktop-marked, dedup-clean, title-searchable session is found; NO-GO on duplicates or a Desktop title that search cannot find.
 
 ---
 

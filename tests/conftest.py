@@ -29,6 +29,7 @@ pytest_plugins: list[str] = []
 _HOST_FIXTURES = frozenset(
     {
         "real_claude_dir",
+        "real_claude_desktop_dir",
         "real_codex_dir",
         "real_opencode_db",
         "real_pi_dir",
@@ -1326,6 +1327,9 @@ def fake_antigravity_brain_with_transcript(tmp_sessions_dir: Path) -> Path:
 
 
 _REAL_CLAUDE_DIR = Path("~/.claude/projects").expanduser()
+_REAL_CLAUDE_DESKTOP_DIR = Path(
+    "~/.config/Claude/claude-code-sessions"
+).expanduser()
 _REAL_CODEX_DIR = Path("~/.codex/sessions").expanduser()
 _REAL_OPENCODE_DB = Path("~/.local/share/opencode/opencode.db")
 _REAL_PI_DIR = Path("~/.pi/agent/sessions").expanduser()
@@ -1349,6 +1353,14 @@ def real_claude_dir() -> Path:
     if not _REAL_CLAUDE_DIR.is_dir():
         pytest.skip("no real Claude sessions on this host")
     return _REAL_CLAUDE_DIR
+
+
+@pytest.fixture(scope="session")
+def real_claude_desktop_dir() -> Path:
+    """The real Claude *Desktop* metadata root (F1.3), skip when absent."""
+    if not _REAL_CLAUDE_DESKTOP_DIR.is_dir():
+        pytest.skip("no real Claude Desktop session store on this host")
+    return _REAL_CLAUDE_DESKTOP_DIR
 
 
 @pytest.fixture
