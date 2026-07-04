@@ -29,6 +29,7 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.events._common import resolve_tool
 from ai_r.redact import merge_redaction_counts, redact_value
 from ai_r.security import coerce_tool_input as _coerce_input
 
@@ -214,7 +215,13 @@ def find_tool_calls(
         — see :mod:`ai_r.diagnostics`) so an empty listing is explainable.
         Each record carries ``agent``, ``session_uuid``,
         ``session_title``, ``session_date``, ``message_index``,
-        ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
+        ``timestamp``, ``tool``, ``tool_kind`` (the wrapper-aware
+        classification, one of
+        :data:`~ai_r.events._common.TOOL_KIND`), ``tool_resolved`` (the
+        real name under a Skill/Task/MCP wrapper — the subagent type, the
+        skill name, or ``"<server>:<tool>"`` for an MCP call; ``None``
+        for non-wrappers or when the input carries no name signal),
+        ``input`` (parsed dict when the raw
         input was a JSON string), ``intent`` (the immediately
         preceding user message text or ``None``), ``assistant``
         (the assistant text of the message hosting the call),
@@ -432,6 +439,12 @@ def find_tool_calls(
                             ("output", output_trunc),
                         ) if hit
                     ]
+                    # F3.1: wrapper-aware classification + the real name
+                    # under a Skill/Task/MCP wrapper (None when the input
+                    # carries no recognisable name — honest, never guessed).
+                    call_kind, call_resolved = resolve_tool(
+                        name, coerced_input
+                    )
                     records.append({
                         "agent": agent_name.value.lower(),
                         "session_uuid": session.uuid,
@@ -442,6 +455,8 @@ def find_tool_calls(
                             iso(call_ts) if call_ts is not None else None
                         ),
                         "tool": name,
+                        "tool_kind": call_kind,
+                        "tool_resolved": call_resolved,
                         "input": capped_input,
                         "intent": capped_intent,
                         "assistant": capped_asst,
@@ -468,7 +483,7 @@ def find_tool_calls(
     if redact:
         for rec in records:
             for field in ("session_title", "input", "intent",
-                          "assistant", "output"):
+                          "assistant", "output", "tool_resolved"):
                 new_val, counts = redact_value(rec.get(field))
                 if counts:
                     rec[field] = new_val

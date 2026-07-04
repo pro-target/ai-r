@@ -963,7 +963,12 @@ def find_tool_calls(
     selects output truncation — ``"head"``/``"tail"``/``"smart"``;
     ``None`` is adaptive (``"smart"`` on errors, ``"head"`` otherwise).
     Each record also carries ``is_error_reliable`` (``True`` only for
-    Claude/OpenCode).
+    Claude/OpenCode) plus the wrapper-aware classification: ``tool_kind``
+    (``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
+    ``web``/``other``) and ``tool_resolved`` — the real name under a
+    Skill/Task/MCP wrapper (subagent type, skill name, or
+    ``"<server>:<tool>"``); ``None`` when there is no wrapper or the
+    input carries no name signal.
 
     Thin wrapper over :func:`ai_r.find_tool_calls.find_tool_calls`
     that translates the core ``ValueError`` contract into the
@@ -1313,6 +1318,7 @@ def query(
     until: Optional[str] = None,
     file: Optional[str] = None,
     tool: Optional[str] = None,
+    tool_kind: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -1344,7 +1350,20 @@ def query(
     * ``session`` — restrict to a single session uuid.
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on the event ts.
     * ``file`` — substring matched against an event's referenced file path.
-    * ``tool`` — substring (pattern) matched against the referenced tool name.
+    * ``tool`` — substring (pattern) matched against the referenced tool
+      name OR the resolved name under a wrapper (``tool_resolved``) — so
+      ``tool="commit"`` also finds the Skill call that ran the ``commit``
+      skill.
+    * ``tool_kind`` — exact match against the wrapper-aware classification
+      of a tool call: ``edit`` / ``write`` / ``read`` / ``bash`` / ``task``
+      (subagent spawn) / ``skill`` / ``mcp`` / ``web`` / ``other``.
+      Every ``tool_call`` event carries ``tool_kind`` (in ``refs`` and as
+      a top-level field); wrappers whose input names the real actor also
+      carry ``tool_resolved`` — the subagent type under Task/Agent/
+      spawn_agent, the skill name under Skill/SlashCommand, or
+      ``"<server>:<tool>"`` for a Claude-style ``mcp__<server>__<tool>``
+      call.  No signal → no ``tool_resolved`` (never guessed).  An
+      unknown ``tool_kind`` value is a fail-loud ``invalid_argument``.
     * ``text`` — substring matched against event text.  With
       ``sort="relevance"`` survivors are BM25-ranked using the **same
       scorer** as ``search_sessions``; ``sort="date"`` (default) orders
@@ -1412,6 +1431,7 @@ def query(
             until=until,
             file=file,
             tool=tool,
+            tool_kind=tool_kind,
             text=text,
             sort=sort,
             relative_to=relative_to,
@@ -1449,6 +1469,7 @@ def query(
                 "session": session,
                 "file": file,
                 "tool": tool,
+                "tool_kind": tool_kind,
                 "text": text,
                 "relative_to": relative_to,
                 # "include" is the no-op default — never a cause of emptiness.

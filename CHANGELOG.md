@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real names under wrappers (F3.1)**: every tool call is now classified
+  wrapper-aware. Each `tool_call` event (`query`) and every
+  `find_tool_calls` record carries `tool_kind` — one of
+  `edit|write|read|bash|task|skill|mcp|web|other` — and, when a wrapper's
+  input names the real actor, `tool_resolved`: the subagent type under a
+  spawn wrapper (Claude `Task`/`Agent` → `input.subagent_type`, OpenCode
+  `task` → `subagent_type`, Codex `spawn_agent` → `agent_type`), the
+  skill name under Claude `Skill` (`input.skill`) / OpenCode `skill`
+  (`input.name`) / `SlashCommand` (`input.command`, reduced to the bare
+  command token), or `"<server>:<tool>"` for a Claude-style
+  `mcp__<server>__<tool>` name. Honest per-agent signals only: a wrapper
+  whose input carries no name key gets no `tool_resolved` (never
+  guessed); Codex/OpenCode/Pi record MCP calls under bare or
+  underscore-joined names with no reliable server delimiter, so no `mcp`
+  detection there. `query` gains a `tool_kind` facet (exact match,
+  unknown value fails loud) and the `tool` facet now also matches
+  resolved names (`tool="commit"` finds the SlashCommand that ran the
+  `commit` skill); `tool_kind`/`tool_resolved` are hoisted to top-level
+  event-dict fields so `aggregate(group_by="tool_kind")` works on query
+  rows directly. Backward-compat: the event `type` keeps the base
+  `tool_call(<sub>)` subtype (a Task call is still `tool_call(other)`) —
+  no counts or existing filters change; `tool_resolved` passes the F2.1
+  emission-time redaction on both surfaces. The `web` kind
+  (WebFetch/WebSearch/webfetch, name-based) lays the groundwork for the
+  network-audit phase. SSOT `ai_r.events._common.resolve_tool` +
+  `TOOL_KIND`; scenarios QRY-11, FTC-5.
 - **Session outcome classification (F2.3)**: `read_session` now carries
   an `outcome` block — `{status, signals, user_verdict, markers,
   tool_results, tool_errors, error_rate, error_rate_reliable}` with

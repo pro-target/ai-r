@@ -32,6 +32,7 @@ from ai_r.events._common import (
     _mk_event,
     _path_from_payload,
     classify_tool,
+    resolve_tool,
 )
 
 
@@ -412,10 +413,21 @@ def _messages_to_events(
                 sub = classify_tool(name)
                 tool_ts = to_utc_aware(tool.get("timestamp"))
                 tool_iso = iso(tool_ts) if tool_ts is not None else ts_iso
+                payload = _coerce_tool_input(tool.get("input", ""))
                 refs: List[dict] = [{"tool": name}]
-                fpath = _path_from_payload(_coerce_tool_input(tool.get("input", "")))
+                fpath = _path_from_payload(payload)
                 if fpath:
                     refs.append({"file": fpath})
+                # F3.1: classify the call (wrapper-aware) and surface the
+                # real name under a Skill/Task/MCP wrapper.  ``tool_kind``
+                # is always present; ``tool_resolved`` only when the input
+                # actually carries the real name (honest — never guessed).
+                # The event ``type`` keeps the classify_tool subtype for
+                # backward-compat (a Task call stays ``tool_call(other)``).
+                kind, resolved = resolve_tool(name, payload)
+                refs.append({"tool_kind": kind})
+                if resolved:
+                    refs.append({"tool_resolved": resolved})
                 # Surface the call's outcome when a correlated result exists:
                 # ``{"is_error": True|False}``.  Absent when no matching
                 # result id was seen (outcome unknown / agent has no signal).

@@ -19,7 +19,7 @@ from ai_r.redact import merge_redaction_counts, redact_text
 
 from ai_r.parsers._noise import validate_noise
 
-from ai_r.events._common import Event
+from ai_r.events._common import Event, TOOL_KIND
 from ai_r.events.model import iter_events
 
 
@@ -40,8 +40,16 @@ def _type_matches(event_type: str, wanted: str) -> bool:
     return False
 
 
+def _ref_value(refs: Sequence[dict], key: str) -> Optional[Any]:
+    """Return the first ``refs[*][key]`` value, or ``None``."""
+    for r in refs:
+        if key in r:
+            return r[key]
+    return None
+
+
 def _event_to_dict(event: Event) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "id": event.id,
         "session_id": event.session_id,
         "agent": event.agent,
@@ -53,6 +61,16 @@ def _event_to_dict(event: Event) -> dict[str, Any]:
         "sha256": event.sha256,
         "message_index": event.message_index,
     }
+    # F3.1: hoist the wrapper classification out of refs so downstream
+    # ``aggregate(group_by="tool_kind")`` works on query rows directly.
+    # Only tool_call events carry these; other event types are unchanged.
+    kind = _ref_value(event.refs, "tool_kind")
+    if kind is not None:
+        out["tool_kind"] = kind
+    resolved = _ref_value(event.refs, "tool_resolved")
+    if resolved is not None:
+        out["tool_resolved"] = resolved
+    return out
 
 
 def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
@@ -113,7 +131,7 @@ def _redact_events(
     into ``redactions_out`` when the caller provided one.
     """
     for ev in event_dicts:
-        for field in ("text", "intent"):
+        for field in ("text", "intent", "tool_resolved"):
             val = ev.get(field)
             if not isinstance(val, str) or not val:
                 continue
@@ -122,6 +140,11 @@ def _redact_events(
                 ev[field] = new_val
                 if redactions_out is not None:
                     merge_redaction_counts(redactions_out, counts)
+                # Keep the refs mirror consistent with the hoisted field.
+                if field == "tool_resolved":
+                    for ref in ev.get("refs") or ():
+                        if isinstance(ref, dict) and "tool_resolved" in ref:
+                            ref["tool_resolved"] = new_val
 
 
 def _walk_relative(
@@ -170,6 +193,7 @@ def query(
     until: Optional[str] = None,
     file: Optional[str] = None,
     tool: Optional[str] = None,
+    tool_kind: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -200,7 +224,13 @@ def query(
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on ``ts``.
     * ``file`` — substring matched against any ``refs[*].file``.
     * ``tool`` — substring (pattern) matched against any ``refs[*].tool``
-      (case-insensitive).
+      OR ``refs[*].tool_resolved`` (case-insensitive) — so ``tool="commit"``
+      also finds the Skill-wrapped call whose resolved skill is ``commit``.
+    * ``tool_kind`` — exact match against the F3.1 wrapper-aware
+      classification (one of :data:`~ai_r.events._common.TOOL_KIND`:
+      ``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
+      ``web``/``other``).  Unknown values raise :class:`ValueError`
+      (fail-loud, never a silent no-op).
     * ``text`` — substring matched against event ``text``
       (case-insensitive).  With ``sort="relevance"`` the survivors are
       BM25-ranked using the **same scorer** as ``search_sessions``.
@@ -266,6 +296,12 @@ def query(
             f"sort must be 'relevance' or 'date', got {sort!r}"
         )
     validate_noise(noise)
+    if tool_kind is not None:
+        if not isinstance(tool_kind, str) or tool_kind not in TOOL_KIND:
+            raise ValueError(
+                f"tool_kind must be one of {sorted(TOOL_KIND)}, "
+                f"got {tool_kind!r}"
+            )
     if project_dir is not None and (
         not isinstance(project_dir, str) or not project_dir.strip()
     ):
@@ -352,8 +388,19 @@ def query(
             if not any(file_needle in f for f in files):
                 continue
         if tool_needle is not None:
-            tools = [r.get("tool", "").lower() for r in ev.refs if "tool" in r]
+            # Match the raw name AND the resolved name under a wrapper, so
+            # a Skill/Task/MCP call is findable by what it really ran.
+            tools = [
+                str(r[key]).lower()
+                for r in ev.refs
+                for key in ("tool", "tool_resolved")
+                if key in r
+            ]
             if not any(tool_needle in t for t in tools):
+                continue
+        if tool_kind is not None:
+            kinds = [r.get("tool_kind") for r in ev.refs if "tool_kind" in r]
+            if tool_kind not in kinds:
                 continue
         if text_needle is not None:
             if not ev.text or text_needle not in ev.text.lower():
