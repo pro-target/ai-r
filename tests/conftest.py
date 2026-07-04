@@ -714,6 +714,136 @@ def fake_claude_plan_write(tmp_sessions_dir: Path) -> str:
     return session_id
 
 
+def _claude_exit_plan_with_id(plan_text: str, tool_use_id: str, ts: str) -> dict:
+    """A Claude assistant record: one ``ExitPlanMode`` tool_use with a call id."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": "ExitPlanMode",
+                    "input": {"plan": plan_text},
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+def _claude_tool_result(tool_use_id: str, content: str, ts: str) -> dict:
+    """A Claude user record carrying one ``tool_result`` block."""
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+@pytest.fixture
+def fake_claude_plan_feedback(tmp_sessions_dir: Path) -> str:
+    """Claude plan-iteration session with the four real response formats (F3.4).
+
+    Four ``ExitPlanMode`` revisions of ONE task ("Feature Plan"):
+
+    * tu-plan-0 — technical failure result (permission stream) → filtered;
+    * tu-plan-1 — rejection with a free-text preamble + two
+      "On selected text:" quote→comment pairs (one comment carries a
+      redactable secret);
+    * tu-plan-2 — stay-in-plan-mode with two ``[Re: "…"]`` pairs (the second
+      comment is multi-line);
+    * tu-plan-3 — approval carrying the AUTHORITATIVE user-edited plan text
+      ("## Approved Plan (edited by user):"), which must override the
+      signal body of the final revision.
+    """
+    session_id = "plan-feedback-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    reject_boiler = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+    )
+    rejected = (
+        reject_boiler
+        + "Overall too vague.\n"
+        + "On selected text:\n"
+        + "> Draft one body.\n"
+        + "Use token=abc12345secret here.\n"
+        + "\n"
+        + "On selected text:\n"
+        + "> Feature Plan\n"
+        + "> \n"
+        + "Rename the feature.\n"
+    )
+    stay = (
+        "User chose to stay in plan mode and continue planning\n"
+        "\n"
+        "Comments on the plan:\n"
+        '[Re: "Draft two body."] Split into two phases.\n'
+        '[Re: "rollout"] Which rollout?\n'
+        "More thoughts on a second line.\n"
+    )
+    approved = (
+        "User has approved your plan. You can now start coding. "
+        "Start with updating your todo list if applicable\n"
+        "\n"
+        "Your plan has been saved to: /home/u/.claude/plans/feature.md\n"
+        "You can refer back to it if needed during implementation.\n"
+        "\n"
+        "## Approved Plan (edited by user):\n"
+        "# Feature Plan\n"
+        "\n"
+        "EDITED final body by user.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan the feature"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft zero body.", "tu-plan-0",
+                "2026-06-14T10:00:05Z"),
+            _claude_tool_result(
+                "tu-plan-0",
+                "Tool permission request failed: Error: Stream closed",
+                "2026-06-14T10:00:06Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft one body.", "tu-plan-1",
+                "2026-06-14T10:00:10Z"),
+            _claude_tool_result("tu-plan-1", rejected,
+                                "2026-06-14T10:00:11Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft two body.", "tu-plan-2",
+                "2026-06-14T10:00:20Z"),
+            _claude_tool_result("tu-plan-2", stay, "2026-06-14T10:00:21Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft three body.", "tu-plan-3",
+                "2026-06-14T10:00:30Z"),
+            _claude_tool_result("tu-plan-3", approved,
+                                "2026-06-14T10:00:31Z"),
+        ],
+    )
+    return session_id
+
+
 @pytest.fixture
 def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
     """Codex rollout with several ``update_plan`` calls → last one is final."""

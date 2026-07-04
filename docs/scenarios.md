@@ -40,16 +40,16 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 63 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 67 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
 | `query` | 12 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
-| `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
+| `get_body` | 5 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated; a plan-feedback `ref` (`"<session>:pf<N>"`) resolves to the FULL raw plan response (type `plan_feedback`, redacted, capped), out-of-range/unknown refs are `not_found`. |
 | `aggregate` | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
 | `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
-| `plan` | 5 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal. |
+| `plan` | 8 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape. |
 | `session_stats` (preset) | 4 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
@@ -211,6 +211,14 @@ Bodies are deliberately kept off the event stream; this verb fetches them on dem
 - **Expected:** `status` is set (e.g. `"completed"`) and `steps` is a non-empty list, each step with its own `status`.
 - **Pass criteria:** GO when `steps` is populated and `status` is present — proving the `plan`-key nesting is parsed, not dropped.
 
+### BODY-5 — raw plan response by feedback ref (F3.4)
+- **Function:** `get_body`
+- **Goal:** A `ref` from a `plan` feedback pair (`"<session>:pf<N>"`) resolves to the FULL raw user response the pair was extracted from.
+- **Preconditions:** A `ref` taken from `plan(session=…).feedback`. `[needs-real-vault]` (or `[hermetic-ok]` synthetic).
+- **Steps:** `mcp__ai-r__get_body(id="<session>:pf<N>")`.
+- **Expected:** `{type:"plan_feedback", verdict, plan_id, text, pairs, ts}` — `text` is the verbatim response blob (boilerplate included), redacted by default and `max_chars`-capped; `pairs` mirrors the extracted quote/comment tuples. An out-of-range ordinal or unknown session returns `{"error":"not_found"}`.
+- **Pass criteria:** GO when the raw blob round-trips (the default `plan` response carried only the pairs; the blob arrives ONLY on this demand) and bad refs fail honest `not_found`.
+
 ---
 
 ## `aggregate`
@@ -329,6 +337,30 @@ Normalized plan atoms of a session; agent differences hidden. Task grouping is b
 - **Steps:** `mcp__ai-r__plan(session="<opencode-or-pi-uuid>", agent="opencode")`.
 - **Expected:** An empty plan list, no error dict.
 - **Pass criteria:** GO when the result is an empty list and no error is raised.
+
+### PLAN-6 — final body inlined by default, drafts stay references (F3.4)
+- **Function:** `plan`
+- **Goal:** The default response carries the FINAL plan's full text inline; draft/major bodies are never inlined.
+- **Preconditions:** A session with a multi-revision plan iteration (claude redraft chain). `[hermetic-ok]` (synthetic) or `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__plan(session="<uuid>")`; then `mcp__ai-r__plan(session="<uuid>", bodies="none")`.
+- **Expected:** Default: the `final` atom carries `body` (full plan text) + `body_source` (`"approval_edited_by_user"` when the user's approval carried an edited plan — that text overrides the signal/file body — else `"plan_signal"`; honest `null` body for a steps-only codex plan); every `draft`/`completed_major` atom has NO `body` key. `bodies="none"`: no atom carries `body`/`body_source` (historical shape).
+- **Pass criteria:** GO when exactly the final is inlined with a truthful `body_source`, drafts stay references, and `bodies="none"` is byte-identical to the historical atoms.
+
+### PLAN-7 — «plan quote → user comment» pairs with refs (F3.4)
+- **Function:** `plan`
+- **Goal:** Every pair the user produced while iterating a plan (selection rejections, stay-in-plan-mode `[Re: "…"]` comments, free-text rejections) is extracted, chronological, bound to the revision it answered.
+- **Preconditions:** A claude session whose plan went through rejections with selected-text comments (e.g. a real plan-review session). `[needs-real-vault]` (or `[hermetic-ok]` synthetic).
+- **Steps:** `mcp__ai-r__plan(session="<uuid>")`; inspect `feedback`/`feedback_count`.
+- **Expected:** Each pair carries `plan_id` (a `plan_event` id from the same response, `null` only when the transcript records no call id), `verdict ∈ rejected|stay_in_plan_mode`, `quote` (the plan excerpt, `null` for a free-text comment), the verbatim `comment`, `ts` and a `ref` of the form `"<session>:pf<N>"`. Technical failures (permission-stream errors) and bare no-comment rejections produce NO pairs. Secrets in quotes/comments are redacted by default.
+- **Pass criteria:** GO when all user pairs are present in chronological order with correct verdicts and revision binding, filtered garbage is absent, and `feedback=false` omits the list.
+
+### PLAN-8 — honest empty feedback where no approval flow exists
+- **Function:** `plan`
+- **Goal:** Agents without an interactive plan-approval flow (codex, antigravity, opencode, pi) contribute an honest empty `feedback` — never fabricated pairs.
+- **Preconditions:** A codex session with `update_plan` revisions. `[needs-real-vault]` (or `[hermetic-ok]` synthetic).
+- **Steps:** `mcp__ai-r__plan(session="<codex-uuid>", agent="codex")`.
+- **Expected:** `feedback == []`, `feedback_count == 0`; the plan atoms themselves are unchanged.
+- **Pass criteria:** GO when feedback is empty (not an error, not invented) and the atoms match the historical output.
 
 ---
 

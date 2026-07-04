@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plan iterations: final text + «quote → comment» pairs (F3.4 v1)**:
+  `plan` now returns, by default, everything a consumer needs to replay a
+  plan-approval iteration without inlining every draft (measured ≈×3.7
+  cheaper than "all bodies"): (a) the **final** plan's full text inline —
+  `body` + `body_source`, where the AUTHORITATIVE text is the user-edited
+  plan carried by the approval response (`"approval_edited_by_user"` —
+  the plan file on disk can diverge from what was actually approved),
+  falling back to the plan signal (`"plan_signal"`), honest `null` for
+  steps-only plans (Codex); drafts stay references (bodies via
+  `get_body`); (b) a `feedback` list of ALL «plan quote → user comment»
+  pairs extracted from the user's plan responses, chronological — each
+  pair carries `plan_id` (the exact revision it answered, correlated by
+  call id), `verdict` (`rejected` | `stay_in_plan_mode`), `quote`
+  (`null` for a free-text comment), verbatim `comment`, `ts` and a
+  `ref` (`"<session>:pf<N>"`) that `get_body` resolves to the FULL raw
+  response blob (type `plan_feedback`) on demand. The recognised
+  response formats (verified on real vaults): "On selected text:"
+  quote blocks, stay-in-plan-mode `[Re: "…"]` comments, free-text
+  rejections, approvals with/without an edited plan; technical failures
+  (permission-stream errors) and bare no-comment rejections are
+  filtered out. Only agents with an interactive plan-approval flow have
+  the signal (today: Claude `ExitPlanMode`); others honestly contribute
+  nothing — never fabricated. Redaction (F2.1) covers plan bodies,
+  quotes, comments and raw responses. Backward-compat switches:
+  `bodies="none"` restores reference-only atoms, `feedback=false` omits
+  the pair list; historical fields are unchanged. New core
+  `ai_r.events.plan_feedback`; scenarios PLAN-6..8, BODY-5. (v2 —
+  draft version numbering, quote→section anchoring, `rounds` — is a
+  separate follow-up iteration.)
+
 - **Token usage in stats (F3.3)**: `session_stats` gains
   `with_tokens=true` and `aggregate` gains the `tokens` metric. Per
   session the usage is read from the agent's own files **at request

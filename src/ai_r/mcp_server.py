@@ -79,6 +79,7 @@ from ai_r.redact import (  # noqa: E402
 from ai_r.events import (  # noqa: E402
     query as _query_core,
     plan as _plan_core,
+    plan_feedback as _plan_feedback_core,
     get_body as _get_body_core,
     aggregate as _aggregate_core,
     diff as _diff_core,
@@ -801,7 +802,7 @@ def read_session(
     matches: List[Session] = []
     value_errors: List[str] = []
     for agent_name in targets:
-        parser: Optional[ParserModule] = _PARSERS[agent_name]
+        parser = _PARSERS[agent_name]
         try:
             matches.append(parser.read_session(uuid))
         except ValueError as exc:
@@ -844,11 +845,11 @@ def read_session(
     # Read the raw structured messages ONCE: the projection consumes them
     # below and the outcome classifier (F2.3) scans the same list — no
     # second parse of the transcript.
-    parser = _PARSERS.get(session.agent)
+    session_parser: Optional[ParserModule] = _PARSERS.get(session.agent)
     raw_messages: List[Any] = []
-    if parser is not None:
+    if session_parser is not None:
         try:
-            raw_messages = parser.read_messages(session.uuid)
+            raw_messages = session_parser.read_messages(session.uuid)
         except (FileNotFoundError, ValueError, OSError):
             raw_messages = []
     projected = _project_messages(
@@ -1513,6 +1514,8 @@ def plan(
     group: str = "task",
     agent: Optional[str] = None,
     redact: bool = True,
+    bodies: str = "final",
+    feedback: bool = True,
 ) -> dict[str, Any]:
     """Normalized plan atoms for a session — final vs drafts, grouped by task.
 
@@ -1529,35 +1532,76 @@ def plan(
     Within a task the latest plan is ``final`` and earlier revisions are
     ``draft``; plans of *earlier* completed tasks are ``completed_major``.
 
+    F3.4 default schema (measured ≈×3.7 cheaper than "everything inlined"):
+    the ``final`` plan's full text is inlined (``body`` +
+    ``body_source`` — ``"approval_edited_by_user"`` when the user's
+    approval carried an edited plan, which is the AUTHORITATIVE text and
+    overrides the signal/file body, else ``"plan_signal"``); drafts stay
+    references (bodies via ``get_body``); every «plan quote → user comment»
+    pair extracted from the user's plan responses is returned under
+    ``feedback``, each with a ``ref`` (``"<session>:pf<N>"``) that
+    ``get_body`` resolves to the FULL raw response.  Only agents with an
+    interactive plan-approval flow have the feedback signal (today: Claude);
+    others honestly contribute nothing.  Technical failures and bare
+    no-comment rejections are filtered out.
+
     Args:
         session: Restrict to one session uuid (recommended).
         kind: Optional filter — ``draft`` | ``final`` | ``completed_major``.
         group: Grouping strategy; only ``"task"`` is supported.
         agent: Optional agent filter (claude/codex/opencode/antigravity/pi).
-        redact: When ``True`` (default) secrets in the emitted plan fields
-            (``title``/``steps``/``refs``…) are masked as
-            ``[REDACTED_<TYPE>]`` and the response carries a ``redactions``
-            type→count dict when any replacement happened; ``False``
-            returns raw content.
+        redact: When ``True`` (default) secrets in the emitted plan/feedback
+            fields (``title``/``steps``/``body``/``quote``/``comment``…)
+            are masked as ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement happened;
+            ``False`` returns raw content.
+        bodies: ``"final"`` (default) inlines the final plan's full text;
+            ``"none"`` restores the historical reference-only atoms.
+        feedback: ``True`` (default) adds the ``feedback`` pair list +
+            ``feedback_count``; ``False`` omits both (historical shape).
 
     Returns:
-        ``{"plans": [...], "count": N}`` (each plan carries
+        ``{"plans": [...], "count": N, "feedback": [...],
+        "feedback_count": M}`` — each plan carries
         ``id/session_id/agent/title/task_id/kind/path/steps/status/refs/
-        sha256``; bodies are on-demand via :func:`get_body`) or the standard
+        sha256`` (+ ``body``/``body_source`` on the ``final`` when
+        ``bodies="final"``); each feedback pair carries
+        ``session_id/agent/plan_id/verdict/quote/comment/ref/ts``
+        (``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode``; ``quote`` is
+        ``null`` for a free-text comment).  Draft bodies and raw responses
+        stay on-demand via :func:`get_body`.  Standard
         ``{"error": ..., "message": ...}`` dict on invalid arguments.
     """
     try:
-        plans = _plan_core(session=session, kind=kind, group=group, agent=agent)
+        plans = _plan_core(
+            session=session, kind=kind, group=group, agent=agent,
+            bodies=bodies,
+        )
+        pairs = (
+            _plan_feedback_core(session=session, agent=agent)
+            if feedback else None
+        )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
     result: dict[str, Any] = {"plans": plans, "count": len(plans)}
+    if pairs is not None:
+        result["feedback"] = pairs
+        result["feedback_count"] = len(pairs)
     # Emission-time redaction (F2.1): the core runs its internal query with
     # ``redact=False`` and defers the single masking pass to this wrapper.
     if redact:
+        redactions: dict[str, int] = {}
         redacted_plans, counts = _redact_value(plans)
         if counts:
             result["plans"] = redacted_plans
-            result["redactions"] = counts
+            _merge_redactions(redactions, counts)
+        if pairs is not None:
+            redacted_pairs, fb_counts = _redact_value(pairs)
+            if fb_counts:
+                result["feedback"] = redacted_pairs
+                _merge_redactions(redactions, fb_counts)
+        if redactions:
+            result["redactions"] = redactions
     return result
 
 

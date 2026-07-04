@@ -112,6 +112,11 @@ class _PlanSignal:
     status: Optional[str] = None
     message_index: int = -1
     task_key: str = ""
+    # The originating tool_use id (when the transcript records one) — lets
+    # the plan-response layer (F3.4) correlate a user's approval/rejection
+    # tool_result back to the exact plan revision it answered.  ``None`` for
+    # file-based signals and for transcripts that predate call ids.
+    tool_use_id: Optional[str] = None
 
 
 def _title_from_markdown_body(body: str) -> Optional[str]:
@@ -138,6 +143,8 @@ def _plan_signal_from_tool(
     if not isinstance(name, str) or not name:
         return None
     payload = _coerce_tool_input(tool.get("input", ""))
+    raw_tuid = tool.get("tool_use_id")
+    tool_use_id = raw_tuid if isinstance(raw_tuid, str) and raw_tuid else None
 
     if agent == "claude":
         if name == "ExitPlanMode":
@@ -152,6 +159,7 @@ def _plan_signal_from_tool(
                 agent_signal="claude:ExitPlanMode",
                 body=body or None,
                 message_index=message_index,
+                tool_use_id=tool_use_id,
             )
         if name in ("Write", "write", "write_file", "create_file"):
             fpath = _path_from_payload(payload)
@@ -168,6 +176,7 @@ def _plan_signal_from_tool(
                     path=fpath,
                     body=body or None,
                     message_index=message_index,
+                    tool_use_id=tool_use_id,
                 )
         return None
 
@@ -203,6 +212,7 @@ def _plan_signal_from_tool(
                 steps=steps or None,
                 status=status,
                 message_index=message_index,
+                tool_use_id=tool_use_id,
             )
         return None
 
@@ -316,6 +326,201 @@ def _plan_signals_for_session(
             signals.append(replace(sig, task_key=(sig.path or _normalize_task_key(sig.title))))
     # opencode / pi: no plan signal.
     return signals
+
+
+# --- plan responses (F3.4, INTERNAL agent-specific normalization) ----------
+# When an agent has an interactive plan-approval flow, the user's verdict on
+# a proposed plan revision comes back as a tool_result answering the plan
+# tool_use.  Today only Claude has that flow (``ExitPlanMode``); Codex
+# ``update_plan`` is fire-and-forget and Antigravity's plan is a file — no
+# response signal exists there, so those agents honestly yield nothing.
+#
+# The recognised Claude response formats (verified against real vaults):
+#
+# 1. rejection with selections — "The user doesn't want to proceed … the
+#    user said:" followed by one or more "On selected text:" blocks, each a
+#    ``> ``-quoted excerpt of the RENDERED plan plus the user's comment;
+# 2. stay-in-plan-mode — "User chose to stay in plan mode …\nComments on
+#    the plan:" followed by ``[Re: "<quote>"] <comment>`` entries;
+# 3. free-text rejection — "… the user said:" with no selection (the whole
+#    tail is one comment, quote = None);
+# 4. approval — "User has approved your plan …", optionally carrying the
+#    AUTHORITATIVE final text under "## Approved Plan (edited by user):"
+#    (the plan file on disk can diverge from what the user approved).
+#
+# Technical failures ("Tool permission request failed…", stream errors) and
+# bare no-text rejections (the user pressed reject without a word) are
+# filtered out — they carry no user signal.
+
+_TECH_FAILURE_PREFIX = "Tool permission request failed"
+_APPROVED_PREFIX = "User has approved"
+_APPROVED_EDITED_MARKER = "## Approved Plan (edited by user):"
+_STAY_PREFIX = "User chose to stay in plan mode"
+_STAY_COMMENTS_MARKER = "Comments on the plan:"
+_REJECT_PREFIX = "The user doesn't want to proceed"
+_USER_SAID_MARKER = "the user said:"
+_SELECTED_MARKER = "On selected text:"
+_RE_PAIR_RE = re.compile(r'\[Re: "(.*?)"\]', re.S)
+
+
+@dataclass(frozen=True)
+class _PlanResponse:
+    """One user response to a plan revision (internal, pre-normalization).
+
+    ``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode`` | ``approved``.
+    ``pairs`` are the extracted (quote, comment) tuples — quote is ``None``
+    for a free-text comment that selected nothing.  ``edited_body`` is the
+    authoritative user-edited plan text carried by an approval, when present.
+    ``raw`` keeps the full tool_result content for on-demand ``get_body``.
+    """
+
+    tool_use_id: str
+    verdict: str
+    raw: str
+    pairs: Tuple[Tuple[Optional[str], str], ...] = ()
+    edited_body: Optional[str] = None
+    message_index: int = -1
+    ts: Optional[str] = None
+
+
+def _parse_selected_pairs(
+    text: str,
+) -> List[Tuple[Optional[str], str]]:
+    """Split an "On selected text:" rejection tail into (quote, comment) pairs.
+
+    Free text before the first block becomes a ``(None, comment)`` pair.
+    Within a block, leading ``> ``-prefixed lines are the quote (markup the
+    UI rendered, stripped of the quote prefix); the rest is the comment.
+    """
+    pairs: List[Tuple[Optional[str], str]] = []
+    chunks = text.split(_SELECTED_MARKER)
+    preamble = chunks[0].strip()
+    if preamble:
+        pairs.append((None, preamble))
+    for chunk in chunks[1:]:
+        quote_lines: List[str] = []
+        comment_lines: List[str] = []
+        in_quote = True
+        for line in chunk.lstrip("\n").splitlines():
+            if in_quote and line.startswith(">"):
+                quote_lines.append(
+                    line[2:] if line.startswith("> ") else line[1:]
+                )
+            else:
+                in_quote = False
+                comment_lines.append(line)
+        quote = "\n".join(quote_lines).strip()
+        comment = "\n".join(comment_lines).strip()
+        if quote or comment:
+            pairs.append((quote or None, comment))
+    return pairs
+
+
+def _parse_re_pairs(text: str) -> List[Tuple[Optional[str], str]]:
+    """Split a stay-in-plan-mode comments tail into (quote, comment) pairs.
+
+    The format is ``[Re: "<quote>"] <comment>`` per entry; a comment runs
+    until the next ``[Re:`` marker (multi-line comments are common).  Free
+    text before the first marker becomes a ``(None, comment)`` pair.
+    """
+    pairs: List[Tuple[Optional[str], str]] = []
+    matches = list(_RE_PAIR_RE.finditer(text))
+    preamble = (text[: matches[0].start()] if matches else text).strip()
+    if preamble:
+        pairs.append((None, preamble))
+    for k, m in enumerate(matches):
+        end = matches[k + 1].start() if k + 1 < len(matches) else len(text)
+        quote = m.group(1).strip()
+        comment = text[m.end():end].strip()
+        if quote or comment:
+            pairs.append((quote or None, comment))
+    return pairs
+
+
+def _classify_plan_response(
+    content: str,
+) -> Optional[Tuple[str, Tuple[Tuple[Optional[str], str], ...], Optional[str]]]:
+    """Classify one plan tool_result into ``(verdict, pairs, edited_body)``.
+
+    Returns ``None`` for technical failures, bare no-text rejections and any
+    unrecognised format — filtered, never guessed.
+    """
+    text = content or ""
+    if not text.strip() or text.startswith(_TECH_FAILURE_PREFIX):
+        return None
+    if text.startswith(_APPROVED_PREFIX):
+        edited: Optional[str] = None
+        if _APPROVED_EDITED_MARKER in text:
+            edited = text.split(_APPROVED_EDITED_MARKER, 1)[1].lstrip("\n")
+        return ("approved", (), edited or None)
+    if text.startswith(_STAY_PREFIX):
+        if _STAY_COMMENTS_MARKER in text:
+            tail = text.split(_STAY_COMMENTS_MARKER, 1)[1]
+        else:
+            tail = "\n".join(text.splitlines()[1:])
+        pairs = tuple(_parse_re_pairs(tail))
+        return ("stay_in_plan_mode", pairs, None) if pairs else None
+    if text.startswith(_REJECT_PREFIX) or _SELECTED_MARKER in text:
+        if _USER_SAID_MARKER in text:
+            tail = text.split(_USER_SAID_MARKER, 1)[1]
+        elif _SELECTED_MARKER in text:
+            tail = text[text.index(_SELECTED_MARKER):]
+        else:
+            return None  # bare rejection — no user words, no signal
+        pairs = tuple(_parse_selected_pairs(tail))
+        return ("rejected", pairs, None) if pairs else None
+    return None
+
+
+def _plan_responses_for_session(
+    messages: Sequence[Any],
+    *,
+    agent: str,
+) -> List[_PlanResponse]:
+    """Return the ordered user responses to plan revisions in one session.
+
+    Only agents with an interactive plan-approval flow produce responses —
+    today that is Claude's ``ExitPlanMode``.  Every other agent returns an
+    empty list (honest absence, never fabricated).  Order is message order;
+    the list index is the stable ``pf<N>`` ordinal that ``get_body`` resolves.
+    """
+    if agent != "claude":
+        return []
+    plan_call_ids = set()
+    for msg in messages:
+        for tu in getattr(msg, "tool_use", ()) or ():
+            if isinstance(tu, dict) and tu.get("name") == "ExitPlanMode":
+                tid = tu.get("tool_use_id")
+                if isinstance(tid, str) and tid:
+                    plan_call_ids.add(tid)
+    if not plan_call_ids:
+        return []
+    responses: List[_PlanResponse] = []
+    for idx, msg in enumerate(messages):
+        msg_ts = to_utc_aware(getattr(msg, "timestamp", None))
+        ts_iso = iso(msg_ts) if msg_ts is not None else None
+        for tr in getattr(msg, "tool_result", ()) or ():
+            if not isinstance(tr, dict):
+                continue
+            tid = tr.get("tool_use_id")
+            if not (isinstance(tid, str) and tid in plan_call_ids):
+                continue
+            raw = tr.get("content")
+            raw = raw if isinstance(raw, str) else str(raw or "")
+            classified = _classify_plan_response(raw)
+            if classified is None:
+                continue
+            verdict, pairs, edited = classified
+            responses.append(_PlanResponse(
+                tool_use_id=tid,
+                verdict=verdict,
+                raw=raw,
+                pairs=pairs,
+                edited_body=edited,
+                message_index=idx,
+                ts=ts_iso,
+            ))
+    return responses
 
 
 def _messages_to_events(

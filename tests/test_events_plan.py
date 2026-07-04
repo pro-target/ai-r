@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_r.events import get_body, iter_events, plan, query
+from ai_r.events import get_body, iter_events, plan, plan_feedback, query
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +223,158 @@ def test_get_body_shallow_returns_final_without_draft_bodies(
     # Both draft ids were dropped (none of their bodies surfaced).
     dropped = set(shallow["dropped_drafts"])
     assert {d["id"] for d in drafts} == dropped
+
+
+# ---------------------------------------------------------------------------
+# F3.4 v1 — final plan body inline + «quote → comment» feedback pairs
+# ---------------------------------------------------------------------------
+
+
+def test_plan_inlines_final_body_by_default(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft)
+    finals = [p for p in plans if p["kind"] == "final"]
+    drafts = [p for p in plans if p["kind"] == "draft"]
+    assert len(finals) == 1
+    # The final's full text is inlined; source is the plan signal (no
+    # approval carried an edited body in this fixture).
+    assert "Final plan." in finals[0]["body"]
+    assert finals[0]["body_source"] == "plan_signal"
+    # Drafts stay references — no body key ever.
+    assert all("body" not in d for d in drafts)
+
+
+def test_plan_bodies_none_restores_reference_only_shape(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft, bodies="none")
+    assert all("body" not in p and "body_source" not in p for p in plans)
+
+
+def test_plan_bodies_invalid_raises(fake_claude_plan_redraft: str) -> None:
+    with pytest.raises(ValueError):
+        plan(session=fake_claude_plan_redraft, bodies="all")
+
+
+def test_plan_final_body_prefers_approval_edited_text(
+    fake_claude_plan_feedback: str,
+) -> None:
+    # The approval tool_result carried "## Approved Plan (edited by user):"
+    # — the AUTHORITATIVE text; it must override the ExitPlanMode input body.
+    finals = plan(session=fake_claude_plan_feedback, kind="final")
+    assert len(finals) == 1
+    assert "EDITED final body by user." in finals[0]["body"]
+    assert "Draft three body." not in finals[0]["body"]
+    assert finals[0]["body_source"] == "approval_edited_by_user"
+
+
+def test_plan_codex_final_body_is_honest_null(
+    fake_codex_plan_session: str,
+) -> None:
+    # Codex update_plan carries steps, never a text body → honest None.
+    final = plan(session=fake_codex_plan_session, kind="final")[0]
+    assert final["body"] is None
+    assert final["body_source"] is None
+    assert final["steps"]  # steps still enriched
+
+
+def test_plan_feedback_extracts_all_pairs_chronologically(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # pf0 (rejected): free-text preamble + 2 selections; pf1 (stay): 2 [Re:]
+    # pairs.  The tu-plan-0 technical failure and the tu-plan-3 approval
+    # contribute no pairs.
+    assert [(p["quote"], p["verdict"]) for p in pairs] == [
+        (None, "rejected"),
+        ("Draft one body.", "rejected"),
+        ("Feature Plan", "rejected"),
+        ("Draft two body.", "stay_in_plan_mode"),
+        ("rollout", "stay_in_plan_mode"),
+    ]
+    assert pairs[0]["comment"] == "Overall too vague."
+    assert pairs[2]["comment"] == "Rename the feature."
+    # Multi-line comment survives verbatim.
+    assert pairs[4]["comment"] == (
+        "Which rollout?\nMore thoughts on a second line."
+    )
+    # Every pair carries ts + agent.
+    assert all(p["agent"] == "claude" and p["ts"] for p in pairs)
+
+
+def test_plan_feedback_binds_pairs_to_the_answered_revision(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    plans = plan(session=fake_claude_plan_feedback, bodies="none")
+    # Plan events are ordered tu-plan-0..3; the rejection answered the
+    # SECOND revision, the stay-in-plan-mode the THIRD.
+    ids = [p["id"] for p in plans]
+    assert {p["plan_id"] for p in pairs if p["verdict"] == "rejected"} == {
+        ids[1]
+    }
+    assert {
+        p["plan_id"] for p in pairs if p["verdict"] == "stay_in_plan_mode"
+    } == {ids[2]}
+
+
+def test_plan_feedback_refs_resolve_to_raw_response(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # Filtered responses shift the ordinals: the technical failure is NOT
+    # pf0 — the rejection is.
+    rejected_ref = pairs[0]["ref"]
+    assert rejected_ref == f"{fake_claude_plan_feedback}:pf0"
+    body = get_body(rejected_ref, redact=False)
+    assert body["type"] == "plan_feedback"
+    assert body["verdict"] == "rejected"
+    # The RAW response is returned whole — boilerplate included.
+    assert body["text"].startswith("The user doesn't want to proceed")
+    assert "On selected text:" in body["text"]
+    assert body["plan_id"] == pairs[0]["plan_id"]
+    assert [p["quote"] for p in body["pairs"]] == [
+        None, "Draft one body.", "Feature Plan",
+    ]
+
+
+def test_get_body_feedback_ref_redacts_secrets(
+    fake_claude_plan_feedback: str,
+) -> None:
+    ref = f"{fake_claude_plan_feedback}:pf0"
+    body = get_body(ref)  # redact=True default
+    assert "abc12345secret" not in body["text"]
+    assert "[REDACTED_GENERIC_SECRET]" in body["text"]
+    assert body["redactions"]["GENERIC_SECRET"] >= 1
+
+
+def test_get_body_feedback_ref_out_of_range_is_not_found(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = get_body(f"{fake_claude_plan_feedback}:pf99")
+    assert res["error"] == "not_found"
+
+
+def test_get_body_feedback_ref_unknown_session_is_not_found() -> None:
+    assert get_body("no-such-session:pf0")["error"] == "not_found"
+
+
+def test_plan_feedback_empty_for_agents_without_signal(
+    fake_codex_plan_session: str,
+    fake_antigravity_plan_brain: str,
+) -> None:
+    # Codex update_plan is fire-and-forget; Antigravity's plan is a file —
+    # no approval flow, no feedback signal → honest empty, not fabricated.
+    assert plan_feedback(session=fake_codex_plan_session) == []
+    assert plan_feedback(session=fake_antigravity_plan_brain) == []
+
+
+def test_plan_feedback_empty_without_responses(
+    fake_claude_plan_redraft: str,
+) -> None:
+    # A claude session whose ExitPlanMode calls got no recorded verdicts.
+    assert plan_feedback(session=fake_claude_plan_redraft) == []
 
 
 # ---------------------------------------------------------------------------

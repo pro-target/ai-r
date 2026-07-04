@@ -63,6 +63,7 @@ from ai_r.events.plan import (
     Plan,
     get_body,
     plan,
+    plan_feedback,
 )
 from ai_r.events.aggregate import aggregate
 from ai_r.events.diff import diff
@@ -138,6 +139,7 @@ __all__ = [
     "reaction",
     "Plan",
     "plan",
+    "plan_feedback",
     "get_body",
     "aggregate",
     "diff",

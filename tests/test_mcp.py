@@ -2766,3 +2766,80 @@ def test_plan_over_mcp_client(fake_codex_plan_session: str) -> None:
     payload = json.loads(out[0])
     assert payload["count"] == 3
     assert payload["plans"][-1]["kind"] == "final"
+
+
+# ---------------------------------------------------------------------------
+# plan F3.4 v1: final body inline + feedback pairs + raw-response refs
+# ---------------------------------------------------------------------------
+
+
+def test_plan_tool_default_schema_f34(fake_claude_plan_feedback: str) -> None:
+    res = plan(session=fake_claude_plan_feedback)
+    # Final body inline by default; authoritative approval-edited text wins.
+    final = [p for p in res["plans"] if p["kind"] == "final"][0]
+    assert "EDITED final body by user." in final["body"]
+    assert final["body_source"] == "approval_edited_by_user"
+    # Drafts stay references.
+    assert all(
+        "body" not in p for p in res["plans"] if p["kind"] == "draft"
+    )
+    # All quote→comment pairs ride along, with counts.
+    assert res["feedback_count"] == 5
+    assert len(res["feedback"]) == 5
+    first = res["feedback"][0]
+    assert set(first) == {
+        "session_id", "agent", "plan_id", "verdict", "quote", "comment",
+        "ref", "ts",
+    }
+
+
+def test_plan_tool_feedback_redacted_by_default(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback)
+    comments = " ".join(p["comment"] for p in res["feedback"])
+    assert "abc12345secret" not in comments
+    assert "[REDACTED_GENERIC_SECRET]" in comments
+    assert res["redactions"]["GENERIC_SECRET"] >= 1
+    # redact=False returns the raw comment.
+    raw = plan(session=fake_claude_plan_feedback, redact=False)
+    assert any(
+        "abc12345secret" in p["comment"] for p in raw["feedback"]
+    )
+
+
+def test_plan_tool_historical_shape_switches(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(
+        session=fake_claude_plan_feedback, bodies="none", feedback=False
+    )
+    assert "feedback" not in res and "feedback_count" not in res
+    assert all("body" not in p for p in res["plans"])
+
+
+def test_plan_tool_invalid_bodies_returns_error(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback, bodies="everything")
+    assert res["error"] == "invalid_argument"
+
+
+def test_get_body_feedback_ref_over_mcp_client(
+    fake_claude_plan_feedback: str,
+) -> None:
+    ref = plan(session=fake_claude_plan_feedback)["feedback"][0]["ref"]
+    out = _run(_call("get_body", {"id": ref}))
+    payload = json.loads(out[0])
+    assert payload["type"] == "plan_feedback"
+    assert payload["verdict"] == "rejected"
+    assert payload["text"].startswith("The user doesn't want to proceed")
+
+
+def test_plan_tool_feedback_empty_for_codex(
+    fake_codex_plan_session: str,
+) -> None:
+    res = plan(session=fake_codex_plan_session, agent="codex")
+    # No approval flow → honest empty feedback, plans untouched.
+    assert res["feedback"] == [] and res["feedback_count"] == 0
+    assert res["count"] == 3
