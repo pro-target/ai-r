@@ -23,6 +23,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import to_utc_aware
 from ai_r.parsers import PARSERS, Message, iso, target_agents
+from ai_r.parsers._noise import noise_allows, validate_noise
 
 from ai_r.events._common import (
     Event,
@@ -458,6 +459,7 @@ def iter_events(
     agent: Optional[str] = None,
     *,
     session: Optional[str] = None,
+    noise: str = "include",
 ) -> Iterable[Event]:
     """Yield the normalized Event stream across sessions, cross-agent.
 
@@ -466,17 +468,25 @@ def iter_events(
             = every agent.
         session: Optional session-uuid filter; restrict the scan to a
             single session (cheap fast-path for ``relative_to`` walks).
+        noise: Session-level noise filter (see
+            :mod:`ai_r.parsers._noise`): ``"include"`` (default, no
+            filtering), ``"exclude"`` (drop subagent sessions), ``"only"``
+            (keep only subagent sessions).  Applied *before* reading
+            messages, so excluded sessions cost nothing.
 
     Yields:
         :class:`Event` records in per-session, chronological (parse)
         order.  Sessions that fail to read are skipped (an audit tool
         prefers a partial view to a crash), mirroring ``find_file_edits``.
     """
+    validate_noise(noise)
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
         for sess in parser.list_sessions():
             if session is not None and sess.uuid != session:
+                continue
+            if not noise_allows(sess, noise):
                 continue
             try:
                 messages = parser.read_messages(sess.uuid)

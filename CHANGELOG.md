@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session-level `noise` filter (F1.2)**: `query`, `list_sessions` and
+  `search_sessions` take `noise=exclude|include|only` (default `include`
+  — fully backward-compatible). A session is *noise* when it is a spawned
+  subagent/sidechain session (`kind == "subagent"` or `parent_uuid` set);
+  criterion SSOT in `src/ai_r/parsers/_noise.py`. The filter applies
+  before any message is read, composes with the other filters by AND, and
+  fails loud (`invalid_argument`) on an unknown mode. See
+  `docs/methods.md` → *Noise filter (session-level)*.
+- **Cross-agent subagent detection**: `kind`/`parent_uuid` are now
+  populated for OpenCode (`session.parent_id` — previously the parent was
+  read but `kind` stayed `"agent"`), Codex
+  (`session_meta.payload.thread_source == "subagent"` +
+  `parent_thread_id`, incl. the nested
+  `source.subagent.thread_spawn.parent_thread_id` fallback — previously
+  ignored) and Pi (`parentSession` promoted from `extra` to the
+  first-class fields). Claude was already covered; Antigravity's format
+  carries no parent signal and always reports `kind="agent"`.
 - **Empty-result diagnostics**: a zero-result response of `query` /
   `search_sessions` / `find_tool_calls` / `find_file_edits` /
   `list_sessions` now carries a `diagnostics` object (per-agent scan

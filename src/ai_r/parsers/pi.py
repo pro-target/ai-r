@@ -199,6 +199,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     if cwd:
         extra["cwd"] = cwd
     if parent_session:
+        # Kept in ``extra`` for backward compatibility; the first-class
+        # fields below are the canonical surface.
         extra["parent_session"] = parent_session
 
     return Session(
@@ -208,6 +210,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         date=timestamp,
         path=str(jsonl_path),
         message_count=message_count,
+        parent_uuid=parent_session,
+        kind="subagent" if parent_session else "agent",
         extra=extra,
     )
 

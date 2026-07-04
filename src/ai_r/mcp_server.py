@@ -67,6 +67,7 @@ from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noq
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import Session  # noqa: E402
+from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
 from ai_r.events import (  # noqa: E402
     query as _query_core,
@@ -513,6 +514,7 @@ def list_sessions(
     limit: int = _LIST_LIMIT_DEFAULT,
     offset: int = 0,
     kind: Optional[str] = None,
+    noise: str = "include",
 ) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
@@ -522,10 +524,9 @@ def list_sessions(
 
     Each summary carries ``kind`` (``"agent"`` for a top-level session,
     ``"subagent"`` for a spawned subagent/sidechain) and ``parent_uuid``
-    (the parent session's uuid for subagents, else ``None``).  NOTE:
-    subagent-tree detection is currently implemented for **Claude only**;
-    every other agent always reports ``kind="agent"``.  This is a scope
-    boundary, not a bug.
+    (the parent session's uuid for subagents, else ``None``).  Subagent
+    detection covers Claude, OpenCode, Codex and Pi; Antigravity's format
+    has no parent signal, so it always reports ``kind="agent"``.
 
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
@@ -537,15 +538,20 @@ def list_sessions(
         kind: Optional filter. ``"agent"`` returns only top-level sessions,
             ``"subagent"`` returns only subagent sessions. When omitted
             (default), both kinds are returned.
+        noise: Noise filter — a session is *noise* when it is a spawned
+            subagent (``kind == "subagent"`` or ``parent_uuid`` set).
+            ``"include"`` (default) returns everything, ``"exclude"`` drops
+            noise sessions, ``"only"`` returns only noise sessions.
+            ``kind`` and ``noise`` compose (AND).
 
     Returns:
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
         "truncated": bool}``. ``total`` is the full count matching the
-        ``agent`` (and ``kind``) filter; ``truncated`` is True when more
-        sessions remain beyond this page.  When ``total == 0`` the dict
-        additionally carries ``diagnostics`` (scanned agents + session
-        counts, source-dir presence, cause hints) so an empty inventory
-        is explainable.
+        ``agent`` (and ``kind``/``noise``) filter; ``truncated`` is True
+        when more sessions remain beyond this page.  When ``total == 0``
+        the dict additionally carries ``diagnostics`` (scanned agents +
+        session counts, source-dir presence, cause hints) so an empty
+        inventory is explainable.
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         return {"error": "invalid_argument",
@@ -556,6 +562,10 @@ def list_sessions(
     if kind is not None and kind not in ("agent", "subagent"):
         return {"error": "invalid_argument",
                 "message": f"kind must be 'agent', 'subagent' or null, got {kind!r}"}
+    if noise not in NOISE_MODES:
+        return {"error": "invalid_argument",
+                "message": f"noise must be one of {'/'.join(NOISE_MODES)}, "
+                           f"got {noise!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -566,6 +576,8 @@ def list_sessions(
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
             if kind is not None and session.kind != kind:
+                continue
+            if not noise_allows(session, noise):
                 continue
             summaries.append(_session_summary(session))
 
@@ -584,7 +596,12 @@ def list_sessions(
     }
     if total == 0:
         result["diagnostics"] = _empty_diagnostics(
-            agent=agent, filters={"kind": kind},
+            agent=agent,
+            filters={
+                "kind": kind,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
+            },
         )
     return result
 
@@ -896,6 +913,7 @@ def search_sessions(
     operator: str = "AND",
     limit: int = 50,
     sort: str = "relevance",
+    noise: str = "include",
 ) -> dict[str, Any]:
     """Case-insensitive search across sessions.
 
@@ -923,6 +941,13 @@ def search_sessions(
               (default).  Pure-stdlib scoring; ties keep newest-first.
             * ``"date"`` — newest-first by session date (the historical
               pre-ranking order).
+        noise: Noise filter — a session is *noise* when it is a spawned
+            subagent (``kind == "subagent"`` or ``parent_uuid`` set).
+            * ``"include"`` — no filtering (default).
+            * ``"exclude"`` — search only top-level agent sessions.
+            * ``"only"``    — search only subagent sessions.
+            Applied *before* matching, so excluded sessions never pay
+            the body-scan cost.
 
     Returns:
         A dict ``{"results": [...], "count": N}`` where ``results`` is the
@@ -967,6 +992,13 @@ def search_sessions(
             "message": f"unknown sort {sort!r}; expected relevance or date",
         }
 
+    if noise not in NOISE_MODES:
+        return {
+            "error": "invalid_argument",
+            "message": f"noise must be one of {'/'.join(NOISE_MODES)}, "
+                       f"got {noise!r}",
+        }
+
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -982,6 +1014,8 @@ def search_sessions(
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
+            if not noise_allows(session, noise):
+                continue
             matched = False
             snippet_text = ""
             score_text = ""
@@ -1057,7 +1091,13 @@ def search_sessions(
     if not summaries:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,
-            filters={"query": needle, "scope": scope, "operator": op_upper},
+            filters={
+                "query": needle,
+                "scope": scope,
+                "operator": op_upper,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
+            },
         )
     return result
 
@@ -1079,6 +1119,7 @@ def query(
     step_type: str = "user_turn",
     limit: int = 0,
     with_intent: bool = False,
+    noise: str = "include",
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
@@ -1116,6 +1157,13 @@ def query(
     tools use) to every returned event.  Default ``False`` keeps the base
     event shape unchanged.
 
+    ``noise`` filters at the *session* level before events are read — a
+    session is noise when it is a spawned subagent (``kind == "subagent"``
+    or ``parent_uuid`` set): ``"include"`` (default, no filtering),
+    ``"exclude"`` (top-level sessions only), ``"only"`` (subagent sessions
+    only).  Ignored on the ``relative_to`` walk, like every other filter
+    facet.
+
     ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
     **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
     non-``None`` value is a fail-loud error (returns the standard
@@ -1144,6 +1192,7 @@ def query(
             step_type=step_type,
             limit=limit,
             with_intent=with_intent,
+            noise=noise,
             kind=kind,
             parent=parent,
             group=group,
@@ -1163,6 +1212,8 @@ def query(
                 "tool": tool,
                 "text": text,
                 "relative_to": relative_to,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
             },
         )
     return result

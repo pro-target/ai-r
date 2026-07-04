@@ -134,6 +134,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     cwd: Optional[str] = None
     timestamp: Optional[datetime] = None
     title: Optional[str] = None
+    parent_uuid: Optional[str] = None
+    is_subagent = False
     message_count = 0
 
     for record in iter_jsonl_records(jsonl_path):
@@ -157,6 +159,28 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
             meta_ts = _parse_iso_timestamp(payload.get("timestamp", ""))
             if meta_ts is not None:
                 timestamp = meta_ts
+            # Subagent signal: ``thread_source ∈ {"user", "subagent"}`` plus a
+            # flat ``parent_thread_id``; older/newer layouts may carry the
+            # parent only in the nested ``source.subagent.thread_spawn`` blob,
+            # so read both (flat wins when present).
+            if payload.get("thread_source") == "subagent":
+                is_subagent = True
+            parent_val = payload.get("parent_thread_id")
+            if not isinstance(parent_val, str) or not parent_val:
+                source = payload.get("source")
+                spawn = (
+                    source.get("subagent", {}).get("thread_spawn", {})
+                    if isinstance(source, dict)
+                    and isinstance(source.get("subagent"), dict)
+                    else {}
+                )
+                parent_val = (
+                    spawn.get("parent_thread_id")
+                    if isinstance(spawn, dict) else None
+                )
+            if isinstance(parent_val, str) and parent_val:
+                parent_uuid = parent_val
+                is_subagent = True
             continue
 
         if (
@@ -203,6 +227,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         date=timestamp,
         path=str(jsonl_path),
         message_count=message_count,
+        parent_uuid=parent_uuid,
+        kind="subagent" if is_subagent else "agent",
         extra={"cwd": cwd} if cwd else {},
     )
 

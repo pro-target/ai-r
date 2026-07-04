@@ -40,11 +40,11 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 45 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 48 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 8 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
+| `query` | 9 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
 | `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
@@ -53,10 +53,10 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 45 LLM-executed end-to-end
 | `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
+| `list_sessions` | 2 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
-| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
+| `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
 | empty-result diagnostics (cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
 | CLI error contract | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
 
@@ -133,6 +133,14 @@ parameters. Events carry **references** (`refs`), never inlined bodies.
 - **Steps:** `mcp__ai-r__query(agent="claude", type="tool_call", session="<uuid>")`; inspect `is_error` on the events; cross-check the failed one against `read_session` (it should render `[tool_result ERROR: …]`).
 - **Expected:** `tool_call` events carry an `is_error` ref — `True` for the known-failed call, `False`/absent for succeeded ones; the bare `type="tool_call"` filter still returns EVERY tool call (the outcome ref does not add/drop events or change `count`).
 - **Pass criteria:** GO when `is_error` reflects the real outcome for Claude/OpenCode and the bare `tool_call` count is unchanged by the ref. Codex/Pi always reporting `is_error=False` (no source flag) and Antigravity emitting no tool results are **documented** cross-agent limitations (see `docs/methods.md` → *Output bounds & tool-call outcome*), not failures.
+
+### QRY-9 — session-level `noise` filter (subagent sessions)
+- **Function:** `query`
+- **Goal:** `noise=exclude` drops every event coming from a subagent session; `noise=only` returns exclusively those; an unknown mode fails loud.
+- **Preconditions:** One top-level session + one subagent session for the same agent (any of claude/codex/opencode/pi). `[hermetic-ok]` (seed a fake parent + subagent pair under `AI_R_HOME`).
+- **Steps:** `mcp__ai-r__query(agent="<agent>")` (default `noise="include"`); then the same call with `noise="exclude"`; then `noise="only"`; then `noise="bogus"`.
+- **Expected:** `include` returns events of both sessions; `exclude` returns only events whose `session_id` is the top-level session; `only` returns only the subagent session's events; `set(exclude) ∪ set(only) == set(include)` and the two are disjoint; `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
+- **Pass criteria:** GO when the three modes partition the event stream exactly by session kind and the unknown mode is a loud error, never a silently unfiltered result.
 
 ---
 
@@ -379,7 +387,15 @@ Cross-agent session inventory: newest-first, paginated, each summary self-descri
 - **Preconditions:** A vault with sessions from at least one agent. `[needs-real-vault]`.
 - **Steps:** `mcp__ai-r__list_sessions(limit=5)`; then `mcp__ai-r__list_sessions(agent="claude", limit=5)`.
 - **Expected:** At most 5 summaries, sorted by date newest-first; each carries a session id, `agent`, date, `kind` (`"agent"`/`"subagent"`) and `parent_uuid`; a `truncated` flag is set when more sessions remain. The `agent="claude"` call returns only Claude sessions.
-- **Pass criteria:** GO when results honor `limit`, are date-descending, the agent filter narrows the set, and every summary carries `kind` + `parent_uuid`. (Subagent-tree detection being Claude-only — non-Claude always `kind="agent"` — is a documented scope boundary, not a NO-GO.)
+- **Pass criteria:** GO when results honor `limit`, are date-descending, the agent filter narrows the set, and every summary carries `kind` + `parent_uuid`. (Subagent detection covers Claude/OpenCode/Codex/Pi; Antigravity has no parent signal and always reports `kind="agent"` — a documented format boundary, not a NO-GO.)
+
+### LIST-2 — `noise` filter splits top-level vs subagent sessions
+- **Function:** `list_sessions`
+- **Goal:** `noise=exclude|include|only` partitions the inventory by the noise criterion (subagent sessions), composes with `kind` by AND, and fails loud on an unknown mode.
+- **Preconditions:** One top-level + one subagent session for the same agent. `[hermetic-ok]` (seed a fake parent + subagent pair under `AI_R_HOME`; for OpenCode use a fixture DB with `session.parent_id`).
+- **Steps:** `mcp__ai-r__list_sessions(agent="<agent>")`; then `noise="exclude"`; then `noise="only"`; then the contradictory `kind="agent", noise="only"`; then `noise="bogus"`.
+- **Expected:** Default (`include`) lists both sessions; `exclude` lists only the top-level one; `only` lists only the subagent (its summary carries `kind="subagent"` and the correct `parent_uuid`); `exclude`+`only` partition `include` (disjoint, union == all); the contradictory combination returns `total == 0` **with** `diagnostics`; `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
+- **Pass criteria:** GO when the three modes partition the inventory exactly, `kind` and `noise` AND together, and the unknown mode is a loud error.
 
 ---
 
@@ -478,6 +494,14 @@ Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`
 - **Steps:** run the same two terms with `operator="AND"` then `operator="OR"`; then a query with a `-<term>` negative prefix; then a `"quoted phrase"`.
 - **Expected:** Each call returns `{"results": [...], "count": N}`; comparing the `results` lists, `OR` never returns fewer than `AND` (`set(AND) ⊆ set(OR)`); a `-term` excludes every session containing that term regardless of operator; a quoted phrase matches only the contiguous phrase, not the words scattered.
 - **Pass criteria:** GO when, over the `results` of each wrapper, `set(AND) ⊆ set(OR)`, the negative term removes all its matches, and the quoted phrase matches contiguously.
+
+### SRCH-4 — `noise` filter: exclude/only the subagent tree
+- **Function:** `search_sessions`
+- **Goal:** A term that matches only inside a subagent session disappears under `noise="exclude"` and survives under `noise="only"`; an unknown mode fails loud.
+- **Preconditions:** One top-level + one subagent session for the same agent, where a distinctive term occurs only in the subagent's body. `[hermetic-ok]` (seed a fake parent + subagent pair under `AI_R_HOME`).
+- **Steps:** `mcp__ai-r__search_sessions(query="<term>", agent="<agent>", scope="body")` (default include); then the same with `noise="exclude"`; then `noise="only"`; then `noise="bogus"`.
+- **Expected:** Default and `only` return the subagent session; `exclude` returns zero results (plus `diagnostics` echoing `noise`); `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
+- **Pass criteria:** GO when the subagent match is present under include/only, absent under exclude, and the unknown mode errors loudly instead of silently ignoring the filter.
 
 ---
 

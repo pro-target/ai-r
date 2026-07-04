@@ -228,6 +228,168 @@ def fake_codex_session(tmp_sessions_dir: Path) -> Path:
 
 
 @pytest.fixture
+def fake_codex_subagent(tmp_sessions_dir: Path) -> Path:
+    """A Codex *subagent* rollout: ``session_meta.payload.thread_source ==
+    "subagent"`` plus a flat ``parent_thread_id`` and the nested
+    ``source.subagent.thread_spawn`` blob (mirrors real rollouts)."""
+    uuid = "test-codex-sub-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T11-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T11:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "cwd": "/tmp/work",
+                    "timestamp": "2026-06-14T11:00:00Z",
+                    "thread_source": "subagent",
+                    "parent_thread_id": "test-codex-1",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "test-codex-1",
+                                "depth": 1,
+                                "agent_nickname": "Galileo",
+                                "agent_role": "explorer",
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Explore the repo"}],
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Explored."}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_codex_subagent_nested_only(tmp_sessions_dir: Path) -> Path:
+    """A Codex subagent rollout WITHOUT the flat ``parent_thread_id`` —
+    the parent lives only in ``source.subagent.thread_spawn`` (fallback
+    branch of the parser)."""
+    uuid = "test-codex-sub-2"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T12-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "cwd": "/tmp/work",
+                    "timestamp": "2026-06-14T12:00:00Z",
+                    "thread_source": "subagent",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "test-codex-1",
+                                "depth": 1,
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-06-14T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Nested spawn"}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_pi_subagent(tmp_sessions_dir: Path) -> Path:
+    """A Pi session whose header carries ``parentSession`` (spawned child)."""
+    uuid = "test-pi-sub-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-work--"
+        / f"2026-06-14T11-00-00-000Z_{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "session",
+                "version": 3,
+                "id": uuid,
+                "timestamp": "2026-06-14T11:00:00.000Z",
+                "cwd": "/tmp/work",
+                "parentSession": "test-pi-1",
+            },
+            {
+                "type": "message",
+                "id": "user-1",
+                "parentId": None,
+                "timestamp": "2026-06-14T11:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Child task"}],
+                    "timestamp": 1_718_363_602_000,
+                },
+            },
+            {
+                "type": "message",
+                "id": "assistant-1",
+                "parentId": "user-1",
+                "timestamp": "2026-06-14T11:00:04.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Child done."}],
+                    "timestamp": 1_718_363_604_000,
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
 def fake_pi_session(tmp_sessions_dir: Path) -> Path:
     """A single Pi JSONL session inside the fake sessions tree."""
     uuid = "test-pi-1"

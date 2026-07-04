@@ -54,15 +54,21 @@ class Session:
             for Antigravity this is the number of records in the
             overview.txt / transcript.jsonl; for Pi this is the number
             of user/assistant message entries.
-        parent_uuid: For OpenCode sub-sessions (``session.parent_id``)
-            and for Claude subagent sessions (the parent session uuid
-            inferred from the ``subagents/`` directory layout or the
-            ``parentUuid`` field of an inline sidechain record).  ``None``
-            for top-level sessions and for agents without subagent support.
+        parent_uuid: Parent session uuid for spawned sub-sessions:
+            Claude (inferred from the ``subagents/`` directory layout or
+            the ``parentUuid`` field of an inline sidechain record),
+            OpenCode (``session.parent_id``), Codex
+            (``session_meta.payload.parent_thread_id`` or the nested
+            ``source.subagent.thread_spawn.parent_thread_id``), Pi
+            (the ``parentSession`` header field).  ``None`` for top-level
+            sessions and for Antigravity (no parent signal in the format).
         kind: ``"agent"`` for a normal top-level session, ``"subagent"``
             for a spawned subagent (sidechain) session.  Defaults to
-            ``"agent"``.  Subagent detection is currently implemented only
-            for Claude; every other parser leaves this at ``"agent"``.
+            ``"agent"``.  Detected for Claude, OpenCode, Codex and Pi;
+            Antigravity has no subagent signal and always reports
+            ``"agent"``.  Kept consistent with ``parent_uuid`` (a session
+            with a parent is a subagent); the noise criterion lives in
+            :mod:`ai_r.parsers._noise`.
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.

@@ -16,6 +16,8 @@ from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
 from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 
+from ai_r.parsers._noise import validate_noise
+
 from ai_r.events._common import Event
 from ai_r.events.model import iter_events
 
@@ -152,6 +154,7 @@ def query(
     step_type: str = "user_turn",
     limit: int = 0,
     with_intent: bool = False,
+    noise: str = "include",
     # --- Phase-2/3 placeholders (accepted, TODO not-yet-implemented) ---
     kind: Optional[str] = None,
     parent: Optional[str] = None,
@@ -188,6 +191,13 @@ def query(
       Default ``False`` so the base event shape is unchanged.  This is what
       lets ``diff`` / the ``find_file_edits`` preset reproduce the legacy
       ``intent`` field byte-for-byte.
+    * ``noise`` — session-level noise filter (SSOT:
+      :mod:`ai_r.parsers._noise`; noise == spawned subagent session):
+      ``"include"`` (default, no filtering), ``"exclude"`` (top-level
+      sessions only), ``"only"`` (subagent sessions only).  Applied at the
+      session level, before messages are read.  Ignored on the
+      ``relative_to`` walk (the anchor pins one concrete session), like
+      every other filter facet.
 
     ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
     — plan/subagent facets).  They are accepted in the signature for forward
@@ -208,6 +218,7 @@ def query(
         raise ValueError(
             f"sort must be 'relevance' or 'date', got {sort!r}"
         )
+    validate_noise(noise)
     # Normalize ``n``: accepts 1/all (or any positive int / "all").
     n_all = False
     n_int = 1
@@ -259,7 +270,7 @@ def query(
 
     survivors: List[Event] = []
     score_texts: List[str] = []
-    for ev in iter_events(agent, session=session):
+    for ev in iter_events(agent, session=session, noise=noise):
         if type is not None and not _type_matches(ev.type, type):
             continue
         if since_dt is not None or until_dt is not None:

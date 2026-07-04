@@ -68,6 +68,7 @@ output.
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import glob
 import hashlib
 import json
@@ -390,6 +391,9 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         path=db_path,
         message_count=0,  # filled by the caller with a per-row count
         parent_uuid=parent_id,
+        # A row with a parent is a spawned sub-session: keep ``kind``
+        # consistent with ``parent_uuid`` so kind-based filters see it.
+        kind="subagent" if parent_id else "agent",
         extra={
             "time_created": time_created,
             "time_updated": time_updated,
@@ -441,15 +445,11 @@ def list_sessions(
                     _SELECT_MESSAGE_COUNT, (sid,)
                 ).fetchone()[0]
                 session = _row_to_session(row, db_path)
-                session = Session(
-                    uuid=session.uuid,
-                    agent=session.agent,
-                    title=session.title,
-                    date=session.date,
-                    path=session.path,
-                    message_count=int(count),
-                    parent_uuid=session.parent_uuid,
-                    extra=session.extra,
+                # dataclasses.replace keeps every other field (incl. kind /
+                # parent_uuid) — a field-by-field rebuild silently dropped
+                # ``kind`` when it was added.
+                session = dataclasses.replace(
+                    session, message_count=int(count)
                 )
                 sessions.append(session)
         except sqlite3.Error:
@@ -483,16 +483,8 @@ def _read_session_by_uuid(
                 _SELECT_MESSAGE_COUNT, (uuid,)
             ).fetchone()[0]
             session = _row_to_session(row, db_path)
-            return Session(
-                uuid=session.uuid,
-                agent=session.agent,
-                title=session.title,
-                date=session.date,
-                path=session.path,
-                message_count=int(count),
-                parent_uuid=session.parent_uuid,
-                extra=session.extra,
-            )
+            # See list_sessions: replace() preserves kind / parent_uuid.
+            return dataclasses.replace(session, message_count=int(count))
         except sqlite3.Error:
             continue
     raise FileNotFoundError(f"OpenCode session {uuid!r} not found")
