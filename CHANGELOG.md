@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Empty-result diagnostics no longer re-scan the corpus**: on a
+  zero-result response, `query` / `search_sessions` / `find_tool_calls` /
+  `find_file_edits` / `list_sessions` used to call `list_sessions()` a
+  second time across every parser just to build the `diagnostics` block —
+  on a large live corpus this doubled a multi-minute scan. The callers now
+  pass the per-agent session lists they already enumerated to the
+  diagnostics builder (`scanned_sessions`); a fresh re-scan remains only
+  as a fallback when nothing was passed. Response shape is unchanged.
 - **CLI never leaks a Python traceback**: an unexpected internal error now
   exits non-zero with one structured JSON line on stderr
   (`{"error": "internal_error", ...}`) instead of a stack dump, so consumer

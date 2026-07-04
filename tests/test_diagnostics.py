@@ -14,12 +14,17 @@ host-leak), so cross-agent totals are never asserted exactly.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from ai_r import mcp_server
 from ai_r.diagnostics import empty_result_diagnostics
 from ai_r.find_file_edits import find_file_edits
 from ai_r.find_tool_calls import find_tool_calls
+from ai_r.parsers import PARSERS, AgentName
 
 
 def _by_agent(diag: dict) -> dict[str, dict]:
@@ -239,3 +244,119 @@ def test_mcp_list_sessions_nonempty_has_no_diagnostics(
     out = mcp_server.list_sessions(agent="claude")
     assert out["total"] == 1
     assert "diagnostics" not in out
+
+
+# ---------------------------------------------------------------------------
+# No-rescan: diagnostics reuse the caller's scan instead of re-listing
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def claude_list_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count every ``list_sessions()`` call on the Claude parser."""
+    parser = PARSERS[AgentName.CLAUDE]
+    calls = {"n": 0}
+    orig = parser.list_sessions
+
+    def counted(*args: object, **kwargs: object):
+        calls["n"] += 1
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(parser, "list_sessions", counted)
+    return calls
+
+
+def _fake_sessions() -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(date=datetime(2026, 6, 10, tzinfo=timezone.utc)),
+        SimpleNamespace(date=datetime(2026, 6, 20, tzinfo=timezone.utc)),
+    ]
+
+
+def test_builder_provided_sessions_skip_list_sessions(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    """Passed scan stats → aggregates come from them, zero re-listing."""
+    diag = empty_result_diagnostics(
+        agent="claude", scanned_sessions={"claude": _fake_sessions()}
+    )
+    assert claude_list_calls["n"] == 0
+    entry = _by_agent(diag)["claude"]
+    assert entry["sessions"] == 2
+    assert entry["date_min"].startswith("2026-06-10")
+    assert entry["date_max"].startswith("2026-06-20")
+    assert entry["source_found"] is True  # cheap dir probe still runs
+    assert diag["corpus"]["sessions"] == 2
+
+
+def test_builder_accepts_agentname_keys(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    diag = empty_result_diagnostics(
+        agent="claude",
+        scanned_sessions={AgentName.CLAUDE: _fake_sessions()},
+    )
+    assert claude_list_calls["n"] == 0
+    assert _by_agent(diag)["claude"]["sessions"] == 2
+
+
+def test_builder_provided_empty_list_is_not_a_rescan(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    """An explicitly provided EMPTY list means 'scanned, found none'."""
+    diag = empty_result_diagnostics(
+        agent="claude", scanned_sessions={"claude": []}
+    )
+    assert claude_list_calls["n"] == 0
+    entry = _by_agent(diag)["claude"]
+    assert entry["sessions"] == 0
+    assert "hint" in entry
+
+
+def test_builder_rescans_only_when_nothing_provided(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    """No stats passed → the documented fallback re-scan happens."""
+    diag = empty_result_diagnostics(agent="claude")
+    assert claude_list_calls["n"] == 1
+    assert _by_agent(diag)["claude"]["sessions"] == 1
+
+
+def test_mcp_query_empty_scans_corpus_once(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    out = mcp_server.query(agent="claude", type="plan_event")
+    assert out["count"] == 0 and "diagnostics" in out
+    assert claude_list_calls["n"] == 1
+
+
+def test_mcp_search_sessions_empty_scans_corpus_once(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    out = mcp_server.search_sessions(query="zzz-no-such-title", agent="claude")
+    assert out["count"] == 0 and "diagnostics" in out
+    assert claude_list_calls["n"] == 1
+
+
+def test_mcp_list_sessions_empty_scans_corpus_once(
+    claude_list_calls: dict[str, int],
+) -> None:
+    out = mcp_server.list_sessions(agent="claude")
+    assert out["total"] == 0 and "diagnostics" in out
+    assert claude_list_calls["n"] == 1
+
+
+def test_find_file_edits_empty_scans_corpus_once(
+    fake_claude_session: Path, claude_list_calls: dict[str, int]
+) -> None:
+    result = find_file_edits(path="no-such-file-xyz", agent="claude")
+    assert result["count"] == 0 and "diagnostics" in result
+    assert claude_list_calls["n"] == 1
+
+
+def test_find_tool_calls_empty_scans_corpus_once(
+    fake_claude_session_with_tools: Path, claude_list_calls: dict[str, int]
+) -> None:
+    result = find_tool_calls(tool_name="NoSuchTool", agent="claude")
+    assert result["count"] == 0 and "diagnostics" in result
+    assert claude_list_calls["n"] == 1

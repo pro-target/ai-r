@@ -159,6 +159,7 @@ def query(
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    scanned_sessions_out: Optional[dict[str, Any]] = None,
 ) -> List[dict[str, Any]]:
     """Filter/search the normalized Event stream — the Phase-1 workhorse.
 
@@ -198,6 +199,11 @@ def query(
       session level, before messages are read.  Ignored on the
       ``relative_to`` walk (the anchor pins one concrete session), like
       every other filter facet.
+
+    ``scanned_sessions_out`` is a caller-owned out-dict forwarded to
+    :func:`iter_events` — it collects the per-agent ``list_sessions()``
+    results of the scan so the MCP wrapper can build empty-result
+    diagnostics WITHOUT a second corpus walk.
 
     ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
     — plan/subagent facets).  They are accepted in the signature for forward
@@ -252,7 +258,11 @@ def query(
         # The anchor id is ``"{session}:{seq}"`` — scope the scan to that
         # session so the walk is over one contiguous timeline.
         anchor_session = relative_to.rsplit(":", 1)[0] if ":" in relative_to else session
-        stream = list(iter_events(agent, session=anchor_session or session))
+        stream = list(iter_events(
+            agent,
+            session=anchor_session or session,
+            scanned_sessions_out=scanned_sessions_out,
+        ))
         walked = _walk_relative(
             stream, relative_to, direction, n_all, n_int, step_type=step_type
         )
@@ -270,7 +280,12 @@ def query(
 
     survivors: List[Event] = []
     score_texts: List[str] = []
-    for ev in iter_events(agent, session=session, noise=noise):
+    for ev in iter_events(
+        agent,
+        session=session,
+        noise=noise,
+        scanned_sessions_out=scanned_sessions_out,
+    ):
         if type is not None and not _type_matches(ev.type, type):
             continue
         if since_dt is not None or until_dt is not None:

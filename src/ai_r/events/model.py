@@ -460,6 +460,7 @@ def iter_events(
     *,
     session: Optional[str] = None,
     noise: str = "include",
+    scanned_sessions_out: Optional[dict[str, Any]] = None,
 ) -> Iterable[Event]:
     """Yield the normalized Event stream across sessions, cross-agent.
 
@@ -473,6 +474,12 @@ def iter_events(
             filtering), ``"exclude"`` (drop subagent sessions), ``"only"``
             (keep only subagent sessions).  Applied *before* reading
             messages, so excluded sessions cost nothing.
+        scanned_sessions_out: Optional out-parameter — a dict the caller
+            owns, filled with ``{agent_label: list_sessions() result}`` as
+            each agent is scanned.  Lets the caller reuse the enumeration
+            (e.g. for empty-result diagnostics) instead of paying for a
+            second full corpus walk.  Complete only once the generator is
+            exhausted.
 
     Yields:
         :class:`Event` records in per-session, chronological (parse)
@@ -483,7 +490,10 @@ def iter_events(
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
-        for sess in parser.list_sessions():
+        sessions = parser.list_sessions()
+        if scanned_sessions_out is not None:
+            scanned_sessions_out[agent_lc] = sessions
+        for sess in sessions:
             if session is not None and sess.uuid != session:
                 continue
             if not noise_allows(sess, noise):

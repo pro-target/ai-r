@@ -572,9 +572,14 @@ def list_sessions(
         return {"error": "invalid_argument", "message": str(exc)}
 
     summaries: List[dict[str, Any]] = []
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty inventory never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
             if kind is not None and session.kind != kind:
                 continue
             if not noise_allows(session, noise):
@@ -602,6 +607,7 @@ def list_sessions(
                 # "include" is the no-op default — never a cause of emptiness.
                 "noise": None if noise == "include" else noise,
             },
+            scanned_sessions=scanned_sessions,
         )
     return result
 
@@ -1011,9 +1017,14 @@ def search_sessions(
     # pays for tokenisation.
     score_texts: List[str] = []
 
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty result never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
             if not noise_allows(session, noise):
                 continue
             matched = False
@@ -1098,6 +1109,7 @@ def search_sessions(
                 # "include" is the no-op default — never a cause of emptiness.
                 "noise": None if noise == "include" else noise,
             },
+            scanned_sessions=scanned_sessions,
         )
     return result
 
@@ -1175,6 +1187,10 @@ def query(
     agents + session counts, corpus date bounds, cause hints) so an empty
     result is explainable.
     """
+    # Filled by the core scan with the per-agent list_sessions() results,
+    # reused by the empty-result diagnostics so an empty result never pays
+    # for a second corpus walk.
+    scanned_sessions: dict[str, Any] = {}
     try:
         events = _query_core(
             type=type,
@@ -1196,6 +1212,7 @@ def query(
             kind=kind,
             parent=parent,
             group=group,
+            scanned_sessions_out=scanned_sessions,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -1215,6 +1232,7 @@ def query(
                 # "include" is the no-op default — never a cause of emptiness.
                 "noise": None if noise == "include" else noise,
             },
+            scanned_sessions=scanned_sessions,
         )
     return result
 

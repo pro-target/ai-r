@@ -12,6 +12,11 @@ attaches NEXT TO an empty result (``{"records": [], "count": 0,
 "diagnostics": {...}}``).  It is only computed on the empty path — a
 non-empty response never carries (or pays for) it.
 
+A caller that already enumerated sessions during its own scan passes them
+via ``scanned_sessions`` so the diagnostics are aggregated from that scan
+and the corpus is never walked twice; a fresh ``list_sessions()`` re-scan
+is only the fallback for agents the caller did not provide.
+
 Shape::
 
     {
@@ -35,7 +40,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from ai_r.parsers import PARSERS, AgentName, iso, target_agents
 from ai_r.find_file_edits import parse_iso_bound, to_utc_aware
@@ -45,12 +50,18 @@ __all__ = ["empty_result_diagnostics"]
 
 def _scan_agent(
     agent_name: AgentName,
+    sessions: Optional[Sequence[Any]] = None,
 ) -> Tuple[dict[str, Any], Optional[datetime], Optional[datetime]]:
     """Return ``(entry, date_min, date_max)`` for one agent.
 
     ``entry`` is the per-agent ``scanned`` element; the datetimes feed the
     corpus-wide bounds.  Never raises — an unreadable source degrades to a
     zero-session entry with a ``hint``.
+
+    When ``sessions`` is given (the caller already enumerated this agent
+    during its own scan), it is used as-is and ``parser.list_sessions()``
+    is NOT called again — only the cheap source-dir probe runs.  ``None``
+    means "not provided" and falls back to a fresh listing.
     """
     parser = PARSERS[agent_name]
     label = agent_name.value.lower()
@@ -70,11 +81,12 @@ def _scan_agent(
         "source_found": source_found,
     }
 
-    try:
-        sessions = parser.list_sessions()
-    except (FileNotFoundError, ValueError, OSError) as exc:
-        entry["hint"] = f"listing sessions failed: {exc}"
-        return entry, None, None
+    if sessions is None:
+        try:
+            sessions = parser.list_sessions()
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            entry["hint"] = f"listing sessions failed: {exc}"
+            return entry, None, None
 
     entry["sessions"] = len(sessions)
     dates = [
@@ -104,6 +116,7 @@ def empty_result_diagnostics(
     since: Optional[str] = None,
     until: Optional[str] = None,
     filters: Optional[dict[str, Any]] = None,
+    scanned_sessions: Optional[Mapping[Any, Sequence[Any]]] = None,
 ) -> dict[str, Any]:
     """Explain an empty scan result: what was scanned and why nothing matched.
 
@@ -115,6 +128,15 @@ def empty_result_diagnostics(
         filters: The *other* active filter values of the failing call
             (e.g. ``{"path": "...", "text": "..."}``).  ``None`` values
             are dropped from the echo.
+        scanned_sessions: Per-agent session lists the caller ALREADY
+            enumerated during its own scan (key: :class:`AgentName` or its
+            lowercase label; value: the ``parser.list_sessions()`` result).
+            Agents present here are aggregated from the provided list and
+            are NOT re-listed — on a large corpus a second full
+            ``list_sessions()`` walk would double the scan cost.  Agents in
+            the target set but absent from the mapping fall back to a
+            fresh ``parser.list_sessions()`` (fallback only, for callers
+            that did not pass their scan).
 
     Returns:
         The ``diagnostics`` dict (see the module docstring).  JSON-safe.
@@ -126,11 +148,21 @@ def empty_result_diagnostics(
         # somehow reaches here, fall back to the full registry.
         targets = list(PARSERS)
 
+    # Normalize provided per-agent lists to lowercase-label keys; presence
+    # in this dict (even with an empty list) means "do not rescan".
+    provided: dict[str, Sequence[Any]] = {}
+    for key, sessions in (scanned_sessions or {}).items():
+        label = getattr(key, "value", key)
+        provided[str(label).lower()] = sessions
+
     scanned: List[dict[str, Any]] = []
     corpus_min: Optional[datetime] = None
     corpus_max: Optional[datetime] = None
     for agent_name in targets:
-        entry, dt_min, dt_max = _scan_agent(agent_name)
+        label = agent_name.value.lower()
+        entry, dt_min, dt_max = _scan_agent(
+            agent_name, sessions=provided.get(label)
+        )
         scanned.append(entry)
         if dt_min is not None and (corpus_min is None or dt_min < corpus_min):
             corpus_min = dt_min

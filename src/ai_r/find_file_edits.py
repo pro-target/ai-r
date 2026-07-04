@@ -313,10 +313,15 @@ def find_file_edits(
     targets = target_agents(agent)
 
     records: List[dict[str, Any]] = []
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty result never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
 
     for agent_name in targets:
         parser = PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
             try:
                 messages = parser.read_messages(session.uuid)
             except (FileNotFoundError, ValueError, OSError):
@@ -423,5 +428,6 @@ def find_file_edits(
 
         result["diagnostics"] = empty_result_diagnostics(
             agent=agent, since=since, until=until, filters={"path": path},
+            scanned_sessions=scanned_sessions,
         )
     return result
