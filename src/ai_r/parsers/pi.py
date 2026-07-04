@@ -46,6 +46,14 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     return Path("~/.pi/agent/sessions").expanduser()
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate source root(s) for Pi sessions (may not exist).
+
+    Used by :mod:`ai_r.diagnostics` to explain empty results.
+    """
+    return [str(_resolve_base_dir(base_dir))]
+
+
 def _parse_iso_timestamp(raw: object) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp, always returning a tz-aware datetime.
 

@@ -298,6 +298,27 @@ def _resolve_db_paths(
     return deduped
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate OpenCode DB path(s) — existing ones, else the defaults.
+
+    :func:`_resolve_db_paths` only returns DB files that exist; when none
+    do, :mod:`ai_r.diagnostics` still needs the locations that were
+    *looked at*, so fall back to the candidate paths (env override,
+    ``base_dir``, native default) unfiltered.
+    """
+    existing = _resolve_db_paths(base_dir)
+    if existing:
+        return list(existing)
+    fallbacks: List[str] = []
+    env_override = os.environ.get("OPENCODE_DB")
+    if env_override:
+        fallbacks.append(_expand(env_override))
+    if base_dir:
+        fallbacks.append(os.path.join(base_dir, "opencode.db"))
+    fallbacks.append(_expand(_DEFAULT_DB))
+    return fallbacks
+
+
 def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
     """Open an OpenCode DB read-only, retrying on lock, falling back to copy."""
     _maybe_sweep_temp_copies()

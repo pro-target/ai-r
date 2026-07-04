@@ -1760,7 +1760,11 @@ def test_find_file_edits_no_match_returns_empty(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="/definitely/not/a/real/path/zzz")
+    diagnostics = result.pop("diagnostics")
     assert result == {"records": [], "count": 0, "truncated": False}
+    # A zero-match result must explain itself (F1.1).
+    assert diagnostics["filters"]["path"] == "/definitely/not/a/real/path/zzz"
+    assert diagnostics["hints"]
 
 
 def test_find_file_edits_claude_match(

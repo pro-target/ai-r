@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Empty-result diagnostics**: a zero-result response of `query` /
+  `search_sessions` / `find_tool_calls` / `find_file_edits` /
+  `list_sessions` now carries a `diagnostics` object (per-agent scan
+  counts + date bounds + `source_found`, corpus totals, cause hints —
+  e.g. a missing source directory or a `since`/`until` bound that
+  excludes the entire corpus). Non-empty responses are unchanged and
+  never pay for it. See `docs/methods.md` → *Empty results & session
+  lookup*.
 - **Event-core layer**: a unified event stream over every parser, exposing
   five verbs — `query`, `get_body`, `aggregate`, `diff`, `detect_current` —
   plus the `plan` preset. Reference-by-default: `query` returns lightweight
@@ -21,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`read_session` no longer requires `agent`**: the parameter is optional —
+  when omitted, the session id is resolved across every parser. A rare
+  cross-agent id collision returns a `candidates` list (not an error); a
+  miss names the `agents_scanned`.
 - **`session_stats` / `session_diff`**: reduced to thin presets over the
   event-core verbs — `session_stats` maps to `aggregate(rank_by="stats",
   kind_split=True)`, `session_diff` to `diff` over an intent-carrying
@@ -37,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI never leaks a Python traceback**: an unexpected internal error now
+  exits non-zero with one structured JSON line on stderr
+  (`{"error": "internal_error", ...}`) instead of a stack dump, so consumer
+  scripts get a parseable failure. `AI_R_DEBUG=1` re-raises for debugging.
 - **Codex plan steps/status**: `update_plan` carries its step array under the
   `plan` key; the parser read a non-existent `steps` key, so every Codex plan
   surfaced `steps=null`/`status=null`. Now read from the correct key.

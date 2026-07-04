@@ -200,6 +200,9 @@ def find_tool_calls(
         ``limit`` (count-based); ``output_truncated`` is ``True`` when the
         cumulative serialized size hit the response byte budget and record
         appending stopped early (size-based) — the two are independent.
+        When ``count == 0`` the dict additionally carries ``"diagnostics"``
+        (scanned agents + session counts, corpus date bounds, cause hints
+        — see :mod:`ai_r.diagnostics`) so an empty listing is explainable.
         Each record carries ``agent``, ``session_uuid``,
         ``session_title``, ``session_date``, ``message_index``,
         ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
@@ -459,9 +462,30 @@ def find_tool_calls(
     if output_truncated:
         records = budgeted
 
-    return {
+    response: dict[str, Any] = {
         "records": records,
         "count": total,
         "truncated": truncated,
         "output_truncated": output_truncated,
     }
+    if total == 0:
+        # Zero matches: attach the corpus diagnostics so an empty listing
+        # is explainable (missing source dir vs all-excluding filter vs a
+        # genuine no-match).  Imported lazily to keep module import light
+        # and mirror ``find_file_edits``.
+        from ai_r.diagnostics import empty_result_diagnostics
+
+        response["diagnostics"] = empty_result_diagnostics(
+            agent=agent,
+            since=since,
+            until=until,
+            filters={
+                "tool_name": tool_name,
+                "tool_name_pattern": tool_name_pattern,
+                "input_contains": input_contains,
+                "output_contains": output_contains,
+                "output_excludes": output_excludes,
+                "is_error": is_error,
+            },
+        )
+    return response

@@ -286,7 +286,10 @@ def find_file_edits(
     Returns:
         A dict ``{"records": [...], "count": N, "truncated": bool}``.  Each
         record carries ``"input"`` when ``include_input=True``, else
-        ``"input_sha256"`` + ``"input_chars"``.
+        ``"input_sha256"`` + ``"input_chars"``.  When ``count == 0`` the
+        dict additionally carries ``"diagnostics"`` (scanned agents +
+        session counts, corpus date bounds, cause hints — see
+        :mod:`ai_r.diagnostics`) so an empty listing is explainable.
 
     Raises:
         ValueError: on invalid arguments (``path`` empty, ``limit`` negative,
@@ -407,4 +410,18 @@ def find_file_edits(
     if limit and len(records) > limit:
         records = records[:limit]
         truncated = True
-    return {"records": records, "count": total, "truncated": truncated}
+    result: dict[str, Any] = {
+        "records": records, "count": total, "truncated": truncated,
+    }
+    if total == 0:
+        # Zero matches: attach the corpus diagnostics so an empty listing
+        # is explainable (missing source dir vs all-excluding filter vs a
+        # genuine no-match).  Imported lazily — ``ai_r.diagnostics``
+        # imports helpers from THIS module, so a top-level import here
+        # would be a cycle.
+        from ai_r.diagnostics import empty_result_diagnostics
+
+        result["diagnostics"] = empty_result_diagnostics(
+            agent=agent, since=since, until=until, filters={"path": path},
+        )
+    return result

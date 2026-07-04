@@ -99,6 +99,27 @@ def _resolve_brain_roots(
     return [r for r in roots if r.is_dir()]
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate brain root(s) for Antigravity sessions (may not exist).
+
+    Unlike :func:`_resolve_brain_roots` (which filters to existing dirs so
+    the scanner never walks a missing tree), this returns the *candidate*
+    locations unfiltered — :mod:`ai_r.diagnostics` needs the paths that
+    were looked at even when none of them exist.
+    """
+    if base_dir:
+        return [str(Path(base_dir).expanduser())]
+    env_home = os.environ.get("AI_R_HOME")
+    if env_home:
+        root = Path(env_home).expanduser() / ".gemini"
+    else:
+        root = Path("~/.gemini").expanduser()
+    return [
+        str(root / "antigravity-cli" / "brain"),
+        str(root / "antigravity" / "brain"),
+    ]
+
+
 def _extract_title_from_overview(overview_path: Path) -> tuple[str, int, Optional[str]]:
     """Return ``(title, message_count, latest_timestamp_iso)`` from overview.txt."""
     title = ""

@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 45 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -55,8 +55,10 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
-| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
+| `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
 | `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
+| empty-result diagnostics (cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
+| CLI error contract | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
 
 <!-- scenarios:end -->
 
@@ -439,6 +441,14 @@ Read one session by `uuid`+`agent`, projected to the compact `{role, content}` M
 - **Expected:** The two pages are disjoint, consecutive slices of one ordered message list; `total` is identical across both calls (independent of the slice); the pagination echo (`offset`/`limit`) mirrors the request.
 - **Pass criteria:** GO when page 2 continues page 1 (no overlap, no gap), `total` is stable across both calls, and each response echoes the requested `offset`/`limit`.
 
+### READ-3 — agent-free lookup by id (+ collision → candidates)
+- **Function:** `read_session`
+- **Goal:** Omitting `agent` resolves a session by id across every parser; a cross-agent id collision returns a disambiguation list, never an error.
+- **Preconditions:** A known uuid from `list_sessions`. `[needs-real-vault]` for the live lookup; the collision branch is `[hermetic-ok]` (synthetic duplicate id under two agents).
+- **Steps:** `mcp__ai-r__read_session(uuid="<uuid>")` (no `agent`); compare with `mcp__ai-r__read_session(uuid="<uuid>", agent="<its agent>")`; then `mcp__ai-r__read_session(uuid="no-such-id-zzz")`; (hermetic) seed the same id under two agents and call without `agent`.
+- **Expected:** The agent-free result is identical to the explicit-agent result; the miss returns `{error:"not_found", agent:null, agents_scanned:[all 5 parsers]}`; the synthetic collision returns `{ambiguous:true, candidates:[…], count:2}` where each candidate carries its `agent` — and NO `error` key.
+- **Pass criteria:** GO when agent-free == explicit-agent byte-for-byte, the miss names every scanned parser, and a collision yields `candidates` instead of an error. An `error` on a resolvable collision is NO-GO.
+
 ---
 
 ## `search_sessions`
@@ -468,3 +478,40 @@ Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`
 - **Steps:** run the same two terms with `operator="AND"` then `operator="OR"`; then a query with a `-<term>` negative prefix; then a `"quoted phrase"`.
 - **Expected:** Each call returns `{"results": [...], "count": N}`; comparing the `results` lists, `OR` never returns fewer than `AND` (`set(AND) ⊆ set(OR)`); a `-term` excludes every session containing that term regardless of operator; a quoted phrase matches only the contiguous phrase, not the words scattered.
 - **Pass criteria:** GO when, over the `results` of each wrapper, `set(AND) ⊆ set(OR)`, the negative term removes all its matches, and the quoted phrase matches contiguously.
+
+---
+
+## Empty-result diagnostics (cross-cutting)
+
+A zero-result response of a scanning method (`query` / `search_sessions` / `find_tool_calls` /
+`find_file_edits` / `list_sessions`) must explain itself: which agents were scanned (session
+counts, date bounds, `source_found`), the corpus totals, and cause hints. Non-empty responses
+never carry `diagnostics`.
+
+### DIAG-1 — zero-result response carries diagnostics; non-empty does not `[needs-real-vault]`
+- **Function:** `query` + `search_sessions` (representative of all scanning methods)
+- **Goal:** An empty result is explainable — never a bare empty list — while a non-empty result stays unchanged.
+- **Preconditions:** A non-empty vault. `[needs-real-vault]` (the same shape holds hermetically on an empty vault).
+- **Steps:** `mcp__ai-r__query(text="zzz-improbable-needle-19cf", limit=10)` (expect 0 hits); inspect `diagnostics`; then `mcp__ai-r__query(type="user_turn", limit=1)` (expect ≥1 hit) and confirm NO `diagnostics` key; repeat the pair with `mcp__ai-r__search_sessions(query="zzz-improbable-needle-19cf")`.
+- **Expected:** The empty responses carry `diagnostics` with: `scanned` (one entry per agent — `sessions`, `date_min`/`date_max`, `source_found`, per-agent `hint` for empty/missing sources), `corpus` (total sessions + overall date bounds, plausible for the vault), `filters` (echoing the call's filters, e.g. `text`), and non-empty `hints`. The non-empty responses carry no `diagnostics` key at all.
+- **Pass criteria:** GO when `diagnostics` appears exactly on the zero-result responses, per-agent session counts are plausible, and the filter echo matches the call. A bare `{results/events: [], count: 0}` without diagnostics is NO-GO.
+
+### DIAG-2 — cause hints: missing source dir and all-excluding date filter
+- **Function:** `find_tool_calls` (hints are shared by all scanning methods)
+- **Goal:** The two diagnosable causes are named explicitly: a source directory that does not exist, and a `since`/`until` bound that excludes the whole corpus.
+- **Preconditions:** none. `[hermetic-ok]` (point `AI_R_HOME` at an empty directory; seed one synthetic claude session with a tool call for the date case).
+- **Steps:** (a) with no agent data at all: `mcp__ai-r__find_tool_calls(tool_name="Bash", agent="claude")` → inspect `diagnostics.scanned[claude]`; (b) with one seeded session dated 2026: `mcp__ai-r__find_tool_calls(tool_name="Bash", agent="claude", since="2999-01-01")` → inspect `diagnostics.hints`.
+- **Expected:** (a) `scanned[claude].source_found == false` and its `hint` names the missing path (`source not found: …/.claude/projects`); (b) the corpus is non-empty and a hint states that `since='2999-01-01'` is after the newest session and "excludes the entire corpus".
+- **Pass criteria:** GO when the missing-source case names the looked-at path and the date case names the excluding bound with the corpus boundary. A generic "no results" with no cause is NO-GO.
+
+---
+
+## CLI error contract
+
+### CLI-1 — structured errors, non-zero exit, never a traceback
+- **Function:** `ai-r` CLI (all subcommands)
+- **Goal:** A failing CLI invocation never dumps a Python traceback into a consumer script — errors are structured and the exit code is non-zero.
+- **Preconditions:** `ai-r` installed on PATH (or `python -m ai_r.cli`). `[hermetic-ok]`.
+- **Steps:** run and capture `rc`/stderr for: `ai-r find-tool-calls --limit -1` (invalid argument); `ai-r read no-such-session-zzz --agent claude` (not found); `ai-r list --from-date junk` (bad date). Grep each stderr for `Traceback`.
+- **Expected:** Every invocation exits non-zero (invalid argument → 2, not found → 3, bad date → 1); stderr carries a single structured line — `ai-r: <message>` for expected failures, or one JSON `{"error": "internal_error", "type": …, "message": …}` line for an unexpected internal failure — and `Traceback` appears nowhere. With `AI_R_DEBUG=1` an unexpected failure re-raises (traceback allowed then, by request).
+- **Pass criteria:** GO when all failing invocations are traceback-free with a non-zero exit code and a parseable one-line error. Any Python traceback without `AI_R_DEBUG=1` is NO-GO.

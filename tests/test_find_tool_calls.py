@@ -302,11 +302,18 @@ def test_find_tool_calls_no_sessions_returns_empty(
         lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
     )
     result = find_tool_calls(tool_name="anything")
+    diagnostics = result.pop("diagnostics")
     assert result == {
         "records": [],
         "count": 0,
         "truncated": False,
         "output_truncated": False,
+    }
+    # A zero-match result must explain itself (F1.1): what was scanned +
+    # why nothing matched.
+    assert diagnostics["hints"]
+    assert {e["agent"] for e in diagnostics["scanned"]} == {
+        "claude", "codex", "opencode", "antigravity", "pi",
     }
 
 
@@ -325,12 +332,14 @@ def test_find_tool_calls_no_match_returns_empty(
         lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
     )
     result = find_tool_calls(tool_name="NonExistent")
+    diagnostics = result.pop("diagnostics")
     assert result == {
         "records": [],
         "count": 0,
         "truncated": False,
         "output_truncated": False,
     }
+    assert diagnostics["filters"]["tool_name"] == "NonExistent"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,211 @@
+"""Empty-result diagnostics — *why* did a scan return zero results?
+
+A bare empty list is ambiguous: "the corpus genuinely has no match" looks
+identical to "the filter is wrong" or "the source directory is missing", so
+a consumer over-trusts a false-empty result instead of fixing the call.
+(The idea mirrors cass's zero-result diagnosis; the implementation is
+ai-r-native: it walks the same :data:`~ai_r.parsers.PARSERS` registry the
+scanning methods use.)
+
+:func:`empty_result_diagnostics` builds a ``diagnostics`` dict the caller
+attaches NEXT TO an empty result (``{"records": [], "count": 0,
+"diagnostics": {...}}``).  It is only computed on the empty path — a
+non-empty response never carries (or pays for) it.
+
+Shape::
+
+    {
+      "scanned": [            # one entry per scanned agent
+        {"agent": "claude", "sessions": 42, "date_min": "...",
+         "date_max": "...", "source_found": true},
+        {"agent": "pi", "sessions": 0, "date_min": null, "date_max": null,
+         "source_found": false,
+         "hint": "source not found: /home/u/.pi/agent/sessions"},
+      ],
+      "corpus": {"sessions": 42, "date_min": "...", "date_max": "..."},
+      "filters": {"agent": null, "since": null, "until": null, ...},
+      "hints": ["42 session(s) scanned across 5 agent(s); ..."],
+    }
+
+Diagnostics must never crash the (already empty) response: every parser
+access is wrapped and failures degrade to a per-agent ``hint``.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from typing import Any, List, Optional, Tuple
+
+from ai_r.parsers import PARSERS, AgentName, iso, target_agents
+from ai_r.find_file_edits import parse_iso_bound, to_utc_aware
+
+__all__ = ["empty_result_diagnostics"]
+
+
+def _scan_agent(
+    agent_name: AgentName,
+) -> Tuple[dict[str, Any], Optional[datetime], Optional[datetime]]:
+    """Return ``(entry, date_min, date_max)`` for one agent.
+
+    ``entry`` is the per-agent ``scanned`` element; the datetimes feed the
+    corpus-wide bounds.  Never raises — an unreadable source degrades to a
+    zero-session entry with a ``hint``.
+    """
+    parser = PARSERS[agent_name]
+    label = agent_name.value.lower()
+
+    roots: List[str] = []
+    try:
+        roots = list(parser.source_roots())
+    except (FileNotFoundError, ValueError, OSError):  # pragma: no cover
+        roots = []
+    source_found = any(os.path.exists(r) for r in roots)
+
+    entry: dict[str, Any] = {
+        "agent": label,
+        "sessions": 0,
+        "date_min": None,
+        "date_max": None,
+        "source_found": source_found,
+    }
+
+    try:
+        sessions = parser.list_sessions()
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        entry["hint"] = f"listing sessions failed: {exc}"
+        return entry, None, None
+
+    entry["sessions"] = len(sessions)
+    dates = [
+        dt
+        for dt in (to_utc_aware(getattr(s, "date", None)) for s in sessions)
+        if dt is not None
+    ]
+    date_min = min(dates) if dates else None
+    date_max = max(dates) if dates else None
+    if date_min is not None:
+        entry["date_min"] = iso(date_min)
+    if date_max is not None:
+        entry["date_max"] = iso(date_max)
+
+    if not sessions:
+        if not source_found:
+            where = ", ".join(roots) if roots else "(no known location)"
+            entry["hint"] = f"source not found: {where}"
+        else:
+            entry["hint"] = "source present but contains no sessions"
+    return entry, date_min, date_max
+
+
+def empty_result_diagnostics(
+    *,
+    agent: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    filters: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Explain an empty scan result: what was scanned and why nothing matched.
+
+    Args:
+        agent: The ``agent`` filter the failing call used (``None`` = all).
+        since / until: The ISO date bounds the failing call used, if any.
+            Assumed already validated upstream (an unparseable bound is
+            simply skipped here — diagnostics never raise).
+        filters: The *other* active filter values of the failing call
+            (e.g. ``{"path": "...", "text": "..."}``).  ``None`` values
+            are dropped from the echo.
+
+    Returns:
+        The ``diagnostics`` dict (see the module docstring).  JSON-safe.
+    """
+    try:
+        targets = target_agents(agent)
+    except ValueError:
+        # An unknown agent is rejected upstream before any scan; if it
+        # somehow reaches here, fall back to the full registry.
+        targets = list(PARSERS)
+
+    scanned: List[dict[str, Any]] = []
+    corpus_min: Optional[datetime] = None
+    corpus_max: Optional[datetime] = None
+    for agent_name in targets:
+        entry, dt_min, dt_max = _scan_agent(agent_name)
+        scanned.append(entry)
+        if dt_min is not None and (corpus_min is None or dt_min < corpus_min):
+            corpus_min = dt_min
+        if dt_max is not None and (corpus_max is None or dt_max > corpus_max):
+            corpus_max = dt_max
+    total = sum(e["sessions"] for e in scanned)
+
+    active_filters: dict[str, Any] = {"agent": agent, "since": since, "until": until}
+    for key, val in (filters or {}).items():
+        if val is not None:
+            active_filters[key] = val
+
+    hints: List[str] = []
+    if total == 0:
+        if agent:
+            hints.append(
+                f"agent '{agent}': no sessions found — try omitting the "
+                "agent filter to scan all supported agents"
+            )
+        else:
+            hints.append(
+                "no sessions found for any supported agent — the vault "
+                "appears empty (check the source paths under 'scanned')"
+            )
+    else:
+        # The corpus is non-empty, so a filter excluded everything.  Call
+        # out an all-excluding date window explicitly; else name the
+        # remaining filters.
+        try:
+            since_dt = parse_iso_bound(since, "since")
+        except ValueError:
+            since_dt = None
+        try:
+            until_dt = parse_iso_bound(until, "until")
+        except ValueError:
+            until_dt = None
+        date_excluded = False
+        if since_dt is not None and corpus_max is not None and since_dt > corpus_max:
+            hints.append(
+                f"since={since!r} is after the newest session "
+                f"({iso(corpus_max)}) — the date filter excludes the "
+                "entire corpus"
+            )
+            date_excluded = True
+        if until_dt is not None and corpus_min is not None and until_dt < corpus_min:
+            hints.append(
+                f"until={until!r} is before the oldest session "
+                f"({iso(corpus_min)}) — the date filter excludes the "
+                "entire corpus"
+            )
+            date_excluded = True
+        if not date_excluded:
+            named = ", ".join(
+                f"{k}={v!r}"
+                for k, v in active_filters.items()
+                if v is not None
+            )
+            if named:
+                hints.append(
+                    f"{total} session(s) scanned across {len(scanned)} "
+                    f"agent(s); nothing matched the filters: {named}"
+                )
+            else:
+                hints.append(
+                    f"{total} session(s) scanned across {len(scanned)} "
+                    "agent(s); the corpus genuinely has no match"
+                )
+
+    return {
+        "scanned": scanned,
+        "corpus": {
+            "sessions": total,
+            "date_min": iso(corpus_min) if corpus_min is not None else None,
+            "date_max": iso(corpus_max) if corpus_max is not None else None,
+        },
+        "filters": active_filters,
+        "hints": hints,
+    }

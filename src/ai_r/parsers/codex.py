@@ -94,6 +94,14 @@ def _resolve_base_dir(base_dir: Optional[str]) -> List[Path]:
     return [primary, primary.parent / "archived_sessions"]
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate source root(s) for Codex sessions (may not exist).
+
+    Used by :mod:`ai_r.diagnostics` to explain empty results.
+    """
+    return [str(p) for p in _resolve_base_dir(base_dir)]
+
+
 def _extract_text_from_parts(parts: object) -> str:
     """Concatenate ``input_text``/``output_text``/``text`` parts."""
     if not isinstance(parts, list):

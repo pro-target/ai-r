@@ -456,8 +456,16 @@ def test_detect_current_unknown_agent_hint_raises(_clean_detect_env: None) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_aggregate_parity_session_stats_host(real_claude_home: Path) -> None:
-    """aggregate == session_stats on the real ~/.claude sessions."""
+def test_aggregate_parity_session_stats_host(frozen_claude_home: Path) -> None:
+    """aggregate == session_stats on a FROZEN snapshot of ~/.claude.
+
+    Frozen (not live): both sides re-scan the vault, and the LIVE
+    ``~/.claude`` mutates between the two scans (most acutely the session
+    the test itself runs inside, which the harness is actively writing) —
+    that produced false parity mismatches.  Same rationale as
+    ``tests/test_phase3b_parity.py``; still host-marked, still skips when
+    the host has no Claude data.
+    """
     legacy = session_stats(group_by="agent", agent="claude", top=0)
     agg = aggregate(
         _session_rows(agent="claude"),

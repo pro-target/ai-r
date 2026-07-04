@@ -71,6 +71,16 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     return Path("~/.claude/projects").expanduser()
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate source root(s) for Claude sessions.
+
+    Returns the directory the parser *would* scan — whether or not it
+    exists.  Used by :mod:`ai_r.diagnostics` to explain empty results
+    ("source directory not found" vs "source present but empty").
+    """
+    return [str(_resolve_base_dir(base_dir))]
+
+
 def _extract_text_from_user_message(message: dict) -> str:
     """Return the first plain-text part of a user message, or empty string."""
     content = message.get("content", "")

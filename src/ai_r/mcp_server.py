@@ -3,7 +3,9 @@
 Exposes these tools over the Model Context Protocol:
 
 * :func:`list_sessions`  — enumerate sessions, optionally filtered by agent.
-* :func:`read_session`   — load a single session by ``uuid`` and ``agent``.
+* :func:`read_session`   — load a single session by ``uuid`` (``agent``
+  optional: omitted → the id is resolved across every parser; a rare
+  cross-agent id collision returns a candidate list, not an error).
 * :func:`find_file_edits` — find file edits across sessions.
 * :func:`find_tool_calls` — find arbitrary tool calls across sessions.
 * :func:`session_diff`   — reconstruct what a session changed, without git.
@@ -52,12 +54,15 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from ai_r import __version__  # noqa: E402
 from ai_r.find_file_edits import (  # noqa: E402
     PARSERS as _PARSERS,
-    coerce_agent as _coerce_agent,
+    # Re-exported for downstream consumers/tests that historically import
+    # it from here (read_session no longer uses it directly).
+    coerce_agent as _coerce_agent,  # noqa: F401
     find_file_edits as _find_file_edits_core,
     iso as _iso,
     previous_user_intent as _previous_user_intent,
     target_agents as _target_agents,
 )
+from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # noqa: E402
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
@@ -537,7 +542,10 @@ def list_sessions(
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
         "truncated": bool}``. ``total`` is the full count matching the
         ``agent`` (and ``kind``) filter; ``truncated`` is True when more
-        sessions remain beyond this page.
+        sessions remain beyond this page.  When ``total == 0`` the dict
+        additionally carries ``diagnostics`` (scanned agents + session
+        counts, source-dir presence, cause hints) so an empty inventory
+        is explainable.
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         return {"error": "invalid_argument",
@@ -567,27 +575,37 @@ def list_sessions(
 
     total = len(summaries)
     page = summaries[offset:] if limit == 0 else summaries[offset:offset + limit]
-    return {
+    result: dict[str, Any] = {
         "sessions": page,
         "total": total,
         "offset": offset,
         "limit": limit,
         "truncated": (offset + len(page)) < total,
     }
+    if total == 0:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent, filters={"kind": kind},
+        )
+    return result
 
 
 @mcp.tool()
 def read_session(
     uuid: str,
-    agent: str,
+    agent: Optional[str] = None,
     offset: int = 0,
     limit: int = _MESSAGES_CAP,
 ) -> dict[str, Any]:
-    """Read a single session by ``uuid`` and ``agent``.
+    """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
     Args:
         uuid: Session identifier.
-        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``, ``pi``.
+        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
+            ``pi``.  **Optional**: when omitted, the ``uuid`` is looked up
+            across every parser (session ids are unique across agents in
+            practice).  If — rarely — the same id exists under several
+            agents, a ``candidates`` list is returned (not an error) so
+            the caller can re-ask with an explicit ``agent``.
         offset: Zero-based index of the first message to return
             (applied to the projected ``{role, content}`` list).
         limit: Maximum number of messages to return.  Defaults to
@@ -606,8 +624,14 @@ def read_session(
         * ``messages_truncated`` — True when the MCP hard cap stopped
           extraction before every projected message could be returned.
 
+        On an id collision (agent omitted, several agents own the id):
+        ``{"ambiguous": True, "uuid": ..., "candidates": [...],
+        "count": N, "message": ...}`` where each candidate is a session
+        summary carrying its ``agent``.
+
         On a missing session, returns an ``error`` dict instead of
-        raising.
+        raising (``agents_scanned`` lists the parsers probed when the
+        agent was omitted).
     """
     if not uuid or not str(uuid).strip():
         return {"error": "invalid_argument", "message": "uuid must be non-empty"}
@@ -616,24 +640,52 @@ def read_session(
     if not isinstance(limit, int) or isinstance(limit, bool):
         return {"error": "invalid_argument", "message": "limit must be an integer"}
     try:
-        agent_name = _coerce_agent(agent)
+        targets = _target_agents(agent)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 
-    parser = _PARSERS[agent_name]
-    try:
-        session = parser.read_session(uuid)
-    except ValueError as exc:
-        # Parsers reject malformed uuids (path separators, whitespace, …)
-        # with ValueError; surface them as structured invalid_argument
-        # instead of letting them propagate as an uncaught server error.
-        return {"error": "invalid_argument", "message": str(exc)}
-    except FileNotFoundError:
+    matches: List[Session] = []
+    value_errors: List[str] = []
+    for agent_name in targets:
+        parser = _PARSERS[agent_name]
+        try:
+            matches.append(parser.read_session(uuid))
+        except ValueError as exc:
+            # Parsers reject malformed uuids (path separators, whitespace,
+            # …) with ValueError; collect them — they only surface when NO
+            # parser resolved the id.
+            value_errors.append(str(exc))
+        except FileNotFoundError:
+            continue
+
+    if not matches:
+        if value_errors:
+            # At least one parser rejected the id as malformed and none
+            # resolved it — a structured invalid_argument, matching the
+            # historical single-agent behaviour.
+            return {"error": "invalid_argument", "message": value_errors[0]}
         return {
             "error": "not_found",
             "uuid": uuid,
-            "agent": agent_name.value,
+            "agent": targets[0].value if agent else None,
+            "agents_scanned": [t.value.lower() for t in targets],
         }
+
+    if len(matches) > 1:
+        # Same id under several agents: NOT an error — return the
+        # candidates so the caller can disambiguate via ``agent``.
+        return {
+            "ambiguous": True,
+            "uuid": uuid,
+            "candidates": [_session_summary(s) for s in matches],
+            "count": len(matches),
+            "message": (
+                "session id matches multiple agents; pass agent to "
+                "disambiguate"
+            ),
+        }
+
+    session = matches[0]
 
     projected = _extract_messages(
         session,
@@ -878,6 +930,9 @@ def search_sessions(
         ``scope`` is ``"body"`` or ``"all"`` and a match is found, each
         summary includes a ``"snippet"`` field with the first matching
         message excerpt (up to 200 chars) and may carry ``body_truncated``.
+        When a scan matches nothing (``count == 0``), the dict additionally
+        carries ``diagnostics`` (scanned agents + session counts, corpus
+        date bounds, cause hints) so an empty result is explainable.
 
     Errors are returned as a top-level ``{"error": ..., "message": ...}``
     dict (matches the existing convention).
@@ -998,7 +1053,13 @@ def search_sessions(
 
     if limit:
         summaries = summaries[:limit]
-    return {"results": summaries, "count": len(summaries)}
+    result: dict[str, Any] = {"results": summaries, "count": len(summaries)}
+    if not summaries:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent,
+            filters={"query": needle, "scope": scope, "operator": op_upper},
+        )
+    return result
 
 
 @mcp.tool()
@@ -1061,7 +1122,10 @@ def query(
     ``invalid_argument`` dict) rather than a silent no-op.
 
     Returns ``{"events": [...], "count": N}`` or the standard
-    ``{"error": ..., "message": ...}`` dict on invalid arguments.
+    ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
+    ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
+    agents + session counts, corpus date bounds, cause hints) so an empty
+    result is explainable.
     """
     try:
         events = _query_core(
@@ -1086,7 +1150,22 @@ def query(
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
-    return {"events": events, "count": len(events)}
+    result: dict[str, Any] = {"events": events, "count": len(events)}
+    if not events:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent,
+            since=since,
+            until=until,
+            filters={
+                "type": type,
+                "session": session,
+                "file": file,
+                "tool": tool,
+                "text": text,
+                "relative_to": relative_to,
+            },
+        )
+    return result
 
 
 @mcp.tool()
