@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sort="semantic"`: meaning-aware re-ranking of text search (F5.1,
+  optional `ai-r[semantic]`)**: the text-search surface (`query` with a
+  `text` facet, `search_sessions`) accepts `sort="semantic"` — the BM25
+  top-50 candidates are re-ranked by *meaning* with a **local**
+  multilingual embedding model (`intfloat/multilingual-e5-small`, int8
+  ONNX ~118 MB from the official card, MIT), run directly through
+  `onnxruntime` + `tokenizers` (no torch, no fastembed — it does not
+  support this model; fallback model, same code path:
+  `ibm-granite/granite-embedding-97m-multilingual-r2`). The mandatory E5
+  `query:`/`passage:` prefixes are applied internally. No persistent
+  index: texts are embedded at request time, nothing stored. Ranking in
+  plain words (documented in `ai_r.semantic` + README): BM25 picks the
+  top-50 word-matches (a cost budget, not a quality cut-off — there is
+  deliberately NO similarity threshold, E5 scores even unrelated texts
+  ≈0.7, so results are only re-ordered, never dropped); within the pool
+  the blended score is **75 % meaning + 25 % word match** (both min–max
+  normalized) — meaning dominates, the word share protects exact-term
+  hits and breaks ties; results beyond the pool keep their BM25 order.
+  The response carries a `semantic` report: `active: true` (+ model,
+  candidate count, blend weight) or the honest degradation
+  `active: false` + plain-words `reason` + `fallback: "bm25"` — without
+  the optional deps (`pip install "ai-r[semantic]"`: onnxruntime,
+  tokenizers, numpy) or the model files
+  (`AI_R_EXTRAS=semantic bash install.sh` downloads them to
+  `~/.cache/ai-r/semantic/multilingual-e5-small`, override via
+  `AI_R_SEMANTIC_MODEL_DIR`) the order falls back to plain BM25, never a
+  crash, and the default sorts (`relevance`/`date`) never touch the
+  module at all. New module `ai_r.semantic` (lazy one-shot probe, same
+  pattern as the optional tiktoken loader); embedding sees RAW text
+  while emission stays redacted; reference-by-default unchanged.
+  Scenarios SEM-1..3.
+
 - **`network` preset: network-egress audit (F4.3)**: new MCP tool
   `network` (core `ai_r.network`) answers "where did an agent reach out
   to the network — and how risky did those requests look?" in one call.

@@ -72,6 +72,7 @@ from ai_r.parsers import ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
 from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
 from ai_r.resume import resume_command  # noqa: E402
 from ai_r.redact import (  # noqa: E402
@@ -1306,6 +1307,14 @@ def search_sessions(
               (default).  Pure-stdlib scoring; ties keep newest-first.
             * ``"date"`` — newest-first by session date (the historical
               pre-ranking order).
+            * ``"semantic"`` — F5.1 (optional ``ai-r[semantic]``): the
+              BM25 top-50 candidates re-ranked by *meaning* with a local
+              multilingual embedding model (cross-lingual ru↔en,
+              synonyms); the response carries a ``semantic`` dict —
+              either the active ranking (``active: true``, model,
+              candidate count, blend weight) or the honest degradation
+              notice (``active: false`` + plain-words ``reason`` +
+              ``fallback: "bm25"``, order stays BM25 — never a crash).
         noise: Noise filter — a session is *noise* when it is a spawned
             subagent (``kind == "subagent"`` or ``parent_uuid`` set).
             * ``"include"`` — no filtering (default).
@@ -1330,7 +1339,9 @@ def search_sessions(
         message excerpt (up to 200 chars) and may carry ``body_truncated``.
         When a scan matches nothing (``count == 0``), the dict additionally
         carries ``diagnostics`` (scanned agents + session counts, corpus
-        date bounds, cause hints) so an empty result is explainable.
+        date bounds, cause hints) so an empty result is explainable.  With
+        ``sort="semantic"`` the dict also carries a ``semantic`` report
+        (active ranking vs BM25 fallback + reason).
 
     Errors are returned as a top-level ``{"error": ..., "message": ...}``
     dict (matches the existing convention).
@@ -1359,10 +1370,11 @@ def search_sessions(
         }
 
     sort_lower = (sort or "relevance").lower()
-    if sort_lower not in ("relevance", "date"):
+    if sort_lower not in ("relevance", "date", "semantic"):
         return {
             "error": "invalid_argument",
-            "message": f"unknown sort {sort!r}; expected relevance or date",
+            "message": f"unknown sort {sort!r}; "
+                       "expected relevance, date or semantic",
         }
 
     if noise not in NOISE_MODES:
@@ -1447,7 +1459,8 @@ def search_sessions(
             summaries.append(summary)
             score_texts.append(score_text)
 
-    if sort_lower == "relevance" and summaries:
+    semantic_info: dict[str, Any] = {}
+    if sort_lower in ("relevance", "semantic") and summaries:
         # Flatten phrase terms into BM25 query tokens; lazily tokenise only
         # the matched docs (never the whole haystack cache).
         query_tokens: List[str] = []
@@ -1455,12 +1468,28 @@ def search_sessions(
             query_tokens.extend(_tokenize(term))
         docs_tokens = [_tokenize(text) for text in score_texts]
         scores = _bm25_scores(query_tokens, docs_tokens)
-        # ``sorted`` is stable: equal scores preserve list_sessions order
-        # (newest-first), giving a deterministic recency tie-break.
-        order = sorted(
-            range(len(summaries)), key=lambda i: scores[i], reverse=True
-        )
+        order: Optional[List[int]] = None
+        if sort_lower == "semantic":
+            # F5.1: BM25 supplies the candidate pool; the local embedding
+            # model re-ranks it by meaning.  ``None`` = the optional
+            # dependencies/model are missing or failed — honest BM25
+            # fallback (reported in the ``semantic`` response field),
+            # never a crash.
+            order, semantic_info = _semantic_order(
+                " ".join(positive) or needle, score_texts, scores
+            )
+        if order is None:
+            # ``sorted`` is stable: equal scores preserve list_sessions
+            # order (newest-first), giving a deterministic recency
+            # tie-break.
+            order = sorted(
+                range(len(summaries)), key=lambda i: scores[i], reverse=True
+            )
         summaries = [summaries[i] for i in order]
+    elif sort_lower == "semantic" and not summaries:
+        # Zero matches: nothing to rank, but still report availability so
+        # the caller learns whether semantic ranking was even possible.
+        _order_unused, semantic_info = _semantic_order(needle, [], [])
     # ``sort == "date"`` keeps the existing newest-first insertion order.
 
     if limit:
@@ -1474,6 +1503,8 @@ def search_sessions(
     result: dict[str, Any] = {"results": summaries, "count": len(summaries)}
     if redactions:
         result["redactions"] = redactions
+    if semantic_info:
+        result["semantic"] = semantic_info
     if not summaries:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,
@@ -1552,8 +1583,15 @@ def query(
       unknown ``tool_kind`` value is a fail-loud ``invalid_argument``.
     * ``text`` — substring matched against event text.  With
       ``sort="relevance"`` survivors are BM25-ranked using the **same
-      scorer** as ``search_sessions``; ``sort="date"`` (default) orders
-      by timestamp ascending.
+      scorer** as ``search_sessions``; ``sort="semantic"`` (F5.1,
+      optional ``ai-r[semantic]``) re-ranks the BM25 top-50 candidates
+      by *meaning* with a local multilingual embedding model
+      (cross-lingual ru↔en, synonyms) — the response carries a
+      ``semantic`` dict reporting either the active ranking
+      (``active: true``, model, candidate count, blend weight) or the
+      honest degradation (``active: false`` + plain-words ``reason`` +
+      ``fallback: "bm25"`` — the order is then plain BM25, never a
+      crash); ``sort="date"`` (default) orders by timestamp ascending.
     * ``relative_to`` (event id) + ``direction`` (``prev``|``next``) +
       ``n`` (``"1"`` | ``"all"``) — the neighbouring-turn walk.
       Generalises the ``previous_user_intent`` used by ``find_file_edits``
@@ -1608,6 +1646,7 @@ def query(
     # for a second corpus walk.
     scanned_sessions: dict[str, Any] = {}
     redactions: dict[str, int] = {}
+    semantic_info: dict[str, Any] = {}
     try:
         events = _query_core(
             type=type,
@@ -1634,6 +1673,7 @@ def query(
             scanned_sessions_out=scanned_sessions,
             redact=redact,
             redactions_out=redactions,
+            semantic_out=semantic_info,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -1645,6 +1685,8 @@ def query(
     result: dict[str, Any] = {"events": events, "count": len(events)}
     if redactions:
         result["redactions"] = redactions
+    if semantic_info:
+        result["semantic"] = semantic_info
     if not events:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,

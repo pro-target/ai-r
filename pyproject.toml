@@ -32,6 +32,18 @@ dependencies = [
 tokens = [
     "tiktoken>=0.5",
 ]
+# Meaning-aware search (F5.1): sort="semantic" re-ranks the BM25 top-50
+# candidates with a local multilingual embedding model
+# (intfloat/multilingual-e5-small, int8 ONNX ~118 MB, run directly via
+# onnxruntime + tokenizers — no torch). Model files are downloaded by
+# `AI_R_EXTRAS=semantic bash install.sh` (or manually, see README).
+# Fully optional: without these packages or the model files semantic sort
+# honestly degrades to the plain BM25 order with a reason — never a crash.
+semantic = [
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "numpy>=1.24",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",

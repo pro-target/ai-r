@@ -38,6 +38,7 @@ _ALLOWLIST = {
     "conftest.py",  # defines the real_* probes — the single source of truth
     "test_cli.py",  # _first_claude_uuid(): skips when no real session exists
     "test_mcp.py",  # _first_claude_uuid(): skips when no real session exists
+    "test_semantic.py",  # host smoke: skipif when the real model is absent
 }
 
 _TESTS_ROOT = Path(__file__).resolve().parent

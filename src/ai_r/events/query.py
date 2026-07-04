@@ -16,6 +16,7 @@ from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
 from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 from ai_r.redact import merge_redaction_counts, redact_text
+from ai_r.semantic import semantic_order as _semantic_order
 
 from ai_r.parsers._noise import validate_noise
 
@@ -211,6 +212,7 @@ def query(
     scanned_sessions_out: Optional[dict[str, Any]] = None,
     redact: bool = True,
     redactions_out: Optional[dict[str, int]] = None,
+    semantic_out: Optional[dict[str, Any]] = None,
 ) -> List[dict[str, Any]]:
     """Filter/search the normalized Event stream — the Phase-1 workhorse.
 
@@ -240,9 +242,13 @@ def query(
     * ``text`` — substring matched against event ``text``
       (case-insensitive).  With ``sort="relevance"`` the survivors are
       BM25-ranked using the **same scorer** as ``search_sessions``.
-    * ``sort`` — ``"date"`` (default, ts-ascending) or ``"relevance"``
+    * ``sort`` — ``"date"`` (default, ts-ascending), ``"relevance"``
       (BM25 over ``text``; requires a ``text`` facet, else falls back to
-      date order).
+      date order), or ``"semantic"`` (F5.1: the BM25 top-50 candidates
+      re-ranked by a local multilingual embedding model — see
+      :mod:`ai_r.semantic`; without the optional ``ai-r[semantic]``
+      dependencies/model it honestly degrades to the plain BM25 order,
+      never a crash; the outcome lands in ``semantic_out``).
     * ``relative_to`` + ``direction`` (``prev``|``next``) + ``n``
       (``1`` | ``"all"``) — the neighbouring-turn walk.  Generalises
       ``previous_user_intent`` (prev/1) to both directions and any count.
@@ -282,6 +288,12 @@ def query(
     replacement counts.  Redaction is emission-time only: the ``text``
     facet (and every other filter) matches the RAW stored text.
 
+    ``semantic_out`` is a caller-owned out-dict filled only when
+    ``sort="semantic"`` was requested with a ``text`` facet: either the
+    active-ranking report (``active``/``model``/``candidates``/``weight``)
+    or the honest degradation notice (``active: false`` + plain-words
+    ``reason`` + ``fallback: "bm25"``).
+
     ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
     — plan/subagent facets).  They are accepted in the signature for forward
     compatibility, but passing a non-``None`` value raises
@@ -297,9 +309,9 @@ def query(
             f"direction must be 'prev' or 'next', got {direction!r}"
         )
     sort_lc = (sort or "date").lower()
-    if sort_lc not in ("date", "relevance"):
+    if sort_lc not in ("date", "relevance", "semantic"):
         raise ValueError(
-            f"sort must be 'relevance' or 'date', got {sort!r}"
+            f"sort must be 'relevance', 'date' or 'semantic', got {sort!r}"
         )
     validate_noise(noise)
     if tool_kind is not None:
@@ -418,14 +430,28 @@ def query(
         survivors.append(ev)
         score_texts.append((ev.text or "").lower())
 
-    if sort_lc == "relevance" and text_needle and survivors:
+    if sort_lc in ("relevance", "semantic") and text_needle and survivors:
         # Re-use the SAME BM25 scorer that backs search_sessions.
         query_tokens = _tokenize(text_needle)
         docs_tokens = [_tokenize(t) for t in score_texts]
         scores = _bm25_scores(query_tokens, docs_tokens)
-        order = sorted(
-            range(len(survivors)), key=lambda i: scores[i], reverse=True
-        )
+        order: Optional[List[int]] = None
+        if sort_lc == "semantic":
+            # F5.1: BM25 supplies the candidates; the local embedding
+            # model re-ranks them by meaning.  ``None`` = the optional
+            # dependencies/model are missing or failed — an honest
+            # BM25 fallback (reported via ``semantic_out``), never a
+            # crash.  Embedding sees the RAW event text (not the
+            # lowercased match copy).
+            order, sem_info = _semantic_order(
+                text or "", [ev.text or "" for ev in survivors], scores
+            )
+            if semantic_out is not None:
+                semantic_out.update(sem_info)
+        if order is None:
+            order = sorted(
+                range(len(survivors)), key=lambda i: scores[i], reverse=True
+            )
         survivors = [survivors[i] for i in order]
     else:
         # Date order: ts-ascending, None ts last (stable within session).

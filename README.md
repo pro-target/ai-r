@@ -325,6 +325,25 @@ numbers. Fully optional: without it exact numbers still come straight from the
 session files where recorded, and the fallback estimate degrades to a rough
 chars/4 heuristic, honestly labeled `estimate` — never a crash.
 
+Optional extra — `semantic`: `AI_R_EXTRAS=semantic bash install.sh` (or
+`pip install "ai-r[semantic]"` + a one-time model download the installer does
+for you) enables `sort="semantic"` on text search (`query`, `search_sessions`):
+the BM25 top-50 candidates are re-ranked by **meaning** with a local
+multilingual embedding model —
+[intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
+(int8 ONNX, ~118 MB, MIT), run directly via
+[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers),
+no torch, no persistent index. Why this model: strong cross-lingual retrieval
+(a Russian query finds an English session and vice versa) at a small size. How
+the score works, in plain words: BM25 picks the 50 best word-matches (a cost
+budget, not a quality cut-off — there is deliberately *no* similarity
+threshold, because this model family scores even unrelated texts ≈0.7); within
+that pool the final score is **75 % meaning + 25 % word match** — meaning
+dominates, the word share keeps exact-term hits from being drowned and breaks
+ties. Fully optional: without the packages or model files, `sort="semantic"`
+honestly falls back to the BM25 order and the response says why
+(`semantic: {active: false, reason, fallback: "bm25"}`) — never a crash.
+
 ## Boundaries: a reader, not a guard
 
 - **Read-only.** It never runs an agent's code and never writes to its history —

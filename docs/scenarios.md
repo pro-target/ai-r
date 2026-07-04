@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 78 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 81 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -63,6 +63,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 78 LLM-executed end-to-end
 | `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
 | empty-result diagnostics (cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
 | secret redaction (cross-cutting) | 3 | Every text-emitting method masks secrets on output as `[REDACTED_<TYPE>]` by default and carries a `redactions` type→count dict; `redact=false` returns the raw content; matching always runs on the RAW stored text (searching a literal secret finds its session, only the display is masked); a `[REDACTED_*]` placeholder or secret-looking filter value on an empty result earns a diagnostics hint suggesting `redact=false`. |
+| semantic sort (cross-cutting) | 3 | `sort="semantic"` on the text-search surface (`query` text facet, `search_sessions`) re-ranks the BM25 top-50 candidates by meaning with a local multilingual embedding model (`intfloat/multilingual-e5-small`, int8 ONNX, direct onnxruntime+tokenizers, mandatory `query:`/`passage:` prefixes applied internally, no persistent index); blended candidate score = 75 % meaning + 25 % word match (min–max normalized within the pool), no similarity cut-off — results are re-ordered, never dropped, the tail keeps BM25 order; the response carries a `semantic` report (`active: true` + model/candidates/weight, or `active: false` + plain-words `reason` + `fallback: "bm25"`); without the optional `ai-r[semantic]` deps/model files the order honestly falls back to plain BM25 — never a crash — and the default sorts never touch the module; cross-lingual ru↔en retrieval works both ways. |
 | CLI error contract | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
 
 <!-- scenarios:end -->
@@ -836,6 +837,41 @@ behaviour spec: `docs/methods.md` → *Redaction*.
 - **Steps:** `mcp__ai-r__query(agent="claude", text="[REDACTED_OPENAI_KEY]")` → inspect `diagnostics.hints`; then `mcp__ai-r__query(agent="claude", text="sk-zzz999zzz999zzz999zzz999")` (absent from the corpus) → inspect `diagnostics.hints`.
 - **Expected:** The placeholder case yields a hint that placeholders never exist in stored text and can never match (search the raw value / use `redact=false`); the secret-shaped case yields a hint that redaction is enabled, matching ran on RAW text, and `redact=false` shows raw values. With `redact=false` on the call, neither hint appears.
 - **Pass criteria:** GO when both hint variants appear exactly on the empty path and name `redact=false`. A bare empty result for a placeholder search is NO-GO.
+
+---
+
+## Semantic sort (cross-cutting, F5.1)
+
+`sort="semantic"` on the text-search surface (`query` with a `text` facet, `search_sessions`):
+BM25 supplies the top-50 candidate pool, a local multilingual embedding model
+(`intfloat/multilingual-e5-small`, int8 ONNX via onnxruntime + tokenizers, `query:`/`passage:`
+prefixes applied internally) re-ranks it by meaning. Blended score = 75 % meaning + 25 % word match;
+no similarity cut-off (re-order, never drop); tail beyond the pool keeps BM25 order. Optional
+`ai-r[semantic]` extra; without it — honest BM25 fallback with a reason, never a crash.
+
+### SEM-1 — meaning beats word frequency `[needs-real-vault]` (requires `ai-r[semantic]` + model)
+- **Function:** `query` / `search_sessions` with `sort="semantic"`
+- **Goal:** A semantically close session outranks a higher word-frequency but off-topic one.
+- **Preconditions:** `ai-r[semantic]` installed AND the model files present (`AI_R_EXTRAS=semantic bash install.sh`); a vault with sessions where a term appears both on-topic and off-topic.
+- **Steps:** `mcp__ai-r__search_sessions(query="<term>", scope="body", sort="relevance")`, then the same call with `sort="semantic"`; compare top results.
+- **Expected:** Both calls return the same match SET (semantic re-orders, never drops); the semantic top hit is the session whose *content* matches the query's meaning; the response carries `semantic: {active: true, model: "intfloat/multilingual-e5-small", candidates: ≤50, weight: 0.75}`.
+- **Pass criteria:** GO when the match set is identical to the BM25 call, only the order differs, the top hit is semantically the right one, and the `semantic` report says `active: true` with the model name. A dropped result or a missing `semantic` field is NO-GO.
+
+### SEM-2 — honest degradation without the extra `[hermetic-ok]`
+- **Function:** `query` / `search_sessions` with `sort="semantic"`
+- **Goal:** Without `ai-r[semantic]` (or without the model files) the call still works: BM25 order + a plain-words notice — never an exception.
+- **Preconditions:** onnxruntime/tokenizers NOT importable, or the model dir empty (point `AI_R_SEMANTIC_MODEL_DIR` at an empty dir).
+- **Steps:** `mcp__ai-r__search_sessions(query="<term>", scope="body", sort="semantic")` and `mcp__ai-r__query(text="<term>", sort="semantic")`; compare each with its `sort="relevance"` twin.
+- **Expected:** Results and their order are byte-identical to the `relevance` call; the response carries `semantic: {active: false, reason: <mentions pip install "ai-r[semantic]" or the model dir + install.sh>, fallback: "bm25"}`; the `relevance`/`date` calls never carry a `semantic` field.
+- **Pass criteria:** GO when the fallback order equals BM25, the reason is actionable (names the install command or the model dir), and no error/exception surfaces. A crash, an empty result caused by the missing extra, or a silent fallback without `reason` is NO-GO.
+
+### SEM-3 — cross-lingual ru↔en retrieval `[needs-real-vault]` (requires `ai-r[semantic]` + model)
+- **Function:** `search_sessions` / `query` with `sort="semantic"`
+- **Goal:** A Russian query surfaces an English session about the same thing (and vice versa) — the project's hard multilingual requirement.
+- **Preconditions:** `ai-r[semantic]` + model files; a vault containing sessions on one topic in English and another topic as noise; a query for that topic in Russian (e.g. query «ошибка сегментации» vs an English segfault-debugging session).
+- **Steps:** pick a broad word-match query that catches both the on-topic English session and off-topic noise; run with `sort="relevance"` then `sort="semantic"`; compare the rank of the on-topic English session.
+- **Expected:** Under `sort="semantic"` the on-topic English session ranks above the off-topic noise even though the query is Russian (E5 cross-lingual embedding space); the reverse direction (English query, Russian session) behaves symmetrically.
+- **Pass criteria:** GO when the cross-language on-topic session demonstrably outranks off-topic same-language noise in at least one direction ru→en or en→ru (both preferred). NO-GO if semantic order equals BM25 order on a case where meaning and word frequency clearly disagree.
 
 ---
 

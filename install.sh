@@ -17,7 +17,12 @@
 #                  the agent MCP configs (default: ~/.local/bin/ai-r-mcp)
 #   AI_R_EXTRAS    optional pip extras, comma-separated (e.g. "tokens" to add
 #                  tiktoken for better token estimates in session_stats
-#                  with_tokens; default: none — ai-r works without extras)
+#                  with_tokens; "semantic" to add onnxruntime+tokenizers AND
+#                  download the local embedding model for sort="semantic";
+#                  default: none — ai-r works without extras)
+#   AI_R_SEMANTIC_MODEL_DIR
+#                  where the semantic model files are stored (default:
+#                  ~/.cache/ai-r/semantic/multilingual-e5-small)
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
 
 set -euo pipefail
@@ -194,6 +199,41 @@ if [[ "$USE_VENV" == "0" ]]; then
 fi
 run $PIP_TARGET "${PIP_ARGS[@]}"
 log "pip install: OK"
+
+# --- 4b. optional semantic model (only when AI_R_EXTRAS contains "semantic") ---
+# sort="semantic" needs the local embedding model files next to the extra's
+# python packages. Downloaded once, idempotent; a failed download only warns
+# (ai-r then falls back to BM25 order with an honest notice — never a crash).
+if [[ ",${AI_R_EXTRAS:-}," == *",semantic,"* ]]; then
+    hdr "Optional: semantic model (intfloat/multilingual-e5-small, int8 ONNX, ~118 MB)"
+    SEM_DIR="${AI_R_SEMANTIC_MODEL_DIR:-$HOME/.cache/ai-r/semantic/multilingual-e5-small}"
+    SEM_BASE="https://huggingface.co/intfloat/multilingual-e5-small/resolve/main"
+    run mkdir -p "$SEM_DIR"
+    fetch_model_file() { # <url> <dest>
+        local url="$1" dest="$2"
+        if [[ -s "$dest" ]]; then
+            log "already present: $dest"
+            return 0
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            run curl -fL --retry 3 -o "${dest}.part" "$url" && run mv "${dest}.part" "$dest"
+        elif command -v wget >/dev/null 2>&1; then
+            run wget -q -O "${dest}.part" "$url" && run mv "${dest}.part" "$dest"
+        else
+            warn "neither curl nor wget found — cannot download the model"
+            return 1
+        fi
+    }
+    if fetch_model_file "$SEM_BASE/onnx/model_qint8_avx512_vnni.onnx" "$SEM_DIR/model_qint8_avx512_vnni.onnx" \
+       && fetch_model_file "$SEM_BASE/tokenizer.json" "$SEM_DIR/tokenizer.json"; then
+        log "semantic model ready: $SEM_DIR"
+    else
+        warn "semantic model download failed — sort=\"semantic\" will honestly fall back to BM25."
+        warn "Manual download into $SEM_DIR :"
+        warn "  $SEM_BASE/onnx/model_qint8_avx512_vnni.onnx"
+        warn "  $SEM_BASE/tokenizer.json"
+    fi
+fi
 
 # --- 5. symlink binaries ---
 hdr "Step 4/6: symlink binaries → $BIN_DIR"
