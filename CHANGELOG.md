@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resume command in session summaries (F2.2)**: every session summary
+  (`list_sessions` / `read_session` / `search_sessions` candidates) now
+  carries `resume_command` — the ready-to-run shell one-liner that
+  reopens the conversation in its agent's CLI, next to
+  `project_dir`/`launch_surface`. Text only, never executed by ai-r.
+  Shapes (verified against the installed CLIs' `--help`, not invented):
+  Claude `cd <project_dir> && claude --resume <uuid>` (`--resume`
+  resolves against the cwd's project store → `cd` prefix; bare command
+  when `project_dir` is unknown), Codex `codex resume <uuid>`, OpenCode
+  `opencode --session <id>`, Pi `pi --session <session-file-path>` (the
+  path form is cwd-independent, the id lookup is not) — each
+  `cd`-prefixed when `project_dir` is known, all values shell-quoted.
+  `null` where no real command exists: Antigravity (IDE brain dirs have
+  no CLI resume verb), subagent (sidechain) sessions, reference-only
+  Claude Desktop sessions (transcript deleted). SSOT
+  `src/ai_r/resume.py`; see `docs/methods.md` → *Resume command*;
+  scenario RES-1.
 - **Secret redaction on output (F2.1)**: every method that emits
   session-derived text now masks secrets **on output by default** —
   `query` (`text`/`intent`), `get_body`, `plan`, `diff`/`session_diff`,

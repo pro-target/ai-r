@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 55 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -54,6 +54,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 55 LLM-executed end-to-end
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
+| `resume_command` (summary field) | 1 | Every session summary carries `resume_command` — the ready-to-run CLI one-liner (`cd <project_dir> && claude --resume <uuid>` / `codex resume <uuid>` / `opencode --session <id>` / `pi --session <path>`), shell-quoted, `cd`-prefixed when `project_dir` is known; `null` exactly where no real command exists (Antigravity, subagent sessions, reference-only Desktop sessions) — text only, never executed. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
 | `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
@@ -431,6 +432,24 @@ Cross-agent session inventory: newest-first, paginated, each summary self-descri
 - **Steps:** `mcp__ai-r__list_sessions()`; then `mcp__ai-r__list_sessions(agent="claude", project_dir="/home/u/dev/x")`; then `project_dir="   "`.
 - **Expected:** Claude summaries carry `project_dir` = the seeded cwd and `launch_surface="claude-cli"`; the Antigravity summary carries `project_dir=null` and `launch_surface="antigravity-cli"` (fields present, null where no signal, nothing fabricated); the filtered call returns exactly the `/home/u/dev/x` and `/home/u/dev/x/sub` sessions (sibling `/home/u/dev/xy` excluded); the blank filter returns `{"error": "invalid_argument", …}`.
 - **Pass criteria:** GO when both fields are top-level on every summary, null exactly where the format has no signal, and the filter is boundary-exact with a loud blank-value error.
+
+---
+
+## `resume_command` (session summary field)
+
+Every session summary (`list_sessions` / `read_session` / `search_sessions` candidates) carries
+`resume_command` (F2.2): the ready-to-run shell one-liner that reopens the session in its agent's
+CLI, or `null` where no real command exists. Text only — **the scenario never executes the
+command**; it validates the string shape. Semantics SSOT: `src/ai_r/resume.py`;
+spec: `docs/methods.md` → *Resume command*.
+
+### RES-1 — per-agent command shape + honest nulls
+- **Function:** `list_sessions` (F2.2 `resume_command` in every summary)
+- **Goal:** Each agent's summary carries the correct resume command text — `cd`-prefixed when `project_dir` is known — and `null` exactly where no command exists (Antigravity always; subagent sessions; a reference-only Claude Desktop session). Nothing is executed.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME`: (a) a Claude transcript with record-level `cwd="/home/u/dev/x"`, (b) a Claude subagent (sidechain) session, (c) a Codex session with `session_meta.payload.cwd`, (d) an OpenCode DB row with `session.directory`, (e) a Pi session with a header `cwd`, (f) an Antigravity brain dir, (g) a Desktop-only Claude metadata JSON with no backing transcript.
+- **Steps:** `mcp__ai-r__list_sessions()`; inspect `resume_command` on every summary. Do NOT run any of the returned commands.
+- **Expected:** Claude (a) → `cd /home/u/dev/x && claude --resume <uuid>`; Codex (c) → `cd <cwd> && codex resume <uuid>`; OpenCode (d) → `cd <directory> && opencode --session <id>`; Pi (e) → `cd <cwd> && pi --session <session-file-path>` (path form, not id); Antigravity (f) → `null`; the subagent session (b) → `null`; the Desktop-only reference (g) → `null`. A session without `project_dir` gets the bare command (no fabricated `cd`).
+- **Pass criteria:** GO when every non-null command matches its agent's documented shape with shell-quoted values, and `null` appears exactly on Antigravity / subagent / reference-only summaries — never an invented command. NO-GO if a command is fabricated where the CLI has no resume verb.
 
 ---
 

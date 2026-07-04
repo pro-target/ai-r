@@ -70,6 +70,7 @@ from ai_r.parsers import Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.resume import resume_command  # noqa: E402
 from ai_r.redact import (  # noqa: E402
     merge_redaction_counts as _merge_redactions,
     redact_value as _redact_value,
@@ -158,6 +159,11 @@ def _session_summary(session: Session) -> dict[str, Any]:
     ``project_dir`` / ``launch_surface`` are top-level fields (next to
     ``kind`` / ``parent_uuid``) and stay ``None`` when the source format
     carries no signal — absence is honest, never fabricated (F1.4).
+    ``resume_command`` (F2.2) is the ready-to-run shell one-liner that
+    reopens the session in its agent's CLI, ``None`` when no real
+    command exists (Antigravity, subagent sessions, reference-only
+    Desktop sessions) — text only, never executed (SSOT
+    :mod:`ai_r.resume`).
     """
     result = {
         "uuid": session.uuid,
@@ -169,6 +175,7 @@ def _session_summary(session: Session) -> dict[str, Any]:
         "parent_uuid": session.parent_uuid,
         "project_dir": session.project_dir,
         "launch_surface": session.launch_surface,
+        "resume_command": resume_command(session),
     }
     if session.extra:
         result["extra"] = session.extra
