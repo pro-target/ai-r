@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 67 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 70 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -49,7 +49,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 67 LLM-executed end-to-end
 | `aggregate` | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
 | `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
-| `plan` | 8 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape. |
+| `plan` | 11 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape; v2 — every atom carries `version` (v1…vN per task, chronological, final = vN), every pair carries `plan_version` + `round` + `section` (the quote anchored to its source-markdown section through markup-stripping normalization — miss or multi-section ambiguity is an honest `null`, never a nearest guess; a rejected plan-file `Write` correlates like an `ExitPlanMode` verdict), and `rounds=all\|last` filters to each session's final feedback round (unknown value fails loud). |
 | `session_stats` (preset) | 4 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
@@ -343,8 +343,8 @@ Normalized plan atoms of a session; agent differences hidden. Task grouping is b
 - **Goal:** The default response carries the FINAL plan's full text inline; draft/major bodies are never inlined.
 - **Preconditions:** A session with a multi-revision plan iteration (claude redraft chain). `[hermetic-ok]` (synthetic) or `[needs-real-vault]`.
 - **Steps:** `mcp__ai-r__plan(session="<uuid>")`; then `mcp__ai-r__plan(session="<uuid>", bodies="none")`.
-- **Expected:** Default: the `final` atom carries `body` (full plan text) + `body_source` (`"approval_edited_by_user"` when the user's approval carried an edited plan — that text overrides the signal/file body — else `"plan_signal"`; honest `null` body for a steps-only codex plan); every `draft`/`completed_major` atom has NO `body` key. `bodies="none"`: no atom carries `body`/`body_source` (historical shape).
-- **Pass criteria:** GO when exactly the final is inlined with a truthful `body_source`, drafts stay references, and `bodies="none"` is byte-identical to the historical atoms.
+- **Expected:** Default: the `final` atom carries `body` (full plan text) + `body_source` (`"approval_edited_by_user"` when the user's approval carried an edited plan — that text overrides the signal/file body — else `"plan_signal"`; honest `null` body for a steps-only codex plan); every `draft`/`completed_major` atom has NO `body` key. `bodies="none"`: no atom carries `body`/`body_source` (the historical reference-only shape plus the v2 `version` field).
+- **Pass criteria:** GO when exactly the final is inlined with a truthful `body_source`, drafts stay references, and `bodies="none"` carries no body on any atom (historical fields unchanged; `version` is the only v2 addition).
 
 ### PLAN-7 — «plan quote → user comment» pairs with refs (F3.4)
 - **Function:** `plan`
@@ -361,6 +361,30 @@ Normalized plan atoms of a session; agent differences hidden. Task grouping is b
 - **Steps:** `mcp__ai-r__plan(session="<codex-uuid>", agent="codex")`.
 - **Expected:** `feedback == []`, `feedback_count == 0`; the plan atoms themselves are unchanged.
 - **Pass criteria:** GO when feedback is empty (not an error, not invented) and the atoms match the historical output.
+
+### PLAN-9 — draft numbering v1…vN per task (F3.4 v2)
+- **Function:** `plan`
+- **Goal:** Every plan atom carries `version` — its 1-based revision number within the task group, chronological by `(ts, seq)`; drafts are `v1…vN-1`, the final is `vN`; numbering restarts per task.
+- **Preconditions:** A session with a multi-revision plan iteration (claude redraft chain) and, ideally, a second task. `[hermetic-ok]` (synthetic) or `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__plan(session="<uuid>")`; inspect `version` per atom; cross-check a multi-task session.
+- **Expected:** Within one task the versions are `1..N` in chronological order and the `final` atom holds the highest number; a second task numbers from `1` again; feedback pairs carry the matching `plan_version` (the answered revision's number, `null` when the transcript records no call-id correlation).
+- **Pass criteria:** GO when versions are dense, chronological, per-task, the final is `vN`, and each pair's `plan_version` equals the `version` of the atom its `plan_id` points at.
+
+### PLAN-10 — quote anchored to its plan section through rendered markup (F3.4 v2)
+- **Function:** `plan`
+- **Goal:** A feedback pair's `quote` (selected from the RENDERED plan — the UI strips markdown markup) anchors to the heading of the ONE source-markdown section that contains it; a miss or an ambiguous match is an honest `null`, never a nearest guess.
+- **Preconditions:** A claude plan session whose plan body has markdown sections and markup (bold/backticks/lists) and whose rejections quote rendered text. `[hermetic-ok]` (synthetic) or `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__plan(session="<uuid>")`; inspect `section` on each feedback pair.
+- **Expected:** A quote whose source sentence carries markup (`**bold**`, `` `code` ``, list markers) still anchors — both sides are compared through the same markup-stripping normalization; a quote present in TWO sections gets `section: null` (ambiguity is not resolved by picking one); a quote absent from the plan gets `section: null` (miss stays a miss); a free-text pair (`quote: null`) has `section: null`; fenced code blocks never start a section.
+- **Pass criteria:** GO when markup-bearing quotes anchor to the correct heading and every miss/ambiguity/free-text case is `null` — any "nearest" guess is NO-GO.
+
+### PLAN-11 — feedback rounds: grouping + `rounds="last"` (F3.4 v2)
+- **Function:** `plan`
+- **Goal:** Pairs are grouped by `round` (1-based per session, one round per user response that produced pairs) and `rounds="last"` keeps only each session's final round.
+- **Preconditions:** A claude session with ≥2 feedback rounds (e.g. a rejection then a stay-in-plan-mode). `[hermetic-ok]` (synthetic) or `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__plan(session="<uuid>")`; then `mcp__ai-r__plan(session="<uuid>", rounds="last")`; then an invalid `rounds="first"`.
+- **Expected:** Default: every pair carries `round`, numbers are dense `1..R` in chronological order and all pairs from one response share one round. `rounds="last"`: only round-`R` pairs remain; the plan atoms and `count` are unaffected. `rounds="first"` fails loud (`invalid_argument`), even with `feedback=false`.
+- **Pass criteria:** GO when round numbering is dense and response-aligned, `"last"` returns exactly the final round, atoms are untouched, and the invalid value errors instead of being silently ignored.
 
 ---
 

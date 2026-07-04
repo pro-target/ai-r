@@ -845,6 +845,134 @@ def fake_claude_plan_feedback(tmp_sessions_dir: Path) -> str:
 
 
 @pytest.fixture
+def fake_claude_plan_sections(tmp_sessions_dir: Path) -> str:
+    """Claude plan iteration for the F3.4 v2 quote→section anchoring cases.
+
+    One ``ExitPlanMode`` revision whose body has markdown markup and three
+    sections (two of which share a phrase), answered by a rejection whose
+    quotes are the RENDERED text (markup stripped by the UI):
+
+    * a bold/backtick sentence quote → anchors to "Rollout Strategy";
+    * a bullet-list quote → anchors to "Rollout Strategy";
+    * a phrase present in BOTH "Testing" and "Cleanup" → ambiguous → null;
+    * a quote absent from the plan → miss → null (never a nearest guess).
+    """
+    session_id = "plan-sections-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    plan_body = (
+        "# Release Plan\n"
+        "\n"
+        "Intro line.\n"
+        "\n"
+        "## Rollout Strategy\n"
+        "\n"
+        "We will use **canary deploys** with `feature_flag` gating.\n"
+        "- staged rollout to 5% first\n"
+        "\n"
+        "## Testing\n"
+        "\n"
+        "Run the suite and check *coverage* numbers.\n"
+        "Shared phrase target.\n"
+        "\n"
+        "## Cleanup\n"
+        "\n"
+        "Shared phrase target.\n"
+    )
+    rejected = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+        "On selected text:\n"
+        "> We will use canary deploys with feature_flag gating.\n"
+        "Why canary?\n"
+        "\n"
+        "On selected text:\n"
+        "> staged rollout to 5% first\n"
+        "Too slow.\n"
+        "\n"
+        "On selected text:\n"
+        "> Shared phrase target.\n"
+        "Which one?\n"
+        "\n"
+        "On selected text:\n"
+        "> missing from the plan entirely\n"
+        "Anchor me if you can.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan the release"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _claude_exit_plan_with_id(plan_body, "tu-sec-0",
+                                      "2026-06-14T10:00:05Z"),
+            _claude_tool_result("tu-sec-0", rejected,
+                                "2026-06-14T10:00:06Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_plan_write_rejected(tmp_sessions_dir: Path) -> str:
+    """Claude session where a plan-file ``Write`` (not ExitPlanMode) is rejected.
+
+    The v1 boundary fix (F3.4 v2): plan call-ids come from the plan-signal
+    SSOT, so a rejected ``Write plans/*.md`` with user words correlates to
+    its plan revision too.
+    """
+    session_id = "plan-write-reject-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    rejected = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+        "Don't write plan files, refine the plan first.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan feature Y"},
+                "timestamp": "2026-06-14T11:00:00Z",
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-wr-0",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/repo/plans/feature-y.md",
+                                "content": "# Feature Y Plan\n\nWrite draft.",
+                            },
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T11:00:05Z",
+            },
+            _claude_tool_result("tu-wr-0", rejected,
+                                "2026-06-14T11:00:06Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
 def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
     """Codex rollout with several ``update_plan`` calls → last one is final."""
     uuid = "codex-plan-1"

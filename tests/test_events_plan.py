@@ -378,6 +378,140 @@ def test_plan_feedback_empty_without_responses(
 
 
 # ---------------------------------------------------------------------------
+# F3.4 v2 — draft numbering v1…vN + quote→section anchoring + rounds
+# ---------------------------------------------------------------------------
+
+
+def test_plan_atoms_carry_chronological_versions(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft, bodies="none")
+    # One task, 4 revisions → v1..v4 in (ts, seq) order; the final is vN.
+    assert [p["version"] for p in plans] == [1, 2, 3, 4]
+    final = [p for p in plans if p["kind"] == "final"][0]
+    assert final["version"] == 4
+    assert all(p["version"] < 4 for p in plans if p["kind"] == "draft")
+
+
+def test_plan_versions_restart_per_task(
+    fake_claude_plan_multitask: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_multitask)
+    # Two single-revision tasks → each task numbers from v1.
+    versions = {p["task_id"]: p["version"] for p in plans}
+    assert versions == {"plans/task-a.md": 1, "plans/task-b.md": 1}
+
+
+def test_feedback_pairs_carry_plan_version(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # The rejection answered revision 2 (tu-plan-1), the stay-in-plan-mode
+    # answered revision 3 (tu-plan-2) — versions ride on every pair.
+    assert {
+        p["plan_version"] for p in pairs if p["verdict"] == "rejected"
+    } == {2}
+    assert {
+        p["plan_version"] for p in pairs
+        if p["verdict"] == "stay_in_plan_mode"
+    } == {3}
+
+
+def test_feedback_quote_anchors_through_render_markup(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # Rendered quote (bold/backticks stripped by the UI) anchors to the
+    # section whose SOURCE carries the markup.
+    assert by_comment["Why canary?"]["section"] == "Rollout Strategy"
+    # A bullet-list quote (marker rendered away) anchors too.
+    assert by_comment["Too slow."]["section"] == "Rollout Strategy"
+
+
+def test_feedback_quote_anchor_ambiguous_is_null(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # The phrase lives in BOTH "Testing" and "Cleanup" — ambiguity is an
+    # honest null, not a first-match guess.
+    assert by_comment["Which one?"]["section"] is None
+
+
+def test_feedback_quote_anchor_miss_is_null(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # A quote absent from the plan body → null anchor, never the nearest.
+    assert by_comment["Anchor me if you can."]["section"] is None
+
+
+def test_feedback_free_text_pair_has_null_anchor(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    free_text = [p for p in pairs if p["quote"] is None]
+    assert free_text
+    assert all(p["section"] is None for p in free_text)
+
+
+def test_feedback_heading_quote_anchors_to_its_section(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    by_quote = {p["quote"]: p for p in pairs}
+    # Quoting the heading itself anchors to that section (the heading line
+    # belongs to its section).
+    assert by_quote["Feature Plan"]["section"] == "Feature Plan"
+    assert by_quote["Draft one body."]["section"] == "Feature Plan"
+    # "rollout" is not in revision 3's body → honest miss.
+    assert by_quote["rollout"]["section"] is None
+
+
+def test_feedback_pairs_grouped_by_rounds(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # Round 1 = the rejection (3 pairs), round 2 = stay-in-plan-mode (2).
+    assert [p["round"] for p in pairs] == [1, 1, 1, 2, 2]
+
+
+def test_feedback_rounds_last_keeps_final_round_only(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback, rounds="last")
+    assert len(pairs) == 2
+    assert all(p["round"] == 2 for p in pairs)
+    assert all(p["verdict"] == "stay_in_plan_mode" for p in pairs)
+
+
+def test_feedback_rounds_invalid_raises(
+    fake_claude_plan_feedback: str,
+) -> None:
+    with pytest.raises(ValueError):
+        plan_feedback(session=fake_claude_plan_feedback, rounds="first")
+
+
+def test_rejected_write_plan_correlates_to_its_revision(
+    fake_claude_plan_write_rejected: str,
+) -> None:
+    # v1 boundary fix: plan call-ids come from the plan-signal SSOT, so a
+    # rejected ``Write plans/*.md`` correlates like an ExitPlanMode verdict.
+    pairs = plan_feedback(session=fake_claude_plan_write_rejected)
+    assert len(pairs) == 1
+    p = pairs[0]
+    assert p["verdict"] == "rejected"
+    assert p["quote"] is None  # free-text rejection, no selection UI
+    assert p["comment"] == "Don't write plan files, refine the plan first."
+    plans = plan(session=fake_claude_plan_write_rejected, bodies="none")
+    assert p["plan_id"] == plans[0]["id"]
+    assert p["plan_version"] == 1
+    assert p["round"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Cross-agent (S5): plan_events normalize across agents in one call.
 # ---------------------------------------------------------------------------
 

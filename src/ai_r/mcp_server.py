@@ -1516,6 +1516,7 @@ def plan(
     redact: bool = True,
     bodies: str = "final",
     feedback: bool = True,
+    rounds: str = "all",
 ) -> dict[str, Any]:
     """Normalized plan atoms for a session — final vs drafts, grouped by task.
 
@@ -1541,9 +1542,21 @@ def plan(
     pair extracted from the user's plan responses is returned under
     ``feedback``, each with a ``ref`` (``"<session>:pf<N>"``) that
     ``get_body`` resolves to the FULL raw response.  Only agents with an
-    interactive plan-approval flow have the feedback signal (today: Claude);
-    others honestly contribute nothing.  Technical failures and bare
-    no-comment rejections are filtered out.
+    interactive plan-approval flow have the feedback signal (today: Claude —
+    an ``ExitPlanMode`` verdict or a rejected plan-file ``Write``); others
+    honestly contribute nothing.  Technical failures and bare no-comment
+    rejections are filtered out.
+
+    F3.4 v2 additions: every plan atom carries ``version`` — its 1-based
+    revision number within the task group, chronological (drafts are
+    ``v1…vN-1``, the final is ``vN``); every feedback pair carries
+    ``plan_version`` (the answered revision's number), ``round`` (1-based
+    feedback-round number within the session — one round per user response
+    that produced pairs) and ``section`` — the heading of the plan section
+    the quote anchors to.  Quotes are selected from the RENDERED plan, so
+    the anchor match strips markdown markup from both sides; a quote that
+    matches no section — or more than one — gets an honest ``null``
+    anchor, never a nearest guess.
 
     Args:
         session: Restrict to one session uuid (recommended).
@@ -1556,29 +1569,37 @@ def plan(
             ``redactions`` type→count dict when any replacement happened;
             ``False`` returns raw content.
         bodies: ``"final"`` (default) inlines the final plan's full text;
-            ``"none"`` restores the historical reference-only atoms.
+            ``"none"`` returns reference-only atoms.
         feedback: ``True`` (default) adds the ``feedback`` pair list +
             ``feedback_count``; ``False`` omits both (historical shape).
+        rounds: ``"all"`` (default) returns every feedback round;
+            ``"last"`` keeps only each session's final round (v2).  Any
+            other value fails loud.
 
     Returns:
         ``{"plans": [...], "count": N, "feedback": [...],
         "feedback_count": M}`` — each plan carries
-        ``id/session_id/agent/title/task_id/kind/path/steps/status/refs/
-        sha256`` (+ ``body``/``body_source`` on the ``final`` when
+        ``id/session_id/agent/title/task_id/kind/version/path/steps/status/
+        refs/sha256`` (+ ``body``/``body_source`` on the ``final`` when
         ``bodies="final"``); each feedback pair carries
-        ``session_id/agent/plan_id/verdict/quote/comment/ref/ts``
-        (``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode``; ``quote`` is
-        ``null`` for a free-text comment).  Draft bodies and raw responses
-        stay on-demand via :func:`get_body`.  Standard
+        ``session_id/agent/plan_id/plan_version/verdict/round/quote/comment/
+        section/ref/ts`` (``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode``;
+        ``quote`` is ``null`` for a free-text comment; ``plan_version``/
+        ``section`` are ``null`` without a signal).  Draft bodies and raw
+        responses stay on-demand via :func:`get_body`.  Standard
         ``{"error": ..., "message": ...}`` dict on invalid arguments.
     """
     try:
+        if rounds not in ("all", "last"):
+            raise ValueError(
+                f"rounds must be 'all' or 'last', got {rounds!r}"
+            )
         plans = _plan_core(
             session=session, kind=kind, group=group, agent=agent,
             bodies=bodies,
         )
         pairs = (
-            _plan_feedback_core(session=session, agent=agent)
+            _plan_feedback_core(session=session, agent=agent, rounds=rounds)
             if feedback else None
         )
     except ValueError as exc:

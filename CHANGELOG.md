@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Plan iterations v2: draft numbering, quote→section anchoring, rounds
+  (F3.4 v2)**: (a) every plan atom now carries `version` — its 1-based
+  revision number within the task group in chronological `(ts, seq)`
+  order (drafts are `v1…vN-1`, the final is `vN`; numbering restarts per
+  task), so a draft stays a cheap «version + title + ref» reference;
+  (b) every feedback pair carries `plan_version` (the answered revision's
+  number, `null` without call-id correlation) and `section` — the heading
+  of the plan section the quote anchors to: the user selects quotes from
+  the RENDERED plan (the UI strips markdown markup), so both the quote
+  and each section of the raw markdown source are compared through the
+  same markup-stripping normalization (heading hashes, list/blockquote
+  markers, checkboxes, emphasis asterisks, backticks, link targets;
+  whitespace collapsed; fenced code blocks never start a section); a
+  quote that matches NO section — or MORE than one — gets an honest
+  `null` anchor, never a nearest guess; (c) pairs are grouped by
+  `round` — the 1-based feedback-round number within the session (one
+  round per user response that produced pairs) — and the new `rounds`
+  parameter (`"all"` default, `"last"` keeps only each session's final
+  round, anything else fails loud) filters them; (d) v1 boundary fixed:
+  plan call-ids now come from the plan-signal SSOT, so a **rejected
+  plan-file `Write`** with user words correlates to its revision exactly
+  like an `ExitPlanMode` verdict (a successful Write's "File created…"
+  result matches no recognised format and stays filtered). Plan atoms
+  themselves are unaffected by `rounds`; historical fields are
+  unchanged. Scenarios PLAN-9..11.
+
 - **Plan iterations: final text + «quote → comment» pairs (F3.4 v1)**:
   `plan` now returns, by default, everything a consumer needs to replay a
   plan-approval iteration without inlining every draft (measured ≈×3.7
@@ -34,9 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quotes, comments and raw responses. Backward-compat switches:
   `bodies="none"` restores reference-only atoms, `feedback=false` omits
   the pair list; historical fields are unchanged. New core
-  `ai_r.events.plan_feedback`; scenarios PLAN-6..8, BODY-5. (v2 —
-  draft version numbering, quote→section anchoring, `rounds` — is a
-  separate follow-up iteration.)
+  `ai_r.events.plan_feedback`; scenarios PLAN-6..8, BODY-5. (The v2
+  entry above adds draft version numbering, quote→section anchoring
+  and `rounds`.)
 
 - **Token usage in stats (F3.3)**: `session_stats` gains
   `with_tokens=true` and `aggregate` gains the `tokens` metric. Per

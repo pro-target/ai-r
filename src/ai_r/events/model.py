@@ -480,19 +480,26 @@ def _plan_responses_for_session(
     """Return the ordered user responses to plan revisions in one session.
 
     Only agents with an interactive plan-approval flow produce responses —
-    today that is Claude's ``ExitPlanMode``.  Every other agent returns an
-    empty list (honest absence, never fabricated).  Order is message order;
-    the list index is the stable ``pf<N>`` ordinal that ``get_body`` resolves.
+    today that is Claude.  Every other agent returns an empty list (honest
+    absence, never fabricated).  Order is message order; the list index is
+    the stable ``pf<N>`` ordinal that ``get_body`` resolves.
+
+    The correlated call ids come from the plan-signal SSOT
+    (:func:`_plan_signals_for_session`), so BOTH Claude plan signals are
+    covered: an ``ExitPlanMode`` call and a ``Write plans/*.md`` call (v2 —
+    a rejected plan-file Write with user words is plan feedback too; its
+    result uses the same permission-denial format).  A successful Write's
+    "File created…" result matches no recognised format and is filtered.
     """
     if agent != "claude":
         return []
-    plan_call_ids = set()
-    for msg in messages:
-        for tu in getattr(msg, "tool_use", ()) or ():
-            if isinstance(tu, dict) and tu.get("name") == "ExitPlanMode":
-                tid = tu.get("tool_use_id")
-                if isinstance(tid, str) and tid:
-                    plan_call_ids.add(tid)
+    plan_call_ids = {
+        sig.tool_use_id
+        for sig in _plan_signals_for_session(
+            messages, agent=agent, session_path=""
+        )
+        if sig.tool_use_id
+    }
     if not plan_call_ids:
         return []
     responses: List[_PlanResponse] = []
@@ -521,6 +528,102 @@ def _plan_responses_for_session(
                 ts=ts_iso,
             ))
     return responses
+
+
+# --- quote → plan-section anchoring (F3.4 v2) ------------------------------
+# The user selects quotes from the RENDERED plan (the UI strips markdown
+# markup before display), so anchoring a quote back to a section of the raw
+# markdown source must compare both sides through the same markup-stripping
+# normalization (audited on real vaults: with stripping the section match is
+# ~99%).  A quote that matches no section — or more than one — gets an honest
+# ``None`` anchor, never a nearest guess.
+
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# Leading rendered-away line prefixes: heading hashes, blockquote markers,
+# bullet/numbered list markers (possibly nested, hence the ``+``).
+_MD_LINE_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+))+"
+)
+_MD_CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+")
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def _normalize_rendered_text(text: str) -> str:
+    """Normalize markdown source and rendered selections to one comparand.
+
+    Strips the markup a terminal render removes (heading hashes, list and
+    blockquote markers, checkboxes, emphasis asterisks, backticks, link
+    targets) and collapses ALL whitespace to single spaces, so a quote
+    selected from the rendered plan matches its markdown source.  Applied
+    symmetrically to both sides, so a literal ``*``/`` ` `` inside code is
+    dropped from quote and section alike and still matches.
+    """
+    lines: List[str] = []
+    for line in text.splitlines():
+        s = _MD_LINE_PREFIX_RE.sub("", line.strip())
+        s = _MD_CHECKBOX_RE.sub("", s)
+        lines.append(s)
+    joined = "\n".join(lines)
+    joined = _MD_LINK_RE.sub(r"\1", joined)
+    joined = joined.replace("`", "").replace("*", "")
+    return _WS_RE.sub(" ", joined).strip()
+
+
+def _plan_body_sections(body: str) -> List[Tuple[Optional[str], str]]:
+    """Split a markdown plan body into ``(heading, section_text)`` chunks.
+
+    Flat split on heading lines (any level); the heading line itself belongs
+    to its section, so a quote of the heading anchors there.  Text before
+    the first heading forms a headingless ``(None, …)`` preamble.  Fenced
+    code blocks are opaque — a ``# comment`` inside a fence never starts a
+    section.
+    """
+    sections: List[Tuple[Optional[str], str]] = []
+    heading: Optional[str] = None
+    buf: List[str] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            buf.append(line)
+            continue
+        match = None if in_fence else _HEADING_LINE_RE.match(line)
+        if match:
+            if buf or heading is not None:
+                sections.append((heading, "\n".join(buf)))
+            heading = match.group(2).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    sections.append((heading, "\n".join(buf)))
+    return sections
+
+
+def _anchor_quote_to_section(
+    quote: Optional[str], body: Optional[str]
+) -> Optional[str]:
+    """Anchor a rendered plan quote to ONE section heading of the source.
+
+    Returns the heading text of the single section whose normalized text
+    contains the normalized quote.  Honest ``None`` when the quote is empty,
+    the body is unknown, the quote matches NO section (a miss stays a miss —
+    never the nearest guess) or matches MORE than one (ambiguity is not
+    resolved by picking one).
+    """
+    if not quote or not isinstance(body, str) or not body:
+        return None
+    needle = _normalize_rendered_text(quote)
+    if not needle:
+        return None
+    hits = [
+        heading
+        for heading, section_text in _plan_body_sections(body)
+        if needle in _normalize_rendered_text(section_text)
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    return None
 
 
 def _messages_to_events(

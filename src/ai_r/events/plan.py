@@ -30,6 +30,7 @@ from ai_r.events._common import _plan_ref_value
 from ai_r.events.model import (
     _PlanResponse,
     _PlanSignal,
+    _anchor_quote_to_section,
     _normalize_task_key,
     _plan_responses_for_session,
     _plan_signals_for_session,
@@ -56,6 +57,9 @@ class Plan:
             group the latest plan_event is ``final``, earlier ones are
             ``draft``; plans belonging to *earlier* completed task groups
             are ``completed_major``.
+        version: 1-based revision number within the task group, in
+            chronological ``(ts, seq)`` order (F3.4 v2) — drafts are
+            ``v1…vN-1``, the final is ``vN``; numbering restarts per task.
         path: Source path when the signal is file-backed (``plans/*.md`` for
             Claude Write, ``implementation_plan.md`` for Antigravity).
         steps: Codex ``update_plan`` steps (with per-step ``status``), else
@@ -73,6 +77,7 @@ class Plan:
     title: str
     task_id: str
     kind: str
+    version: int = 1
     path: Optional[str] = None
     steps: Optional[Tuple[dict, ...]] = None
     status: Optional[str] = None
@@ -135,7 +140,9 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
         ordered = sorted(evs, key=_sort_key)
         final_ev = ordered[-1] if ordered else None
         is_latest_task = key == latest_task_key
-        for ev in ordered:
+        # F3.4 v2: 1-based revision numbering per task group, chronological —
+        # drafts are v1…vN-1, the final is vN (restarts for every task).
+        for version, ev in enumerate(ordered, start=1):
             if not is_latest_task:
                 kind = "completed_major"
             elif ev is final_ev:
@@ -150,6 +157,7 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
                 title=_plan_ref_value(ev.get("refs", ()), "title") or ev.get("text") or "",
                 task_id=key,
                 kind=kind,
+                version=version,
                 path=_plan_ref_value(ev.get("refs", ()), "path"),
                 refs=refs,
                 sha256=ev.get("sha256", ""),
@@ -170,6 +178,7 @@ def _plan_to_dict(p: Plan) -> dict[str, Any]:
         "title": p.title,
         "task_id": p.task_id,
         "kind": p.kind,
+        "version": p.version,
         "path": p.path,
         "steps": [dict(s) for s in p.steps] if p.steps else None,
         "status": p.status,
@@ -291,12 +300,14 @@ def plan(
 
     Returns:
         A list of normalized plan dicts (see :func:`_plan_to_dict`), in
-        timeline order.  Steps/status are carried for Codex plans.  With
-        ``bodies="final"`` the ``final`` atom carries ``body`` (honest
-        ``None`` when the signal has no text, e.g. a steps-only Codex plan)
-        and ``body_source`` — ``"approval_edited_by_user"`` when the
-        authoritative user-edited approval text overrides the signal body,
-        else ``"plan_signal"``.
+        timeline order.  Every atom carries ``version`` — its 1-based
+        chronological revision number within the task group (F3.4 v2:
+        drafts are ``v1…vN-1``, the final is ``vN``).  Steps/status are
+        carried for Codex plans.  With ``bodies="final"`` the ``final``
+        atom carries ``body`` (honest ``None`` when the signal has no
+        text, e.g. a steps-only Codex plan) and ``body_source`` —
+        ``"approval_edited_by_user"`` when the authoritative user-edited
+        approval text overrides the signal body, else ``"plan_signal"``.
     """
     if group != "task":
         raise ValueError(f"group must be 'task', got {group!r}")
@@ -357,6 +368,7 @@ def plan_feedback(
     session: Optional[str] = None,
     *,
     agent: Optional[str] = None,
+    rounds: str = "all",
 ) -> List[dict[str, Any]]:
     """All «plan quote → user comment» pairs for a session's plan iterations.
 
@@ -365,49 +377,84 @@ def plan_feedback(
 
     * ``plan_id`` — the ``plan_event`` id of the revision the response
       answered (``None`` when the transcript has no call-id correlation);
+    * ``plan_version`` — the 1-based revision number (``v1…vN``) of that
+      revision within its task group (v2; ``None`` without correlation);
     * ``verdict`` — ``rejected`` | ``stay_in_plan_mode``;
+    * ``round`` — 1-based feedback-round number within the session, one
+      round per user response that produced pairs (v2);
     * ``quote`` — the plan excerpt the user selected (``None`` for a
       free-text comment with no selection);
     * ``comment`` — the user's words, verbatim;
+    * ``section`` — the heading of the plan section the quote anchors to
+      (v2).  The quote is selected from the RENDERED plan, so both sides
+      are compared through the same markup-stripping normalization; a miss
+      or an ambiguous (multi-section) match is an honest ``None``, never a
+      nearest guess;
     * ``ref`` — a ``"<session_id>:pf<N>"`` id; :func:`get_body` on it
       returns the FULL raw response the pair came from (reference-by-default:
       the raw blob is on-demand);
     * ``session_id`` / ``agent`` / ``ts``.
 
+    ``rounds="all"`` (default) returns every round; ``"last"`` keeps only
+    each session's final feedback round (v2).
+
     Only agents with an interactive plan-approval flow have the signal
-    (today: Claude ``ExitPlanMode``); other agents honestly contribute
-    nothing.  Technical failures (permission-stream errors) and bare
-    no-comment rejections are filtered out.
+    (today: Claude — both ``ExitPlanMode`` and a rejected plan-file
+    ``Write`` carry it); other agents honestly contribute nothing.
+    Technical failures (permission-stream errors) and bare no-comment
+    rejections are filtered out.
     """
+    if rounds not in ("all", "last"):
+        raise ValueError(f"rounds must be 'all' or 'last', got {rounds!r}")
     events = query(type="plan_event", session=session, agent=agent, redact=False)
     ids_by_session = _plan_ids_by_session(events)
     agent_by_session = {
         ev.get("session_id") or "": ev.get("agent") for ev in events
     }
+    # v2: revision numbers ride on the pairs — one grouping pass gives the
+    # per-task v1…vN map (same numbering the plan atoms carry).
+    version_by_id = {p.id: p.version for p in _assign_plan_kinds(events)}
     cache = _PlanContextCache()
     rows: List[dict[str, Any]] = []
     for sid, plan_ids in ids_by_session.items():
         signals, responses = cache.get(sid, agent_by_session.get(sid))
         call_to_plan_id: Dict[str, str] = {}
+        sig_by_call: Dict[str, _PlanSignal] = {}
         for i, sig in enumerate(signals):
             if sig.tool_use_id and i < len(plan_ids):
                 call_to_plan_id[sig.tool_use_id] = plan_ids[i]
+                sig_by_call[sig.tool_use_id] = sig
+        session_rows: List[dict[str, Any]] = []
+        round_no = 0
         for ordinal, resp in enumerate(responses):
             if resp.verdict == "approved":
                 continue
+            if not resp.pairs:
+                continue
+            round_no += 1  # one round per pair-bearing user response
             ref = f"{sid}:pf{ordinal}"
             plan_id = call_to_plan_id.get(resp.tool_use_id)
+            answered = sig_by_call.get(resp.tool_use_id)
+            answered_body = answered.body if answered is not None else None
             for quote, comment in resp.pairs:
-                rows.append({
+                session_rows.append({
                     "session_id": sid,
                     "agent": agent_by_session.get(sid),
                     "plan_id": plan_id,
+                    "plan_version": version_by_id.get(plan_id),
                     "verdict": resp.verdict,
+                    "round": round_no,
                     "quote": quote,
                     "comment": comment,
+                    "section": _anchor_quote_to_section(quote, answered_body),
                     "ref": ref,
                     "ts": resp.ts,
                 })
+        if rounds == "last" and round_no:
+            session_rows = [
+                r for r in session_rows if r["round"] == round_no
+            ]
+        rows.extend(session_rows)
     return rows
 
 

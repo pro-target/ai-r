@@ -2788,9 +2788,32 @@ def test_plan_tool_default_schema_f34(fake_claude_plan_feedback: str) -> None:
     assert len(res["feedback"]) == 5
     first = res["feedback"][0]
     assert set(first) == {
-        "session_id", "agent", "plan_id", "verdict", "quote", "comment",
-        "ref", "ts",
+        "session_id", "agent", "plan_id", "plan_version", "verdict",
+        "round", "quote", "comment", "section", "ref", "ts",
     }
+    # v2: every plan atom carries its chronological revision number.
+    assert [p["version"] for p in res["plans"]] == [1, 2, 3, 4]
+
+
+def test_plan_tool_rounds_last(fake_claude_plan_feedback: str) -> None:
+    res = plan(session=fake_claude_plan_feedback, rounds="last")
+    # Only the final feedback round (the stay-in-plan-mode pair set).
+    assert res["feedback_count"] == 2
+    assert all(p["round"] == 2 for p in res["feedback"])
+    # The plan atoms themselves are unaffected by the rounds filter.
+    assert res["count"] == 4
+
+
+def test_plan_tool_invalid_rounds_returns_error(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback, rounds="first")
+    assert res["error"] == "invalid_argument"
+    # Fails loud even when feedback is disabled — never silently ignored.
+    res2 = plan(
+        session=fake_claude_plan_feedback, feedback=False, rounds="first"
+    )
+    assert res2["error"] == "invalid_argument"
 
 
 def test_plan_tool_feedback_redacted_by_default(
