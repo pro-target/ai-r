@@ -27,6 +27,7 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.redact import merge_redaction_counts, redact_value
 
 __all__ = [
     "EDIT_TOOLS",
@@ -259,6 +260,7 @@ def find_file_edits(
     until: Optional[str] = None,
     limit: int = 100,
     include_input: bool = True,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
 
@@ -282,6 +284,13 @@ def find_file_edits(
             length) — so an audit listing stays small while still signalling
             a body exists.  Fetch the body on demand via ``get_body`` /
             ``read_session`` keyed by ``session_uuid`` + ``message_index``.
+        redact: When ``True`` (default) secrets in emitted record fields
+            (``session_title``/``intent``/``assistant``/``input``) are
+            masked as ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement happened
+            (see :mod:`ai_r.redact`).  ``False`` returns raw content.
+            The ``path`` filter and ``input_sha256`` reference always use
+            the RAW, pre-redaction content.
 
     Returns:
         A dict ``{"records": [...], "count": N, "truncated": bool}``.  Each
@@ -307,6 +316,8 @@ def find_file_edits(
         raise ValueError(
             f"limit must be a non-negative integer, got {limit!r}"
         )
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
 
     since_dt = parse_iso_bound(since, "since")
     until_dt = parse_iso_bound(until, "until")
@@ -415,9 +426,26 @@ def find_file_edits(
     if limit and len(records) > limit:
         records = records[:limit]
         truncated = True
+
+    # Emission-time redaction (F2.1): after the limit slice so only emitted
+    # records pay for it.  The ``path`` filter and the ``input_sha256``
+    # reference above were computed on the RAW content.
+    redactions: dict[str, int] = {}
+    if redact:
+        for rec in records:
+            for field in ("session_title", "intent", "assistant", "input"):
+                if field not in rec:
+                    continue
+                new_val, counts = redact_value(rec[field])
+                if counts:
+                    rec[field] = new_val
+                    merge_redaction_counts(redactions, counts)
+
     result: dict[str, Any] = {
         "records": records, "count": total, "truncated": truncated,
     }
+    if redactions:
+        result["redactions"] = redactions
     if total == 0:
         # Zero matches: attach the corpus diagnostics so an empty listing
         # is explainable (missing source dir vs all-excluding filter vs a
@@ -429,5 +457,6 @@ def find_file_edits(
         result["diagnostics"] = empty_result_diagnostics(
             agent=agent, since=since, until=until, filters={"path": path},
             scanned_sessions=scanned_sessions,
+            redact_active=redact,
         )
     return result

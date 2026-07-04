@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Secret redaction on output (F2.1)**: every method that emits
+  session-derived text now masks secrets **on output by default** —
+  `query` (`text`/`intent`), `get_body`, `plan`, `diff`/`session_diff`,
+  `read_session`, `search_sessions`, `list_sessions` (titles),
+  `find_file_edits`, `find_tool_calls`. Each replacement is
+  `[REDACTED_<TYPE>]` (types: `PRIVATE_KEY`, `AWS_KEY`/`AWS_SECRET`,
+  `GITHUB_TOKEN`, `GITLAB_TOKEN`, `ANTHROPIC_KEY`, `OPENAI_KEY`,
+  `SLACK_TOKEN`, `URL_CREDENTIALS`, `BEARER_TOKEN`, `GENERIC_SECRET`;
+  pattern SSOT `src/ai_r/redact.py`); when anything was masked the
+  response carries a per-type `redactions` count dict; `redact=false`
+  returns the raw content. Redaction is **emission-time only**: filters
+  and search always match the RAW stored text, so a literal secret is
+  still findable (only the displayed output is masked). Value-shaped
+  patterns require a digit and the generic catch-all requires an
+  explicit secret-ish key name, so uuids/git hashes/`sk-learn`-style
+  prose never trip. Empty-result diagnostics gained a redaction link:
+  a filter value that is a `[REDACTED_*]` placeholder (can never match —
+  placeholders don't exist in stored text) or that itself looks like a
+  secret earns a hint explaining the semantics and suggesting
+  `redact=false`. `session_stats`/`aggregate` emit only counts/labels
+  (no session text) and deliberately take no `redact` parameter.
+  See `docs/methods.md` → *Redaction*; scenarios RED-1…RED-3.
 - **Session origin — `project_dir` + `launch_surface` (F1.4)**: every
   session summary now carries two first-class origin fields next to
   `kind`/`parent_uuid`, both `null` when the source format has no

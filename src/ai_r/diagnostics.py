@@ -44,8 +44,52 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from ai_r.parsers import PARSERS, AgentName, iso, target_agents
 from ai_r.find_file_edits import parse_iso_bound, to_utc_aware
+from ai_r.redact import REDACTION_MARKER_PREFIX, secret_like_types
 
 __all__ = ["empty_result_diagnostics"]
+
+
+def _append_redaction_hints(
+    active_filters: Mapping[str, Any], hints: List[str]
+) -> None:
+    """Add redaction-awareness hints for secret-looking filter values (F2.1).
+
+    Redaction is emission-time only — filters always match the RAW stored
+    text — so two honest cases exist for an empty result:
+
+    * the filter value contains a ``[REDACTED_*]`` placeholder (copied from
+      previously redacted output): placeholders never exist in stored
+      session text, so the search can never match;
+    * the filter value itself *looks like a secret* (trips the redaction
+      patterns): matching ran on raw text, so emptiness means the literal
+      value is genuinely absent — and on a hit the output would have shown
+      ``[REDACTED_*]``, which is worth saying out loud.
+
+    Cheap by construction: one combined-pattern pass per (short) filter
+    string, computed only on the already-empty path.
+    """
+    for key, val in active_filters.items():
+        if not isinstance(val, str) or not val:
+            continue
+        if REDACTION_MARKER_PREFIX in val:
+            hints.append(
+                f"filter {key} contains a [REDACTED_*] placeholder — "
+                "redaction is applied on output only, placeholders never "
+                "exist in stored session text and can never match; search "
+                "for the raw secret value instead (redact=false shows raw "
+                "output)"
+            )
+            continue
+        types = secret_like_types(val)
+        if types:
+            hints.append(
+                f"redaction is enabled and filter {key} looks like a "
+                f"secret ({', '.join(types)}) — matching runs on RAW "
+                "stored text, so this empty result means the literal "
+                "value is absent from the scanned corpus; on a match the "
+                "output would show [REDACTED_*] — retry with redact=false "
+                "to see raw values"
+            )
 
 
 def _scan_agent(
@@ -117,6 +161,7 @@ def empty_result_diagnostics(
     until: Optional[str] = None,
     filters: Optional[dict[str, Any]] = None,
     scanned_sessions: Optional[Mapping[Any, Sequence[Any]]] = None,
+    redact_active: bool = False,
 ) -> dict[str, Any]:
     """Explain an empty scan result: what was scanned and why nothing matched.
 
@@ -137,6 +182,10 @@ def empty_result_diagnostics(
             the target set but absent from the mapping fall back to a
             fresh ``parser.list_sessions()`` (fallback only, for callers
             that did not pass their scan).
+        redact_active: ``True`` when the failing call ran with output
+            redaction enabled (the default).  Adds a redaction hint when a
+            string filter value contains a ``[REDACTED_*]`` placeholder or
+            itself looks like a secret (see :func:`_append_redaction_hints`).
 
     Returns:
         The ``diagnostics`` dict (see the module docstring).  JSON-safe.
@@ -230,6 +279,9 @@ def empty_result_diagnostics(
                     f"{total} session(s) scanned across {len(scanned)} "
                     "agent(s); the corpus genuinely has no match"
                 )
+
+    if redact_active:
+        _append_redaction_hints(active_filters, hints)
 
     return {
         "scanned": scanned,

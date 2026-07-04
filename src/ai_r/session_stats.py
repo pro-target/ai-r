@@ -189,6 +189,11 @@ def session_stats(
         since=since,
         until=until,
         limit=0,
+        # Internal call — only *counts* are derived from the records (no
+        # text is emitted), and redaction could merge two distinct raw
+        # intents under one masked string (an intents-count drift): keep
+        # the fold on raw data.
+        redact=False,
     )
 
     # Edit enrichment, keyed by session uuid: edit count + distinct intents.

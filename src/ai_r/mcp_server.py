@@ -70,6 +70,10 @@ from ai_r.parsers import Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.redact import (  # noqa: E402
+    merge_redaction_counts as _merge_redactions,
+    redact_value as _redact_value,
+)
 from ai_r.events import (  # noqa: E402
     query as _query_core,
     plan as _plan_core,
@@ -116,6 +120,27 @@ _HAYSTACK_CACHE_TTL_SEC = 300
 
 _haystack_cache: "OrderedDict[tuple[str, str, float], tuple[str, bool]]" = OrderedDict()
 _haystack_cache_lock = threading.Lock()
+
+
+def _redact_fields(
+    obj: dict[str, Any],
+    fields: Sequence[str],
+    redactions: dict[str, int],
+) -> None:
+    """Mask secrets in the named ``obj`` fields in place, folding counts.
+
+    Emission-time redaction helper (F2.1) shared by the MCP wrappers whose
+    output shaping lives in this module (``read_session`` /
+    ``search_sessions`` / ``list_sessions``).  Absent fields are skipped;
+    counts accumulate into ``redactions``.
+    """
+    for field in fields:
+        if field not in obj:
+            continue
+        new_val, counts = _redact_value(obj[field])
+        if counts:
+            obj[field] = new_val
+            _merge_redactions(redactions, counts)
 
 
 mcp = FastMCP(
@@ -527,6 +552,7 @@ def list_sessions(
     kind: Optional[str] = None,
     noise: str = "include",
     project_dir: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
@@ -573,6 +599,10 @@ def list_sessions(
             ``/a/b`` matches ``/a/b`` and ``/a/b/sub``, never ``/a/bc``);
             trailing slashes ignored.  Sessions without a ``project_dir``
             signal never match.  Composes with the other filters (AND).
+        redact: When ``True`` (default) secrets in emitted ``title`` /
+            ``extra`` values are masked as ``[REDACTED_<TYPE>]`` and the
+            response carries a ``redactions`` type→count dict when any
+            replacement happened; ``False`` returns raw titles.
 
     Returns:
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
@@ -632,6 +662,10 @@ def list_sessions(
 
     total = len(summaries)
     page = summaries[offset:] if limit == 0 else summaries[offset:offset + limit]
+    redactions: dict[str, int] = {}
+    if redact:
+        for summary in page:
+            _redact_fields(summary, ("title", "extra"), redactions)
     result: dict[str, Any] = {
         "sessions": page,
         "total": total,
@@ -639,6 +673,8 @@ def list_sessions(
         "limit": limit,
         "truncated": (offset + len(page)) < total,
     }
+    if redactions:
+        result["redactions"] = redactions
     if total == 0:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,
@@ -649,6 +685,7 @@ def list_sessions(
                 "project_dir": project_dir,
             },
             scanned_sessions=scanned_sessions,
+            redact_active=redact,
         )
     return result
 
@@ -659,6 +696,7 @@ def read_session(
     agent: Optional[str] = None,
     offset: int = 0,
     limit: int = _MESSAGES_CAP,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
@@ -675,6 +713,11 @@ def read_session(
         limit: Maximum number of messages to return.  Defaults to
             :data:`_MESSAGES_CAP` (100).  A non-positive value means
             "no upper bound".
+        redact: When ``True`` (default) secrets in the emitted ``title``,
+            message ``content``/``intent``/``qa`` are masked as
+            ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement happened
+            (see ``ai_r.redact``); ``False`` returns the raw content.
 
     Returns:
         A dict with session metadata plus:
@@ -772,6 +815,15 @@ def read_session(
     summary["offset"] = offset
     summary["limit"] = limit
     summary["messages_truncated"] = messages_truncated
+    # Emission-time redaction (F2.1): after pagination so only the emitted
+    # page pays; the raw transcript on disk is never touched.
+    if redact:
+        redactions: dict[str, int] = {}
+        _redact_fields(summary, ("title", "extra"), redactions)
+        for entry in projected:
+            _redact_fields(entry, ("content", "intent", "qa"), redactions)
+        if redactions:
+            summary["redactions"] = redactions
     return summary
 
 
@@ -783,8 +835,13 @@ def find_file_edits(
     until: Optional[str] = None,
     limit: int = 100,
     include_input: bool = False,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
+
+    ``redact=True`` (default) masks secrets in emitted record fields as
+    ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count dict when
+    any replacement happened; ``redact=False`` returns raw content.
 
     Reference-by-default: to keep an audit listing small, each record does
     **not** inline the full edit body.  Instead it carries a light-weight
@@ -807,6 +864,7 @@ def find_file_edits(
             until=until,
             limit=limit,
             include_input=include_input,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -825,8 +883,14 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
+
+    ``redact=True`` (default) masks secrets in emitted record fields as
+    ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count dict when
+    any replacement happened; ``redact=False`` returns raw content.
+    Filters always match the RAW, pre-redaction text.
 
     Exactly one of ``tool_name`` (exact, case-insensitive) or
     ``tool_name_pattern`` (substring, case-insensitive) must be set.
@@ -859,6 +923,7 @@ def find_tool_calls(
             output_excludes=output_excludes,
             is_error=is_error,
             output_mode=output_mode,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -921,6 +986,7 @@ def session_diff(
     session_uuid: str,
     agent: str,
     path: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Reconstruct *what the agent changed* in one session — without git.
 
@@ -937,6 +1003,10 @@ def session_diff(
     ``find_file_edits`` shell-redirect gap (``tee`` / ``sed -i`` / ``cp`` /
     ``mv`` / heredoc writes are not detected and are silently skipped).
 
+    ``redact=True`` (default) masks secrets in the emitted diff/hunks/
+    intents as ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count
+    dict when any replacement happened; ``redact=False`` returns raw.
+
     Thin wrapper over :func:`ai_r.session_diff.session_diff` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
@@ -947,6 +1017,7 @@ def session_diff(
             session_uuid=session_uuid,
             agent=agent,
             path=path,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -961,6 +1032,7 @@ def search_sessions(
     limit: int = 50,
     sort: str = "relevance",
     noise: str = "include",
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Case-insensitive search across sessions.
 
@@ -995,6 +1067,14 @@ def search_sessions(
             * ``"only"``    — search only subagent sessions.
             Applied *before* matching, so excluded sessions never pay
             the body-scan cost.
+        redact: When ``True`` (default) secrets in the emitted ``title`` /
+            ``snippet`` / ``extra`` fields are masked as
+            ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement
+            happened; ``False`` returns raw content.  Matching always
+            runs on the RAW stored text, so searching for a literal
+            secret still finds its session — only the displayed
+            snippet is masked.
 
     Returns:
         A dict ``{"results": [...], "count": N}`` where ``results`` is the
@@ -1139,7 +1219,15 @@ def search_sessions(
 
     if limit:
         summaries = summaries[:limit]
+    # Emission-time redaction (F2.1): after ranking + limit so only emitted
+    # summaries pay; matching above ran on the raw haystack.
+    redactions: dict[str, int] = {}
+    if redact:
+        for summary in summaries:
+            _redact_fields(summary, ("title", "snippet", "extra"), redactions)
     result: dict[str, Any] = {"results": summaries, "count": len(summaries)}
+    if redactions:
+        result["redactions"] = redactions
     if not summaries:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,
@@ -1151,6 +1239,7 @@ def search_sessions(
                 "noise": None if noise == "include" else noise,
             },
             scanned_sessions=scanned_sessions,
+            redact_active=redact,
         )
     return result
 
@@ -1177,6 +1266,7 @@ def query(
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Filter/search the unified session **event** stream — the workhorse verb.
 
@@ -1230,6 +1320,12 @@ def query(
     non-``None`` value is a fail-loud error (returns the standard
     ``invalid_argument`` dict) rather than a silent no-op.
 
+    ``redact=True`` (default) masks secrets in the emitted ``text`` /
+    ``intent`` fields as ``[REDACTED_<TYPE>]`` and adds a top-level
+    ``redactions`` type→count dict when any replacement happened;
+    ``redact=False`` returns raw content.  Redaction is emission-time only:
+    the ``text`` facet (and every other filter) matches the RAW stored text.
+
     Returns ``{"events": [...], "count": N}`` or the standard
     ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
     ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
@@ -1240,6 +1336,7 @@ def query(
     # reused by the empty-result diagnostics so an empty result never pays
     # for a second corpus walk.
     scanned_sessions: dict[str, Any] = {}
+    redactions: dict[str, int] = {}
     try:
         events = _query_core(
             type=type,
@@ -1263,10 +1360,14 @@ def query(
             parent=parent,
             group=group,
             scanned_sessions_out=scanned_sessions,
+            redact=redact,
+            redactions_out=redactions,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
     result: dict[str, Any] = {"events": events, "count": len(events)}
+    if redactions:
+        result["redactions"] = redactions
     if not events:
         result["diagnostics"] = _empty_diagnostics(
             agent=agent,
@@ -1284,6 +1385,7 @@ def query(
                 "project_dir": project_dir,
             },
             scanned_sessions=scanned_sessions,
+            redact_active=redact,
         )
     return result
 
@@ -1294,6 +1396,7 @@ def plan(
     kind: Optional[str] = None,
     group: str = "task",
     agent: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Normalized plan atoms for a session — final vs drafts, grouped by task.
 
@@ -1315,6 +1418,11 @@ def plan(
         kind: Optional filter — ``draft`` | ``final`` | ``completed_major``.
         group: Grouping strategy; only ``"task"`` is supported.
         agent: Optional agent filter (claude/codex/opencode/antigravity/pi).
+        redact: When ``True`` (default) secrets in the emitted plan fields
+            (``title``/``steps``/``refs``…) are masked as
+            ``[REDACTED_<TYPE>]`` and the response carries a ``redactions``
+            type→count dict when any replacement happened; ``False``
+            returns raw content.
 
     Returns:
         ``{"plans": [...], "count": N}`` (each plan carries
@@ -1326,12 +1434,23 @@ def plan(
         plans = _plan_core(session=session, kind=kind, group=group, agent=agent)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
-    return {"plans": plans, "count": len(plans)}
+    result: dict[str, Any] = {"plans": plans, "count": len(plans)}
+    # Emission-time redaction (F2.1): the core runs its internal query with
+    # ``redact=False`` and defers the single masking pass to this wrapper.
+    if redact:
+        redacted_plans, counts = _redact_value(plans)
+        if counts:
+            result["plans"] = redacted_plans
+            result["redactions"] = counts
+    return result
 
 
 @mcp.tool()
 def get_body(
-    id: str, shallow: bool = False, max_chars: int = 500_000
+    id: str,
+    shallow: bool = False,
+    max_chars: int = 500_000,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Return the on-demand body for an event / plan ``id``.
 
@@ -1350,11 +1469,16 @@ def get_body(
     disable).  When it trips, the field is sliced with a ``…[truncated]``
     marker and ``body_truncated: true`` is set.
 
+    ``redact=True`` (default) masks secrets in the emitted
+    ``text``/``body``/``title``/``steps`` as ``[REDACTED_<TYPE>]`` and adds
+    a ``redactions`` type→count dict when any replacement happened;
+    ``redact=False`` returns the raw content.
+
     Returns the body dict, or ``{"error": ..., "message": ...}`` on a bad id.
     """
     if not id or not str(id).strip():
         return {"error": "invalid_argument", "message": "id must be non-empty"}
-    return _get_body_core(id, shallow=shallow, max_chars=max_chars)
+    return _get_body_core(id, shallow=shallow, max_chars=max_chars, redact=redact)
 
 
 @mcp.tool()
@@ -1410,6 +1534,7 @@ def diff(
     rows: List[dict[str, Any]],
     per_file: bool = True,
     format: str = "unified",
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Stitch edit rows into a per-file chronological diff — the diff verb.
 
@@ -1424,6 +1549,10 @@ def diff(
             and a ``refs`` list with a ``file`` entry; unresolvable rows skip.
         per_file: Group by file (the only mode today).
         format: ``"unified"`` (the only rendering today).
+        redact: When ``True`` (default) secrets in the stitched output are
+            masked as ``[REDACTED_<TYPE>]`` and the result carries a
+            ``redactions`` type→count dict when any replacement happened;
+            ``False`` returns raw content.
 
     Returns:
         ``{"files": [{"file", "edits", "diff", "hunks"}], "count", "caveats"}``
@@ -1431,7 +1560,7 @@ def diff(
         ``{"error": ..., "message": ...}`` dict on an unsupported ``format``.
     """
     try:
-        return _diff_core(rows, per_file=per_file, format=format)
+        return _diff_core(rows, per_file=per_file, format=format, redact=redact)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 

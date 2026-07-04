@@ -15,6 +15,7 @@ from typing import Any, List, Optional, Sequence
 from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
 from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
+from ai_r.redact import merge_redaction_counts, redact_text
 
 from ai_r.parsers._noise import validate_noise
 
@@ -100,6 +101,29 @@ def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
             ev["intent"] = None
 
 
+def _redact_events(
+    event_dicts: List[dict[str, Any]],
+    redactions_out: Optional[dict[str, int]],
+) -> None:
+    """Mask secrets in the emitted ``text``/``intent`` fields, in place (F2.1).
+
+    Runs at the END of ``query`` — after filtering, sorting and the limit
+    slice — so only emitted events pay for it and every filter above
+    matched the RAW stored text.  Per-type replacement counts are folded
+    into ``redactions_out`` when the caller provided one.
+    """
+    for ev in event_dicts:
+        for field in ("text", "intent"):
+            val = ev.get(field)
+            if not isinstance(val, str) or not val:
+                continue
+            new_val, counts = redact_text(val)
+            if counts:
+                ev[field] = new_val
+                if redactions_out is not None:
+                    merge_redaction_counts(redactions_out, counts)
+
+
 def _walk_relative(
     events: Sequence[Event],
     anchor_id: str,
@@ -161,6 +185,8 @@ def query(
     parent: Optional[str] = None,
     group: Optional[str] = None,
     scanned_sessions_out: Optional[dict[str, Any]] = None,
+    redact: bool = True,
+    redactions_out: Optional[dict[str, int]] = None,
 ) -> List[dict[str, Any]]:
     """Filter/search the normalized Event stream — the Phase-1 workhorse.
 
@@ -214,6 +240,12 @@ def query(
     results of the scan so the MCP wrapper can build empty-result
     diagnostics WITHOUT a second corpus walk.
 
+    ``redact`` (default ``True``) masks secrets in the emitted ``text`` /
+    ``intent`` fields as ``[REDACTED_<TYPE>]`` (see :mod:`ai_r.redact`);
+    ``redactions_out`` is a caller-owned dict that collects the per-type
+    replacement counts.  Redaction is emission-time only: the ``text``
+    facet (and every other filter) matches the RAW stored text.
+
     ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
     — plan/subagent facets).  They are accepted in the signature for forward
     compatibility, but passing a non-``None`` value raises
@@ -241,6 +273,8 @@ def query(
             "project_dir must be a non-empty path string or None, "
             f"got {project_dir!r}"
         )
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
     # Normalize ``n``: accepts 1/all (or any positive int / "all").
     n_all = False
     n_int = 1
@@ -285,6 +319,8 @@ def query(
         out = [_event_to_dict(ev) for ev in walked]
         if with_intent:
             _attach_intents(out)
+        if redact:
+            _redact_events(out, redactions_out)
         return out
 
     # --- ordinary facet filter ------------------------------------------
@@ -343,6 +379,8 @@ def query(
     out = [_event_to_dict(ev) for ev in survivors]
     if with_intent:
         _attach_intents(out)
+    if redact:
+        _redact_events(out, redactions_out)
     return out
 
 

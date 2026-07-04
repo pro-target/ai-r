@@ -29,6 +29,7 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.redact import merge_redaction_counts, redact_value
 from ai_r.security import coerce_tool_input as _coerce_input
 
 __all__ = [
@@ -159,6 +160,7 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
 
@@ -192,6 +194,13 @@ def find_tool_calls(
             (first chars), ``"tail"`` (last chars), or ``"smart"``
             (error lines + tail).  ``None`` = adaptive — ``"smart"`` for
             error records, ``"head"`` otherwise.
+        redact: When ``True`` (default) secrets in emitted record fields
+            (``session_title``/``input``/``intent``/``assistant``/
+            ``output``) are masked as ``[REDACTED_<TYPE>]`` and the
+            response carries a ``redactions`` type→count dict when any
+            replacement happened (see :mod:`ai_r.redact`).  ``False``
+            returns the raw content.  Filters always match the RAW,
+            pre-redaction text.
 
     Returns:
         A dict ``{"records": [...], "count": N, "truncated": bool,
@@ -268,6 +277,8 @@ def find_tool_calls(
             "output_mode must be one of 'head', 'tail', 'smart', "
             f"got {output_mode!r}"
         )
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
 
     since_dt = parse_iso_bound(since, "since")
     until_dt = parse_iso_bound(until, "until")
@@ -449,6 +460,20 @@ def find_tool_calls(
         records = records[:limit]
         truncated = True
 
+    # Emission-time redaction (F2.1): runs AFTER the limit slice so only
+    # emitted records pay for it, and after the field caps so the cost is
+    # bounded by the response size.  Filters above already matched on the
+    # RAW pre-redaction text.
+    redactions: dict[str, int] = {}
+    if redact:
+        for rec in records:
+            for field in ("session_title", "input", "intent",
+                          "assistant", "output"):
+                new_val, counts = redact_value(rec.get(field))
+                if counts:
+                    rec[field] = new_val
+                    merge_redaction_counts(redactions, counts)
+
     # Size-based safeguard: stop emitting records once the cumulative
     # serialized size exceeds the response byte budget.  Distinct from the
     # count-based ``truncated`` above — ``output_truncated`` means "output
@@ -473,6 +498,8 @@ def find_tool_calls(
         "truncated": truncated,
         "output_truncated": output_truncated,
     }
+    if redactions:
+        response["redactions"] = redactions
     if total == 0:
         # Zero matches: attach the corpus diagnostics so an empty listing
         # is explainable (missing source dir vs all-excluding filter vs a
@@ -493,5 +520,6 @@ def find_tool_calls(
                 "is_error": is_error,
             },
             scanned_sessions=scanned_sessions,
+            redact_active=redact,
         )
     return response

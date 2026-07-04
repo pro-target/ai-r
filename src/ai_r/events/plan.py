@@ -22,6 +22,7 @@ from typing import (
 )
 
 from ai_r.parsers import PARSERS, target_agents
+from ai_r.redact import merge_redaction_counts, redact_value
 
 from ai_r.events._common import _plan_ref_value
 from ai_r.events.model import (
@@ -210,7 +211,9 @@ def plan(
         raise ValueError(
             f"kind must be draft|final|completed_major or null, got {kind!r}"
         )
-    events = query(type="plan_event", session=session, agent=agent)
+    # ``redact=False``: internal call — the public wrappers apply the single
+    # emission-time redaction pass on their own final output (F2.1).
+    events = query(type="plan_event", session=session, agent=agent, redact=False)
     plans = _assign_plan_kinds(events)
     # Enrich Codex plans with their steps/status (resolved on demand from the
     # source, mirroring get_body — kept off the bare Event to honour "no body
@@ -293,7 +296,11 @@ def _cap_body(text: object, max_chars: int) -> tuple[object, bool]:
 
 
 def get_body(
-    id: str, shallow: bool = False, *, max_chars: int = _BODY_CHARS_CAP
+    id: str,
+    shallow: bool = False,
+    *,
+    max_chars: int = _BODY_CHARS_CAP,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Return the on-demand body for an event / plan id.
 
@@ -312,6 +319,11 @@ def get_body(
     field is sliced with a ``…[truncated]`` marker and ``body_truncated: true``
     is set.  The default (500_000) is generous — ordinary bodies are never
     cut; pass ``0`` to disable.
+
+    ``redact`` (default ``True``) masks secrets in the emitted
+    ``text``/``body``/``title``/``steps`` as ``[REDACTED_<TYPE>]`` and adds
+    a ``redactions`` type→count dict when any replacement happened (see
+    :mod:`ai_r.redact`); ``False`` returns the raw content.
 
     Returns:
         ``{"id", "type", "title"?, "body"?, "steps"?, "status"?, "path"?,
@@ -333,7 +345,7 @@ def get_body(
         out: dict[str, Any] = {"id": id, "type": event.type, "text": text}
         if body_truncated:
             out["body_truncated"] = True
-        return out
+        return _redact_body_fields(out, redact)
 
     sig = _resolve_plan_signal(id)
     title = _plan_ref_value(event.refs, "title") or event.text or ""
@@ -357,7 +369,7 @@ def get_body(
         # Resolve the task the id belongs to, find its final plan, and return
         # that plan's body (never the earlier drafts').
         task_plans = _assign_plan_kinds(
-            query(type="plan_event", session=session_id)
+            query(type="plan_event", session=session_id, redact=False)
         )
         my = next((p for p in task_plans if p.id == id), None)
         if my is not None:
@@ -387,4 +399,26 @@ def get_body(
         result["body"], body_truncated = _cap_body(result["body"], max_chars)
         if body_truncated:
             result["body_truncated"] = True
+    return _redact_body_fields(result, redact)
+
+
+def _redact_body_fields(result: dict[str, Any], redact: bool) -> dict[str, Any]:
+    """Emission-time redaction for a ``get_body`` payload (F2.1), in place.
+
+    Masks ``text``/``body``/``title``/``steps``; attaches per-type
+    ``redactions`` counts only when something was actually masked.  No-op
+    when ``redact`` is ``False``.
+    """
+    if not redact:
+        return result
+    redactions: dict[str, int] = {}
+    for field in ("text", "body", "title", "steps"):
+        if field not in result:
+            continue
+        new_val, counts = redact_value(result[field])
+        if counts:
+            result[field] = new_val
+            merge_redaction_counts(redactions, counts)
+    if redactions:
+        result["redactions"] = redactions
     return result

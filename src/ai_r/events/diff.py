@@ -32,6 +32,7 @@ from typing import (
 )
 
 from ai_r.parsers import PARSERS, Message, target_agents
+from ai_r.redact import redact_value
 
 from ai_r.events._common import (
     _coerce_tool_input,
@@ -198,6 +199,7 @@ def diff(
     *,
     per_file: bool = True,
     format: str = "unified",
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Stitch edit rows into a per-file chronological diff — the diff verb.
 
@@ -216,6 +218,12 @@ def diff(
             per file but is reserved for a future flat mode).
         format: ``"unified"`` (the only rendering today).  Any other value
             raises :class:`ValueError`.
+        redact: When ``True`` (default) secrets in the stitched output
+            (``diff`` text, hunk bodies, ``intent``) are masked as
+            ``[REDACTED_<TYPE>]`` and the result carries a ``redactions``
+            type→count dict when any replacement happened (see
+            :mod:`ai_r.redact`).  ``False`` returns raw content.  Internal
+            body resolution always reads the raw session.
 
     Returns:
         ``{"files": [{"file", "edits", "diff", "hunks"}], "count": N,
@@ -227,6 +235,8 @@ def diff(
     """
     if format != "unified":
         raise ValueError(f"format must be 'unified', got {format!r}")
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
 
     # Build ordered (file, edit) events from the rows, mirroring the shaping
     # ``session_diff._scan_session`` produces.  A single per-call session-message
@@ -307,8 +317,16 @@ def diff(
             "hunks": all_hunks,
         })
 
-    return {
+    result: dict[str, Any] = {
         "files": files,
         "count": len(files),
         "caveats": [_GIT_CAVEAT, _RISK3_CAVEAT],
     }
+    # Emission-time redaction (F2.1): one recursive pass over the stitched
+    # output only (bodies were resolved from the raw session above).
+    if redact:
+        redacted_files, counts = redact_value(result["files"])
+        if counts:
+            result["files"] = redacted_files
+            result["redactions"] = counts
+    return result

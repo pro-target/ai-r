@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 52 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 55 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -58,6 +58,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 52 LLM-executed end-to-end
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
 | `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
 | empty-result diagnostics (cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
+| secret redaction (cross-cutting) | 3 | Every text-emitting method masks secrets on output as `[REDACTED_<TYPE>]` by default and carries a `redactions` type→count dict; `redact=false` returns the raw content; matching always runs on the RAW stored text (searching a literal secret finds its session, only the display is masked); a `[REDACTED_*]` placeholder or secret-looking filter value on an empty result earns a diagnostics hint suggesting `redact=false`. |
 | CLI error contract | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
 
 <!-- scenarios:end -->
@@ -561,6 +562,40 @@ never carry `diagnostics`.
 - **Steps:** (a) with no agent data at all: `mcp__ai-r__find_tool_calls(tool_name="Bash", agent="claude")` → inspect `diagnostics.scanned[claude]`; (b) with one seeded session dated 2026: `mcp__ai-r__find_tool_calls(tool_name="Bash", agent="claude", since="2999-01-01")` → inspect `diagnostics.hints`.
 - **Expected:** (a) `scanned[claude].source_found == false` and its `hint` names the missing path (`source not found: …/.claude/projects`); (b) the corpus is non-empty and a hint states that `since='2999-01-01'` is after the newest session and "excludes the entire corpus".
 - **Pass criteria:** GO when the missing-source case names the looked-at path and the date case names the excluding bound with the corpus boundary. A generic "no results" with no cause is NO-GO.
+
+---
+
+## Secret redaction (cross-cutting)
+
+Every method that emits session-derived text masks secrets on output by default (F2.1):
+replacements are `[REDACTED_<TYPE>]`, the response carries a per-type `redactions` counter when
+anything was masked, and `redact=false` returns the raw content. Redaction is **emission-time
+only** — filters and search always match the RAW stored text. Pattern SSOT: `src/ai_r/redact.py`;
+behaviour spec: `docs/methods.md` → *Redaction*.
+
+### RED-1 — secrets masked by default, counter present, `redact=false` returns raw
+- **Function:** `read_session` + `query` (representative of all emitting methods)
+- **Goal:** A transcript containing a pasted secret never leaks it through the default surface, and the caller can still get the raw bytes on explicit request.
+- **Preconditions:** none. `[hermetic-ok]` (seed one synthetic claude session whose user turn contains a fake key, e.g. `sk-abc123def456ghi789jkl012mno`, and whose Bash tool input contains `PASSWORD=hunter2x9extra`).
+- **Steps:** `mcp__ai-r__read_session(<uuid>, agent="claude")` → scan the full JSON for the raw secret; then the same call with `redact=false`; repeat the pair with `mcp__ai-r__query(session=<uuid>, type="user_turn")`.
+- **Expected:** Default responses contain `[REDACTED_OPENAI_KEY]` / `[REDACTED_GENERIC_SECRET]` and NO raw secret anywhere; each carries `redactions` (e.g. `{"OPENAI_KEY": 1, …}`). The `redact=false` responses contain the raw values and NO `redactions` key.
+- **Pass criteria:** GO when the raw secret is absent from every default response, the per-type counter matches what was masked, and `redact=false` round-trips the raw content. A raw secret in a default response, or a `redactions` counter without any masking, is NO-GO.
+
+### RED-2 — matching runs on RAW text; benign look-alikes stay untouched
+- **Function:** `search_sessions` + `query(text=…)`
+- **Goal:** Redaction never changes what is findable — only what is displayed — and the pattern table does not fire on identifiers.
+- **Preconditions:** the RED-1 seeded session. `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__search_sessions(<the raw fake key>, agent="claude")` → expect the session found, snippet masked; `mcp__ai-r__query(session=<uuid>, text=<the raw fake key>)` → expect ≥1 event; then read a session containing only uuids / git hashes / `sk-learn` prose and confirm zero `redactions`.
+- **Expected:** Searching the literal secret finds its session (`count ≥ 1`) while the emitted snippet/text shows `[REDACTED_*]`; benign identifier text comes back byte-identical with no `redactions` key.
+- **Pass criteria:** GO when raw-text matching and masked display hold simultaneously and no false positive fires on uuid/hash/prose. A search that misses because of redaction, or a masked uuid, is NO-GO.
+
+### RED-3 — empty result + secret-looking filter → redaction hint
+- **Function:** empty-result diagnostics (F1.1 × F2.1 link)
+- **Goal:** An empty search for a placeholder or a secret-shaped value explains the redaction semantics instead of leaving a bare zero.
+- **Preconditions:** none. `[hermetic-ok]` (empty or seeded vault).
+- **Steps:** `mcp__ai-r__query(agent="claude", text="[REDACTED_OPENAI_KEY]")` → inspect `diagnostics.hints`; then `mcp__ai-r__query(agent="claude", text="sk-zzz999zzz999zzz999zzz999")` (absent from the corpus) → inspect `diagnostics.hints`.
+- **Expected:** The placeholder case yields a hint that placeholders never exist in stored text and can never match (search the raw value / use `redact=false`); the secret-shaped case yields a hint that redaction is enabled, matching ran on RAW text, and `redact=false` shows raw values. With `redact=false` on the call, neither hint appears.
+- **Pass criteria:** GO when both hint variants appear exactly on the empty path and name `redact=false`. A bare empty result for a placeholder search is NO-GO.
 
 ---
 
