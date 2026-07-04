@@ -8,16 +8,17 @@ re-imports the name it needs so module-level references and test
 monkeypatches (e.g. ``codex._is_valid_uuid``) keep working unchanged.
 
 Only behaviourally identical helpers live here.  Parser-specific
-variants (e.g. Pi's tz-pinning ``_parse_iso_timestamp`` or Claude's
-``_normalise_title`` that does not coerce whitespace-only input to
-``"Untitled"``) intentionally stay in their own modules.
+variants (e.g. Pi's ``_parse_iso_timestamp`` that also accepts non-str
+input, or Claude's ``_normalise_title`` that does not coerce
+whitespace-only input to ``"Untitled"``) intentionally stay in their
+own modules.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -285,18 +286,26 @@ def _qa_entry(question: str, options: Tuple[str, ...], answer: str) -> dict:
 
 
 def _parse_iso_timestamp(raw: str) -> Optional[datetime]:
-    """Parse an ISO 8601 timestamp, tolerating a trailing ``Z``.
+    """Parse an ISO 8601 timestamp, always returning a tz-aware datetime.
 
     Returns ``None`` for empty input, non-strings, and unparseable
-    values.  Only the first 23 characters are considered, which keeps
-    fractional seconds while ignoring any trailing offset noise.
+    values.  The full string is parsed first (so ``Z``/explicit offsets
+    are honoured); a 23-character truncation is the fallback for values
+    with trailing noise.  Naive results are pinned to UTC — a naive
+    datetime would mix with tz-aware ones (e.g. Desktop-overlay epoch
+    dates) and break ``sessions.sort(key=s.date)`` with a ``TypeError``.
     """
     if not raw or not isinstance(raw, str):
         return None
-    try:
-        return datetime.fromisoformat(raw[:23].replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
+    for candidate in (raw, raw[:23]):
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 def _is_valid_uuid(uuid: str) -> bool:

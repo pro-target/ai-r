@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,24 @@ def test_parse_iso_timestamp_tolerates_z() -> None:
     ts = _parse_iso_timestamp("2026-06-14T10:00:00.123Z")
     assert ts is not None
     assert ts.year == 2026 and ts.month == 6 and ts.day == 14
+
+
+def test_parse_iso_timestamp_always_tz_aware() -> None:
+    # Regression: the ``raw[:23]`` truncation used to cut the tz suffix
+    # BEFORE the ``Z`` replace, so every transcript date came out naive
+    # and crashed the sort against aware Desktop-overlay dates.
+    z_form = _parse_iso_timestamp("2026-06-14T10:00:00.123Z")
+    assert z_form is not None and z_form.utcoffset() == timedelta(0)
+    # Naive input is pinned to UTC.
+    naive = _parse_iso_timestamp("2026-06-14T10:00:00")
+    assert naive is not None and naive.tzinfo is timezone.utc
+    # Explicit offsets are honoured (same instant as 07:00 UTC).
+    offset = _parse_iso_timestamp("2026-06-14T10:00:00+03:00")
+    assert offset is not None
+    assert offset.utcoffset() == timedelta(hours=3)
+    assert offset == z_form.replace(
+        hour=7, minute=0, second=0, microsecond=0
+    )
 
 
 def test_parse_iso_timestamp_returns_none_on_garbage() -> None:

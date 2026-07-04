@@ -137,6 +137,44 @@ def test_cli_only_session_marked_cli(dual_roots: tuple[str, str]) -> None:
     assert "cli_title" not in by_uuid[_CLI_ONLY_UUID].extra
 
 
+def test_list_sessions_sorts_mixed_cli_and_ghost_dates(
+    dual_roots: tuple[str, str],
+) -> None:
+    # Regression: transcript-derived dates used to come out naive (the
+    # ``raw[:23]`` truncation cut the tz suffix BEFORE the ``Z`` replace),
+    # while desktop-only ghosts carry aware epoch dates — the final
+    # ``sessions.sort(key=s.date)`` then raised ``TypeError``.  Every date
+    # must now be tz-aware and the list sorted newest-first.
+    base, desktop = dual_roots
+    sessions = claude.list_sessions(base_dir=base, desktop_dir=desktop)
+    assert len(sessions) == 3
+    dates = [s.date for s in sessions]
+    assert all(d.tzinfo is not None for d in dates)
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_session_stats_since_until_over_mixed_corpus(
+    dual_roots: tuple[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression companion: the since/until inventory filter must keep
+    # working over a corpus that mixes transcript-derived dates and
+    # desktop-ghost epoch dates (all tz-aware after the fix).
+    from ai_r.session_stats import session_stats
+
+    monkeypatch.setenv("AI_R_HOME", str(tmp_path))
+    stats = session_stats(
+        agent="claude", since="2026-07-01", until="2026-07-01",
+        group_by="date",
+    )
+    assert stats["totals"]["sessions"] == 3
+    assert [g["group"] for g in stats["groups"]] == ["2026-07-01"]
+
+    excluded = session_stats(agent="claude", since="2026-07-02")
+    assert excluded["totals"]["sessions"] == 0
+
+
 def test_desktop_only_session_is_reference_only(
     dual_roots: tuple[str, str],
 ) -> None:

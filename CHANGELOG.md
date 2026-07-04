@@ -102,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Transcript timestamps are tz-aware; Desktop-ghost sort no longer
+  crashes**: the shared `_parse_iso_timestamp` (Claude/Codex/Antigravity)
+  truncated to 23 chars *before* replacing the trailing `Z`, so every
+  transcript-derived date came out naive (no timezone). Mixing those with
+  the tz-aware dates of Desktop-only ghost sessions (F1.3 overlay, epoch
+  ms) made Claude's `list_sessions` date sort raise `TypeError`. The full
+  string is now parsed first (honouring `Z` and explicit offsets; the
+  23-char truncation remains as a noise fallback) and naive values are
+  pinned to UTC, so every parser date is tz-aware. Serialised transcript
+  dates now render with an explicit `+00:00` offset instead of the
+  legacy `Z` suffix — same instant, still ISO 8601.
 - **Empty-result diagnostics no longer re-scan the corpus**: on a
   zero-result response, `query` / `search_sessions` / `find_tool_calls` /
   `find_file_edits` / `list_sessions` used to call `list_sessions()` a
