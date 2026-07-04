@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 58 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -54,6 +54,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
+| `outcome` (read_session field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
 | `resume_command` (summary field) | 1 | Every session summary carries `resume_command` — the ready-to-run CLI one-liner (`cd <project_dir> && claude --resume <uuid>` / `codex resume <uuid>` / `opencode --session <id>` / `pi --session <path>`), shell-quoted, `cd`-prefixed when `project_dir` is known; `null` exactly where no real command exists (Antigravity, subagent sessions, reference-only Desktop sessions) — text only, never executed. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
@@ -452,6 +453,34 @@ spec: `docs/methods.md` → *Resume command*.
 - **Steps:** `mcp__ai-r__list_sessions()`; inspect `resume_command` on every summary. Do NOT run any of the returned commands.
 - **Expected:** Claude (a) → `cd /home/u/dev/x && claude --resume <uuid>`; Codex (c) → `cd <cwd> && codex resume <uuid>`; OpenCode (d) → `cd <directory> && opencode --session <id>`; Pi (e) → `cd <cwd> && pi --session <session-file-path>` (path form, not id); Antigravity (f) → `null`; the subagent session (b) → `null`; the Desktop-only reference (g) → `null`. A session without `project_dir` gets the bare command (no fabricated `cd`).
 - **Pass criteria:** GO when every non-null command matches its agent's documented shape with shell-quoted values, and `null` appears exactly on Antigravity / subagent / reference-only summaries — never an invented command. NO-GO if a command is fabricated where the CLI has no resume verb.
+
+---
+
+## `outcome` (read_session field)
+
+Every `read_session` response carries `outcome` (F2.3): a session-outcome classification from two
+honest signals — the tool-call error rate (real per-result flag only for Claude/OpenCode) and a
+calibrated bilingual (ru+en) success/failure word dictionary over the closing *human* user turns.
+`status` is `success` / `failure` / `mixed` / `unknown`; with no signal the status is an honest
+`unknown` — never a guess. Every deciding reason is spelled out in `signals` (empty ⇔ `unknown`).
+The block carries only ai-r-authored strings and dictionary marker labels, never raw session text.
+Semantics SSOT: `src/ai_r/outcome.py`.
+
+### OUT-1 — decision table: words × error rate, honest unknown
+- **Function:** `read_session` (F2.3 `outcome` block)
+- **Goal:** The four decision-table rows classify correctly and every deciding reason is named in `signals`; a no-signal session is `unknown` with empty `signals`, never a fabricated verdict.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` four Claude sessions: (a) closing user turn «Отлично, работает!» and no failed tool calls; (b) closing user turn «Не работает, откати»; (c) 4 tool results of which 3 carry `is_error: true` and a *neutral* closing user turn; (d) a plain hello-world exchange with no tool calls and no verdict words.
+- **Steps:** `mcp__ai-r__read_session(uuid=<a|b|c|d>, agent="claude")` for each; inspect `outcome`.
+- **Expected:** (a) `status="success"`, `user_verdict="positive"`, a `signals` entry naming the matched markers; (b) `status="failure"`, `user_verdict="negative"`, markers listed under `markers.negative`; (c) `status="failure"` with a `signals` entry naming the error rate (`0.75 (3/4)`), `tool_results=4`, `tool_errors=3`, `error_rate=0.75`, `error_rate_reliable=true`; (d) `status="unknown"` with `signals=[]`. In every case the block contains no raw transcript text (only dictionary labels and ai-r-authored strings).
+- **Pass criteria:** GO when all four statuses match, `signals` is empty exactly on the unknown case and names each deciding reason otherwise, and no raw session text appears inside `outcome`. A verdict on the no-signal session is NO-GO.
+
+### OUT-2 — honest nulls for agents without an error flag
+- **Function:** `read_session` (F2.3 `outcome` block, unreliable-flag agents)
+- **Goal:** For Codex/Pi/Antigravity — whose formats carry no per-result error flag — the error-rate fields are `null` (never derived from guesswork), while the word dictionary still classifies; with no verdict words the status stays `unknown`.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` a Codex session with several `function_call`/`function_call_output` records and a closing user message without verdict words; optionally a second Codex session whose closing user message is «спасибо, работает».
+- **Steps:** `mcp__ai-r__read_session(uuid=<codex-uuid>, agent="codex")`; inspect `outcome`; repeat for the verdict-word variant.
+- **Expected:** `error_rate_reliable=false`, `tool_errors=null`, `error_rate=null` while `tool_results` still counts the outputs; the wordless session is `status="unknown"` (`signals=[]`); the «спасибо, работает» variant is `status="success"` on the word signal alone.
+- **Pass criteria:** GO when the error fields are `null` exactly for the unreliable-flag agent (no invented error rate), `tool_results` is still counted, and the status changes only on the word signal. A non-null `error_rate` for Codex/Pi/Antigravity is NO-GO.
 
 ---
 

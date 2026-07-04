@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session outcome classification (F2.3)**: `read_session` now carries
+  an `outcome` block — `{status, signals, user_verdict, markers,
+  tool_results, tool_errors, error_rate, error_rate_reliable}` with
+  `status ∈ success|failure|mixed|unknown`. Two honest signals, never a
+  guess: (1) **tool-call error rate** — the share of tool results the
+  agent itself flagged as failed; a *real* source flag exists only for
+  Claude (`tool_result.is_error`) and OpenCode (`state.status ==
+  "error"`), so for Codex/Pi/Antigravity `tool_errors`/`error_rate` are
+  `null` (`error_rate_reliable: false`) — mirrors
+  `find_tool_calls.is_error_reliable`; (2) **user-verdict dictionary** —
+  bilingual (ru+en) success/failure markers matched against the last 3
+  *human* user turns only (assistant self-reports are never trusted;
+  XML wrappers / `[...]` placeholders / `Caveat:` preambles skipped).
+  Decision table: negative verdict → `failure`; positive → `success`
+  (`mixed` when errors dominate); neutral + dominant errors → `failure`;
+  otherwise `unknown` (empty `signals` ⇔ `unknown`). Thresholds and the
+  dictionary are **calibrated on real history** (audit 2026-07-04, 107
+  Claude + 48 OpenCode sessions: median error rate 0.09/0.02, p90
+  0.22/0.08 → "dominant" = `rate ≥ 0.5` across `≥ 4` results; «повтори»
+  dropped from the negative set — in real use it means "re-run after an
+  accidental interrupt", not a failure verdict; seeded from the
+  web-harvested `cass_memory` outcome dictionary). Validation run over
+  150 real sessions: 125 unknown / 17 success / 8 failure — conservative
+  by design. The block contains only ai-r-authored strings and
+  dictionary labels (never raw session text), so it needs no redaction
+  pass. SSOT `src/ai_r/outcome.py`; scenarios OUT-1…OUT-2.
 - **Resume command in session summaries (F2.2)**: every session summary
   (`list_sessions` / `read_session` / `search_sessions` candidates) now
   carries `resume_command` — the ready-to-run shell one-liner that

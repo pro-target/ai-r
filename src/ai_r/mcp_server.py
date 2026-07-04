@@ -70,6 +70,7 @@ from ai_r.parsers import Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
 from ai_r.resume import resume_command  # noqa: E402
 from ai_r.redact import (  # noqa: E402
     merge_redaction_counts as _merge_redactions,
@@ -767,6 +768,15 @@ def read_session(
           used.
         * ``messages_truncated`` — True when the MCP hard cap stopped
           extraction before every projected message could be returned.
+        * ``outcome`` — session outcome classification (F2.3):
+          ``{status: success|failure|mixed|unknown, signals, user_verdict,
+          markers, tool_results, tool_errors, error_rate,
+          error_rate_reliable}``.  ``status`` combines the tool-call
+          error rate (real flag only for Claude/OpenCode —
+          ``None`` elsewhere, never guessed) with a calibrated bilingual
+          success/failure dictionary over the tail user turns;
+          ``"unknown"`` when neither signal exists (SSOT
+          :mod:`ai_r.outcome`).
 
         On an id collision (agent omitted, several agents own the id):
         ``{"ambiguous": True, "uuid": ..., "candidates": [...],
@@ -831,11 +841,18 @@ def read_session(
 
     session = matches[0]
 
-    projected = _extract_messages(
-        session,
-        offset=0,
-        limit=0,
-        hard_cap=_MESSAGES_HARD_CAP + 1,
+    # Read the raw structured messages ONCE: the projection consumes them
+    # below and the outcome classifier (F2.3) scans the same list — no
+    # second parse of the transcript.
+    parser = _PARSERS.get(session.agent)
+    raw_messages: List[Any] = []
+    if parser is not None:
+        try:
+            raw_messages = parser.read_messages(session.uuid)
+        except (FileNotFoundError, ValueError, OSError):
+            raw_messages = []
+    projected = _project_messages(
+        raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1
     )
     messages_truncated = len(projected) > _MESSAGES_HARD_CAP
     if messages_truncated:
@@ -852,6 +869,12 @@ def read_session(
     summary["offset"] = offset
     summary["limit"] = limit
     summary["messages_truncated"] = messages_truncated
+    # Session outcome (F2.3): tool-call error rate + user-verdict
+    # dictionary over the tail user turns; honest "unknown" when neither
+    # signal exists.  The block carries only ai-r-authored strings and
+    # dictionary marker labels (never raw session text), so it stays
+    # outside the redaction pass by construction (SSOT ai_r.outcome).
+    summary["outcome"] = _session_outcome(raw_messages, session.agent)
     # Emission-time redaction (F2.1): after pagination so only the emitted
     # page pays; the raw transcript on disk is never touched.
     if redact:
