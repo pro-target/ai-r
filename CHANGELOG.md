@@ -141,6 +141,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`query` events are reference-by-default again (QRY-1 contract)**: the
+  MCP `query` response inlined each event's FULL `text` (measured up to
+  ~12.5 KB per event), violating the "events carry references, never
+  bodies" contract. The MCP wrapper now cuts every emitted event `text`
+  to a ~160-char preview **at the output boundary, after emission-time
+  redaction** (a secret at the head of a long body is masked in the
+  preview too); a real cut is marked with a trailing `…` and
+  `text_truncated: true` (flag absent when nothing was cut).
+  `id`/`refs`/`sha256` are untouched, so `get_body(id)` still returns
+  the full body on demand. In-process consumers of full event text
+  (`plan`, `diff`, `session_stats`, `session_diff`, `find_*`, the
+  `events.query` core) are unaffected — the cut lives only in the MCP
+  projection, not in the core.
 - **Transcript timestamps are tz-aware; Desktop-ghost sort no longer
   crashes**: the shared `_parse_iso_timestamp` (Claude/Codex/Antigravity)
   truncated to 23 chars *before* replacing the trailing `Z`, so every

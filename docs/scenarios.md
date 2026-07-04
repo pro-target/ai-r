@@ -44,7 +44,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 10 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware). |
+| `query` | 10 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware). |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
 | `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
@@ -70,15 +70,17 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end
 
 The workhorse verb: filters the unified, agent-neutral event stream
 (`user_turn` / `assistant_turn` / `tool_call(<sub>)` / `plan_event`) by facets. All behaviour is
-parameters. Events carry **references** (`refs`), never inlined bodies.
+parameters. Events carry **references** (`refs`), never inlined bodies: the emitted `text` is a
+~160-char preview (a real cut ends with `…` and sets `text_truncated: true`); the full body is
+fetched on demand via `get_body(id)`.
 
 ### QRY-1 — filter by agent + type
 - **Function:** `query`
 - **Goal:** A facet-filtered listing returns the correct event shape with no body inlined.
 - **Preconditions:** A vault with at least one `claude` session. `[needs-real-vault]` for non-empty output; `[hermetic-ok]` for the empty-vault shape check.
 - **Steps:** `mcp__ai-r__query(agent="claude", type="user_turn", limit=20)`.
-- **Expected:** `{events:[…], count:N}`; every event has `type == "user_turn"`, an `id`, a timestamp, and `refs`; no event carries a full `body`/`text` payload inlined.
-- **Pass criteria:** GO when all returned events match `type` and `agent`, each has an `id` usable by `get_body`, and no message body is inlined in the event.
+- **Expected:** `{events:[…], count:N}`; every event has `type == "user_turn"`, an `id`, a timestamp, and `refs`; no event carries a full `body`/`text` payload inlined — `text` is a preview cut to ~160 chars (applied **after** redaction); a real cut ends with `…` and sets `text_truncated: true` (flag absent on short texts).
+- **Pass criteria:** GO when all returned events match `type` and `agent`, each has an `id` usable by `get_body`, and no message body is inlined in the event (a long text arrives as a flagged `…`-preview; `get_body(id)` returns it whole).
 
 ### QRY-2 — filter by session → chronological single session
 - **Function:** `query`

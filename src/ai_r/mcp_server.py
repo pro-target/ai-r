@@ -144,6 +144,36 @@ def _redact_fields(
             _merge_redactions(redactions, counts)
 
 
+# Reference-by-default boundary (scenario QRY-1): the ``query`` MCP wrapper
+# cuts every emitted event ``text`` to this many characters — the full body
+# stays on-demand via ``get_body``.
+_EVENT_TEXT_PREVIEW_CHARS = 160
+
+
+def _preview_event_texts(
+    events: List[dict[str, Any]],
+    max_chars: int = _EVENT_TEXT_PREVIEW_CHARS,
+) -> None:
+    """Cut each event's ``text`` to a preview, in place (QRY-1 contract).
+
+    Output-boundary projection ONLY: the core (:mod:`ai_r.events.query`) and
+    every in-process consumer of full event text (``plan`` / ``diff`` /
+    ``session_stats`` / ``session_diff`` / ``find_*``) keep seeing the full
+    text — this runs on the MCP wrapper's already-materialized row dicts.
+    It also runs AFTER emission-time redaction (the core redacts before
+    returning), so a secret at the head of a long body is masked in the
+    preview too.  A real cut is marked with a trailing ``…`` and
+    ``text_truncated: true``; shorter texts are left untouched (no flag).
+    ``id`` / ``refs`` / ``sha256`` are never modified, so ``get_body(id)``
+    still resolves the full body.
+    """
+    for ev in events:
+        text = ev.get("text")
+        if isinstance(text, str) and len(text) > max_chars:
+            ev["text"] = text[:max_chars] + "…"
+            ev["text_truncated"] = True
+
+
 mcp = FastMCP(
     name="ai-r",
     instructions=(
@@ -1333,6 +1363,12 @@ def query(
     ``redact=False`` returns raw content.  Redaction is emission-time only:
     the ``text`` facet (and every other filter) matches the RAW stored text.
 
+    Events are reference-by-default: each emitted event's ``text`` is a
+    **preview** cut to ~160 chars (applied after redaction).  A real cut is
+    marked with a trailing ``…`` and ``text_truncated: true`` (absent when
+    nothing was cut).  ``id``/``refs``/``sha256`` are untouched — fetch the
+    full body on demand with ``get_body(id)``.
+
     Returns ``{"events": [...], "count": N}`` or the standard
     ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
     ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
@@ -1372,6 +1408,11 @@ def query(
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
+    # Reference-by-default (QRY-1): cut emitted ``text`` to a preview at the
+    # output boundary — AFTER the core's emission-time redaction, so secrets
+    # in a long head are masked before the cut.  In-process consumers call
+    # the core directly and keep the full text.
+    _preview_event_texts(events)
     result: dict[str, Any] = {"events": events, "count": len(events)}
     if redactions:
         result["redactions"] = redactions

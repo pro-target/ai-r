@@ -2542,6 +2542,104 @@ def test_query_over_mcp_client(fake_claude_session_with_tools: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# query reference-by-default (QRY-1): text preview at the MCP boundary
+# ---------------------------------------------------------------------------
+
+
+def _patch_claude_base(tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+
+def test_query_long_text_cut_to_preview_and_get_body_full(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long body surfaces as a ~160-char preview + flag; get_body returns it whole."""
+    long_text = "slovo " * 900  # ~5.4 KB, no secrets
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-long-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-long-1")
+    assert res["count"] == 1
+    ev = res["events"][0]
+    assert ev["text_truncated"] is True
+    assert ev["text"].endswith("…")
+    assert ev["text"] == long_text[:160] + "…"
+    assert len(ev["text"]) == 161
+    # id/refs untouched → get_body resolves the FULL body.
+    body = get_body(ev["id"])
+    assert body.get("error") is None
+    full = body.get("text") or body.get("body") or ""
+    assert full.rstrip() == long_text.rstrip()
+    assert len(full) > 5000
+
+
+def test_query_short_text_not_flagged(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short body is emitted verbatim: no cut, no ``text_truncated`` key."""
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-short-1", user_text="short and sweet"
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-short-1")
+    ev = res["events"][0]
+    assert ev["text"] == "short and sweet"
+    assert "text_truncated" not in ev
+
+
+def test_query_preview_cut_runs_after_redaction(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret at the HEAD of a long body is masked in the preview.
+
+    Redaction happens in the core (emission-time), the preview cut at the
+    MCP boundary — so the preview must contain the placeholder, never a
+    prefix of the raw secret.
+    """
+    secret = "ghp_" + "a1b2c3d4e5" * 4  # GITHUB_TOKEN pattern (40 tail chars)
+    long_text = "token " + secret + " tail " + "x" * 500
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-redact-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-redact-1")
+    ev = res["events"][0]
+    assert ev["text_truncated"] is True
+    assert "[REDACTED_GITHUB_TOKEN]" in ev["text"]
+    assert secret not in ev["text"]
+    assert res["redactions"].get("GITHUB_TOKEN", 0) >= 1
+
+
+def test_query_preview_over_mcp_client(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preview contract holds over the real MCP transport too."""
+    long_text = "payload " * 400
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-mcp-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    out = _run(
+        _call(
+            "query",
+            {"type": "user_turn", "agent": "claude", "session": "preview-mcp-1"},
+        )
+    )
+    payload = json.loads(out[0])
+    ev = payload["events"][0]
+    assert ev["text_truncated"] is True
+    assert len(ev["text"]) == 161 and ev["text"].endswith("…")
+
+
+# ---------------------------------------------------------------------------
 # plan + get_body (Phase-2 verbs): registration + behaviour
 # ---------------------------------------------------------------------------
 
