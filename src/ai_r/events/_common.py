@@ -95,9 +95,15 @@ _TASK_NAMES = frozenset({"task", "agent", "spawn_agent"})
 # Skill/slash-command wrapper names — Claude ``Skill``/``SlashCommand``,
 # OpenCode ``skill``.
 _SKILL_NAMES = frozenset({"skill", "slashcommand"})
-# Network-touching tool names (groundwork for the web-audit phase) — Claude
-# ``WebFetch``/``WebSearch``, OpenCode ``webfetch``.  Name-based only.
-_WEB_NAMES = frozenset({"webfetch", "web_fetch", "websearch", "web_search"})
+# Network-touching tool names (the F4.3 web-audit signal) — Claude
+# ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
+# (surfaced from ``web_search_call`` rollout records by the codex parser),
+# Gemini/Antigravity ``web_fetch``/``google_web_search`` (verified against
+# the vendored gemini-cli reference).  Name-based only; Pi records no web
+# tool — honest absence.
+_WEB_NAMES = frozenset({
+    "webfetch", "web_fetch", "websearch", "web_search", "google_web_search",
+})
 
 # Input keys that carry the real name under each wrapper, by preference.
 # Task: Claude/OpenCode ``subagent_type``, Codex ``agent_type``.

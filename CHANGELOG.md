@@ -8,6 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`network` preset: network-egress audit (F4.3)**: new MCP tool
+  `network` (core `ai_r.network`) answers "where did an agent reach out
+  to the network — and how risky did those requests look?" in one call.
+  A preset over the existing core, not a second engine: ONE
+  `query(type="tool_call", tool_kind="web")` scan supplies the candidates;
+  the request target (`url`/`query`) is extracted from each call's own
+  input (explicit `url`/`query` keys, or the first URL embedded in a
+  `prompt` string — the Gemini `web_fetch` shape; nothing extractable →
+  honest `null` fields and `kind: null`, never guessed from the tool
+  name); a deterministic **risk dictionary** assesses each request —
+  `plain_http`, `credentials_in_url`, `secret_in_url`/`secret_in_query`
+  (the F2.1 redaction patterns double as the detector — one vocabulary,
+  two uses), `ip_literal_host`, `private_or_local_host`,
+  `punycode_host`. Each record carries the query event `id` (context
+  on-demand via `relative_to` / `read_session`), derived `kind`
+  (`fetch`/`search`), char-capped `url`/`query` (token budget; the cap is
+  applied AFTER redacting the full string, so a boundary-sliced secret
+  never leaks partially), `domain`, `risks` and tri-state `is_error`
+  (`null` where the agent's format has no correlated outcome signal).
+  Filters are all parameters: `agent`, `session` (uuid or list),
+  `since`/`until`, `kind`, `risk` (`include`/`only`/`exclude`), `domain`
+  (equals-or-subdomain), `noise`, `project_dir`;
+  `count`/`risky_count`/`by_domain`/`by_risk` always reflect the FULL
+  match set independent of `limit`; unknown `kind`/`risk` values fail
+  loud; zero requests → empty-result `diagnostics` (F1.1). Documented
+  boundary: MCP-mediated network access stays under `tool_kind="mcp"` —
+  a name alone cannot prove an MCP server touches the network, so it is
+  never guessed into the audit. Scenarios NET-1..4.
+
+- **Codex web-search signal in the parser (F4.3 groundwork)**: Codex
+  rollouts record native web access as `web_search_call` response items
+  (an `action` object: `search` → `query`, `open_page`/`find_in_page` →
+  `url`), not as `function_call` — previously invisible. The codex parser
+  now surfaces each one as a `web_search` tool_use (input = the action
+  object), so the F3.1 classifier marks it `tool_kind="web"` and Codex
+  egress participates in `query`/`find_tool_calls`/`network` like every
+  other agent's. No result record exists for these items, so `is_error`
+  stays honestly unknown. The `google_web_search` name
+  (Gemini/Antigravity family, verified against the vendored gemini-cli
+  reference) was added to the web-name vocabulary alongside the existing
+  `webfetch`/`web_fetch`/`websearch`/`web_search`; Pi records no web tool
+  — honest absence, nothing fabricated.
+
 - **`incidents` preset: dangerous command + regret reaction (F4.1)**: new
   MCP tool `incidents` (core `ai_r.incidents`) answers "where did an agent
   run something destructive — and did it then apologise?" in one call. A

@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 74 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 78 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -53,6 +53,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 74 LLM-executed end-to-end
 | `session_stats` (preset) | 4 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `incidents` (preset) | 4 | One call finds dangerous shell commands + regret reactions (F4.1) via a baked chain — ONE `query(type=tool_call, tool_kind=bash)` scan → deterministic danger dictionary on the extracted command (a Bash `description` alone never fires; `--force-with-lease` is not force-push) → bilingual (ru+en) regret-marker scan over the next `reaction_window` messages (default 6) — the two-step `confirmed` verdict, never guessed; each record carries the query event `id` (context on-demand via `relative_to`), `patterns`+`categories`, a char-capped `command` fragment centred on the hit, tri-state `is_error` (`null` where the agent's format has no correlated outcome signal) and `reaction` (marker labels + capped preview, `null` when unconfirmed); `count`/`confirmed_count`/`by_pattern` reflect the FULL match set independent of `limit`; `category`/`confirmed` filters fail loud on unknown values; emitted fields are redacted by default while matching runs on RAW text; zero incidents → `diagnostics`; documented dictionary caveat: quoting a dangerous string (echo/grep/test payloads) can still match — mention vs execution is not decidable by regex. |
+| `network` (preset) | 4 | One call audits network egress (F4.3) via a baked chain — ONE `query(type=tool_call, tool_kind=web)` scan (Claude `WebFetch`/`WebSearch`, OpenCode `webfetch`, Codex `web_search` surfaced from `web_search_call` rollout records, Gemini/Antigravity `web_fetch`/`google_web_search`; Pi records no web tool — honest absence) → the request target (`url`/`query`) extracted from the call's own input (never guessed from the tool name; no target → honest `null` fields, `kind: null`) → a deterministic **risk dictionary** (`plain_http`, `credentials_in_url`, `secret_in_url`/`secret_in_query` — the redaction patterns double as the detector, `ip_literal_host`, `private_or_local_host`, `punycode_host`); each record carries the query event `id` (context on-demand via `relative_to`), derived `kind` (`fetch`\|`search`), char-capped `url`/`query`, `domain`, `risks` and tri-state `is_error`; `count`/`risky_count`/`by_domain`/`by_risk` reflect the FULL match set independent of `limit`; `kind`/`risk` filters fail loud on unknown values, `domain` matches equals-or-subdomain; risk assessment runs on RAW strings while emitted fields are redacted by default (cap applied AFTER redaction — a boundary-sliced secret never leaks); zero requests → `diagnostics`; documented caveat: MCP-mediated network access stays under `tool_kind="mcp"` — never guessed into the audit. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
 | `outcome` (read_session field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
@@ -492,6 +493,54 @@ incident, no reaction → `confirmed: false`, never inferred.
 - **Steps:** `mcp__ai-r__incidents(limit=0)`; inspect per-agent records; compare one record with `redact=false`.
 - **Expected:** Records from every agent whose history has dangerous shell calls (not only Claude); `is_error` is `true`/`false` only where a correlated result outcome exists and `null` elsewhere (e.g. codex — no per-result flag), never fabricated; with `redact=true` (default) any secret in `command`/`reaction.preview`/`session_title` is masked as `[REDACTED_<TYPE>]` with a `redactions` type→count dict, while the SAME record is found either way (matching ran on RAW text).
 - **Pass criteria:** GO when non-Claude agents appear (given signal), no `is_error` is invented for formats without the flag, and redaction changes only the emitted fields — never the match set.
+
+---
+
+## `network` (preset)
+
+The F4.3 preset: network-egress audit, one call. A baked chain over the existing core (never a
+second engine): ONE `query(type="tool_call", tool_kind="web")` scan supplies the candidates —
+Claude `WebFetch`/`WebSearch`, OpenCode `webfetch`, Codex `web_search` (surfaced from
+`web_search_call` rollout records), Gemini/Antigravity `web_fetch`/`google_web_search`; Pi records
+no web tool (honest absence) → the request target (`url`/`query`) is extracted from each call's own
+input → the deterministic **risk dictionary** (`plain_http`, `credentials_in_url`, `secret_in_url`/
+`secret_in_query` — the F2.1 redaction patterns double as the detector, `ip_literal_host`,
+`private_or_local_host`, `punycode_host`). Zero LLM: no extractable target → honest `null` fields;
+a risk fires only on parse/regex evidence. MCP-mediated network access (browser-automation servers
+etc.) stays under `tool_kind="mcp"` — a name alone cannot prove an MCP server touches the network,
+so it is never guessed into this audit (documented boundary).
+
+### NET-1 — web calls surface as request records (target extraction + rollups) `[needs-real-vault]`
+- **Function:** `network`
+- **Goal:** Real web-tool calls come back as request records with extracted targets and honest rollups.
+- **Preconditions:** A vault whose history contains web-tool calls (e.g. Claude `WebFetch`/`WebSearch`). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__network(limit=10)`; pick one record; cross-check its `id` via `mcp__ai-r__query(relative_to="<id>", direction="prev")` and `mcp__ai-r__read_session(<session_id>)`.
+- **Expected:** `{requests:[…], count, risky_count, by_domain, by_risk, truncated}`; every record carries `id` (a query event id), `agent`, `session_id`, `ts`, `tool`, derived `kind` (`fetch` when a `url` was extracted, `search` when a `query` was, `null` when neither — never guessed from the tool name), char-capped `url`/`query` (`*_truncated` flagged on a real cut), `domain` (`null` for searches), a `risks` list (possibly empty) and tri-state `is_error`; records are chronological (ts ascending); `by_domain` counts only records with a URL; the `id` walks back to the true preceding user turn.
+- **Pass criteria:** GO when a fetch record's `url`/`domain` really match the transcript call, `by_domain`/`by_risk` sums match the per-record fields over the FULL match set (independent of `limit`), and no record has a `kind` its extracted fields don't justify.
+
+### NET-2 — risk dictionary + `risk`/`kind`/`domain` filters compose honestly `[needs-real-vault]`
+- **Function:** `network`
+- **Goal:** Risk labels fire only on evidence, and the filters compose as documented.
+- **Preconditions:** A vault with ≥1 risky request (e.g. a plain-`http://` fetch or a URL with a token in the query string); on a vault without one the risky-shape check is skipped (GO-with-caveats), the subset algebra still runs. `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__network(risk="only")`, `mcp__ai-r__network(risk="exclude")`, `mcp__ai-r__network()`; then `mcp__ai-r__network(kind="search")` and `mcp__ai-r__network(domain="<a domain seen in by_domain>")`.
+- **Expected:** `only` ∪ `exclude` = `include` (counts add up); every `only` record has ≥1 label from the fixed vocabulary (`plain_http`/`credentials_in_url`/`secret_in_url`/`secret_in_query`/`ip_literal_host`/`private_or_local_host`/`punycode_host`) and every label is backed by the visible URL/query shape; `kind="search"` returns only query-target records; `domain="github.com"`-style filter keeps the host itself and its subdomains, and never matches a URL-less search record.
+- **Pass criteria:** GO when the subset algebra holds, every emitted risk label is justified by the record's own fields, and no label is ever fabricated for a clean request.
+
+### NET-3 — fail-loud validation + empty-result diagnostics `[hermetic-ok]`
+- **Function:** `network`
+- **Goal:** Unknown parameter values fail loud; an empty result is explainable.
+- **Preconditions:** None (empty vault is fine). `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__network(kind="download")`, `mcp__ai-r__network(risk="high")`, `mcp__ai-r__network(limit=-1)`; then a valid call on an empty/filtered-to-zero corpus.
+- **Expected:** Each invalid call returns `{"error": "invalid_argument", "message": …}` naming the offending parameter — never a silent empty result; the valid zero-match call returns `count: 0` **plus** `diagnostics` (scanned agents, corpus bounds, cause hints).
+- **Pass criteria:** GO when all three invalid calls fail loud and the zero-result response carries `diagnostics` (a non-empty response never does).
+
+### NET-4 — cross-agent honesty: RAW assessment, redacted emission, honest boundaries `[needs-real-vault]`
+- **Function:** `network`
+- **Goal:** All agents participate on equal terms and the honesty rules hold on real data.
+- **Preconditions:** A vault with web calls from ≥2 agents (e.g. claude + opencode/codex). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__network(limit=0)`; inspect per-agent records; compare one URL-bearing record with `redact=false`; check `tool_kind="mcp"` browser calls via `mcp__ai-r__query(tool_kind="mcp")` are absent from the audit.
+- **Expected:** Records from every agent whose history has web calls (not only Claude; Codex `web_search` records appear when the rollouts contain `web_search_call`); `is_error` is `true`/`false` only where a correlated result outcome exists and `null` elsewhere, never fabricated; with `redact=true` (default) any secret in `url`/`query`/`session_title` is masked as `[REDACTED_<TYPE>]` with a `redactions` type→count dict, while the SAME record is found either way (assessment ran on RAW strings); MCP-mediated network calls (e.g. browser-automation servers) do NOT appear — they stay visible under `tool_kind="mcp"` in `query`, a documented boundary, not a blind spot.
+- **Pass criteria:** GO when non-Claude agents appear (given signal), no `is_error` is invented for formats without the flag, redaction changes only the emitted fields — never the match set — and no MCP call was guessed into the audit.
 
 ---
 

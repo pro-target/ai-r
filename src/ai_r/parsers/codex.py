@@ -398,6 +398,32 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                         timestamp=env_ts,
                     )
                 )
+            elif ptype == "web_search_call":
+                # Codex's native web access is not a function_call: the
+                # rollout stores a ``web_search_call`` response item whose
+                # ``action`` object carries the target (``search`` →
+                # ``query``/``queries``, ``open_page``/``find_in_page`` →
+                # ``url``).  Surface it as a ``web_search`` tool_use so the
+                # F3.1 classifier marks it ``tool_kind="web"`` and the F4.3
+                # network audit sees Codex egress like everyone else's.
+                # No result record exists → no tool_result (is_error stays
+                # unknown — honest).
+                action = payload.get("action")
+                if isinstance(action, dict):
+                    try:
+                        input_str = json.dumps(action, ensure_ascii=False)
+                    except (TypeError, ValueError):  # pragma: no cover
+                        input_str = str(action)
+                else:
+                    input_str = ""
+                messages.append(
+                    Message(
+                        role="assistant",
+                        text="",
+                        tool_use=({"name": "web_search", "input": input_str},),
+                        timestamp=env_ts,
+                    )
+                )
             elif ptype in ("function_call_output", "local_shell_call_output"):
                 output = payload.get("output", "")
                 if not isinstance(output, str):

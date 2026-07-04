@@ -65,6 +65,7 @@ from ai_r.find_file_edits import (  # noqa: E402
 from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # noqa: E402
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.incidents import incidents as _incidents_core  # noqa: E402
+from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import ParserModule, Session  # noqa: E402
@@ -1136,6 +1137,87 @@ def incidents(
             category=category,
             confirmed=confirmed,
             reaction_window=reaction_window,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def network(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    kind: Optional[str] = None,
+    risk: str = "include",
+    domain: Optional[str] = None,
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Network-egress audit — the *network* preset (F4.3).
+
+    One call answers "where did an agent reach out to the network — and
+    how risky did those requests look?".  A preset over the existing core,
+    not a second engine: ONE ``query`` scan (``type="tool_call"``,
+    ``tool_kind="web"``) supplies the candidates — Claude
+    ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
+    (surfaced from ``web_search_call`` rollout records),
+    Gemini/Antigravity ``web_fetch``/``google_web_search``; Pi records no
+    web tool (honest absence).  The request target (``url``/``query``) is
+    extracted from each call's own input and assessed with a deterministic
+    **risk dictionary**: ``plain_http``, ``credentials_in_url``,
+    ``secret_in_url`` / ``secret_in_query`` (the redaction patterns double
+    as the detector), ``ip_literal_host``, ``private_or_local_host``,
+    ``punycode_host``.  Zero LLM, zero guessing: no extractable target →
+    honest ``null`` fields; a risk fires only on parse/regex evidence.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list of
+    uuids), ``since``/``until`` (ISO bounds on the call ts), ``kind``
+    (``fetch``|``search`` — derived from the extracted fields, unknown
+    values fail loud), ``risk`` (``include`` default | ``only`` |
+    ``exclude``), ``domain`` (host equals-or-subdomain match), ``noise``
+    and ``project_dir`` (session-level, same semantics as ``query``).
+
+    Each request record carries the query event ``id`` (walk its context
+    via ``query(relative_to=...)`` / ``read_session``), the derived
+    ``kind``, char-capped ``url``/``query`` (token budget — full context
+    stays on-demand), ``domain``, the ``risks`` labels and tri-state
+    ``is_error`` (``null`` when the agent's format has no correlated
+    outcome signal — honest, cross-agent).  ``count``/``risky_count``/
+    ``by_domain``/``by_risk`` always reflect the FULL match set; ``limit``
+    (default 50, ``0`` = no cap) bounds only the emitted records
+    (``truncated``).
+
+    Honesty caveats (documented, not hidden): risk labels are a
+    deterministic dictionary, not a threat oracle; MCP-mediated network
+    access (browser-automation servers etc.) stays under
+    ``tool_kind="mcp"`` — a name alone cannot prove an MCP server touches
+    the network, so it is never guessed into this audit.  Risk assessment
+    runs on the RAW stored strings; ``redact=true`` (default) masks
+    secrets only in the emitted ``url``/``query``/``session_title`` fields
+    (``redactions`` type→count dict when anything was masked).  When
+    ``count == 0`` the response carries ``diagnostics`` so an empty result
+    is explainable.
+
+    Thin wrapper over :func:`ai_r.network.network` that translates the
+    core ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _network_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            kind=kind,
+            risk=risk,
+            domain=domain,
             limit=limit,
             noise=noise,
             project_dir=project_dir,
