@@ -28,6 +28,9 @@ use so Phase 3b can retarget them onto this verb with byte-identical output:
 * ``agents``   — sorted distinct ``agent`` values.
 * ``messages`` — SUM of each row's ``messages`` | ``message_count`` int.
 * ``files``    — distinct count of ``file``.
+* ``tokens``   — fold of per-row ``tokens`` blocks (F3.3): sums the
+  normalized usage sub-fields and counts row provenance
+  (``exact``/``estimated``/``unknown``) — see :func:`_metric_tokens`.
 
 ``totals`` carries the same metrics folded over the WHOLE row set (never the
 truncated ``groups``), plus ``sessions``/``agents``/``agents_list`` mirrors
@@ -42,6 +45,7 @@ from collections import OrderedDict as _OrderedDict
 from typing import (
     Any,
     List,
+    Optional,
     OrderedDict as OrderedDictType,
     Sequence,
     Tuple,
@@ -135,6 +139,59 @@ def _metric_files(rows: Sequence[dict[str, Any]]) -> int:
     return len(seen)
 
 
+# Summable sub-fields of a row's ``tokens`` block (the normalized shape of
+# :func:`ai_r.tokens.session_tokens`).
+_TOKEN_SUM_FIELDS: tuple[str, ...] = (
+    "input", "output", "reasoning", "cache_read", "cache_write", "total",
+)
+
+
+def _metric_tokens(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Fold per-row ``tokens`` blocks into one bucket summary (F3.3).
+
+    Each row may carry ``tokens`` as the normalized dict produced by
+    :func:`ai_r.tokens.session_tokens` (``{input, output, reasoning,
+    cache_read, cache_write, total, source, [estimator]}``) or, as a
+    convenience, a bare ``int`` total.  The reducer sums every ``int``
+    sub-field over the rows that have one (a field no row carries stays
+    ``None`` — never a fabricated ``0``) and keeps the provenance honest
+    with three per-row counters:
+
+    * ``exact``     — rows whose block says ``source == "exact"``;
+    * ``estimated`` — rows whose block says ``source == "estimate"``;
+    * ``unknown``   — rows with no usable total OR a total of unknown
+      provenance (bare int / missing ``source``).
+
+    Invariant: ``exact + estimated + unknown == len(rows)``.  Exact and
+    estimated totals are summed together — the counters exist precisely so
+    a reader can see how much of the sum is estimation.
+    """
+    sums: dict[str, Optional[int]] = {f: None for f in _TOKEN_SUM_FIELDS}
+    exact = estimated = unknown = 0
+    for r in rows:
+        block = r.get("tokens")
+        if isinstance(block, bool):
+            block = None
+        if isinstance(block, int):
+            block = {"total": block}
+        if not isinstance(block, dict) or not isinstance(block.get("total"), int) \
+                or isinstance(block.get("total"), bool):
+            unknown += 1
+            continue
+        source = block.get("source")
+        if source == "exact":
+            exact += 1
+        elif source == "estimate":
+            estimated += 1
+        else:
+            unknown += 1
+        for field in _TOKEN_SUM_FIELDS:
+            val = block.get(field)
+            if isinstance(val, int) and not isinstance(val, bool):
+                sums[field] = (sums[field] or 0) + val
+    return {**sums, "exact": exact, "estimated": estimated, "unknown": unknown}
+
+
 # Metric name → (reducer, kind).  ``kind`` shapes the emitted value:
 # ``"int"`` scalar, ``"list"`` sorted-distinct-list.
 _METRICS: "dict[str, tuple[Any, str]]" = {
@@ -145,6 +202,7 @@ _METRICS: "dict[str, tuple[Any, str]]" = {
     "agents": (lambda rows: sorted(_collect_agents(rows)), "list"),
     "messages": (_metric_messages, "int"),
     "files": (_metric_files, "int"),
+    "tokens": (_metric_tokens, "dict"),
 }
 
 
@@ -180,8 +238,8 @@ def aggregate(
             ``row -> str``.  Missing/empty values bucket under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
-            ``messages`` / ``files`` (see the module-level table).  Unknown
-            names raise :class:`ValueError`.
+            ``messages`` / ``files`` / ``tokens`` (see the module-level
+            table).  Unknown names raise :class:`ValueError`.
         rank_by: Group ordering.  ``"default"`` (edits desc, sessions desc,
             count desc, label asc — the ``file_frequency`` order) or
             ``"stats"`` (sessions desc, edits desc, label asc — the

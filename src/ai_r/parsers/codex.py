@@ -456,6 +456,69 @@ def read_messages(
     return _extract_messages_from_rollout(Path(session.path))
 
 
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Codex rollouts interleave ``event_msg`` records whose payload
+    ``type == "token_count"`` carries ``info.total_token_usage`` — a
+    **cumulative** counter for the whole session, so the LAST valid one
+    wins (no summing).
+
+    Normalized fields (format-native semantics): ``input`` =
+    ``input_tokens`` (which Codex counts **including** the cached part),
+    ``output`` = ``output_tokens`` (including reasoning), ``reasoning`` =
+    ``reasoning_output_tokens``, ``cache_read`` = ``cached_input_tokens``;
+    Codex has no cache-creation counter → ``cache_write`` is ``None``.
+    ``total`` is the recorded ``total_tokens`` (fallback: input + output).
+    Returns ``None`` when the rollout has no ``token_count`` event or the
+    total is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    path, _ = _find_session_file(uuid, base_dir)
+    last_usage: Optional[dict] = None
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            continue
+        usage = info.get("total_token_usage")
+        if isinstance(usage, dict):
+            last_usage = usage
+    if last_usage is None:
+        return None
+
+    def _count(key: str) -> Optional[int]:
+        val = last_usage.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+        return None
+
+    input_tokens = _count("input_tokens")
+    output_tokens = _count("output_tokens")
+    total = _count("total_tokens")
+    if total is None:
+        total = (input_tokens or 0) + (output_tokens or 0)
+    if total <= 0:
+        return None
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "reasoning": _count("reasoning_output_tokens"),
+        "cache_read": _count("cached_input_tokens"),
+        "cache_write": None,
+        "total": total,
+    }
+
+
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     """Case-insensitive substring search across Codex session titles."""
     needle = (query or "").strip().lower()

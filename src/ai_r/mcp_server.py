@@ -66,7 +66,7 @@ from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # n
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
-from ai_r.parsers import Session  # noqa: E402
+from ai_r.parsers import ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
@@ -196,7 +196,7 @@ def _session_summary(session: Session) -> dict[str, Any]:
     Desktop sessions) — text only, never executed (SSOT
     :mod:`ai_r.resume`).
     """
-    result = {
+    result: dict[str, Any] = {
         "uuid": session.uuid,
         "agent": session.agent.value,
         "title": session.title,
@@ -801,7 +801,7 @@ def read_session(
     matches: List[Session] = []
     value_errors: List[str] = []
     for agent_name in targets:
-        parser = _PARSERS[agent_name]
+        parser: Optional[ParserModule] = _PARSERS[agent_name]
         try:
             matches.append(parser.read_session(uuid))
         except ValueError as exc:
@@ -1002,6 +1002,7 @@ def session_stats(
     group_by: str = "agent",
     top: int = 8,
     edit_path: str = "/",
+    with_tokens: bool = False,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped and ranked — the *bird's-eye* audit view.
 
@@ -1028,6 +1029,23 @@ def session_stats(
     ``kind_split_available`` (``False`` here) plus a ``note`` making clear
     that this is NOT a verified "no subagents", just an absent split.
 
+    ``with_tokens=True`` (F3.3) additionally reads every matched session's
+    **token usage at request time** (nothing runs in the background) and
+    adds a folded ``tokens`` block to each group and to ``totals``:
+    ``{input, output, reasoning, cache_read, cache_write, total, exact,
+    estimated, unknown}``.  Per session the numbers are *exact* where the
+    agent's own files record usage (Claude ``message.usage``, Codex
+    ``token_count``, OpenCode ``message.data.tokens``, Pi ``usage``); a
+    session without a recorded signal (e.g. Antigravity) gets a
+    transcript-volume **estimate** — tokenized with the optional
+    `tiktoken` dependency (``pip install "ai-r[tokens]"``) when installed,
+    else a rough chars/4 heuristic — and counts under ``estimated``, never
+    silently mixed in as exact; no signal at all counts under ``unknown``.
+    Sums that no session carried stay ``null`` (never a fabricated 0).
+    The block contains only ai-r-computed integers and labels — no raw
+    session text — so it is outside the redaction surface by construction.
+    Default ``False``: byte-identical historical output, no extra reads.
+
     Thin wrapper over :func:`ai_r.session_stats.session_stats` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
@@ -1041,6 +1059,7 @@ def session_stats(
             group_by=group_by,
             top=top,
             edit_path=edit_path,
+            with_tokens=with_tokens,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -1602,7 +1621,14 @@ def aggregate(
             under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
-            ``messages`` / ``files``.  Defaults to ``["count"]``.
+            ``messages`` / ``files`` / ``tokens``.  Defaults to ``["count"]``.
+            ``tokens`` (F3.3) folds per-row ``tokens`` blocks (the shape
+            ``session_stats(with_tokens=True)`` rows carry, or a bare int
+            total) into ``{input, output, reasoning, cache_read,
+            cache_write, total, exact, estimated, unknown}`` — sums over
+            rows that carry each field (``null`` when none does) plus
+            honest provenance counters (``exact + estimated + unknown ==
+            len(rows)``).
         rank_by: Group ordering — ``"default"`` (edits→sessions→count→label,
             the ``file_frequency`` order) or ``"stats"`` (sessions→edits→label,
             the ``session_stats`` order).

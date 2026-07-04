@@ -978,6 +978,87 @@ def read_messages(
     return _extract_messages_from_jsonl(Path(session.path))
 
 
+# ``message.usage`` key → normalized token-usage field (F3.3).
+_USAGE_FIELD_MAP: Tuple[Tuple[str, str], ...] = (
+    ("input", "input_tokens"),
+    ("output", "output_tokens"),
+    ("cache_read", "cache_read_input_tokens"),
+    ("cache_write", "cache_creation_input_tokens"),
+)
+
+
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Claude CLI transcripts record a per-API-call ``message.usage`` block on
+    every assistant JSONL record.  A streamed response writes ONE record per
+    content block, all sharing the same ``message.id`` / ``requestId`` and
+    the same usage numbers — so calls are **deduplicated** by
+    ``(message.id, requestId)`` before summing (an id-less record is counted
+    as its own call).
+
+    Normalized fields (format-native semantics): ``input`` =
+    ``input_tokens`` (uncached), ``output`` = ``output_tokens``,
+    ``cache_read`` / ``cache_write`` = the prompt-cache read/creation
+    counts; ``reasoning`` has no Claude breakdown → ``None``.  ``total`` is
+    the sum of the four counters.  Returns ``None`` when no record carries a
+    usage block (e.g. a Desktop reference-only session raises
+    ``FileNotFoundError`` upstream) or the sum is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist (CLI root).
+        ValueError: ``uuid`` is malformed.
+    """
+    path = _find_session_file(uuid, base_dir)
+    totals = {field: 0 for field, _ in _USAGE_FIELD_MAP}
+    seen_calls: set[Tuple[str, object]] = set()
+    found = False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                msg_id = message.get("id")
+                if isinstance(msg_id, str) and msg_id:
+                    key = (msg_id, record.get("requestId"))
+                    if key in seen_calls:
+                        continue
+                    seen_calls.add(key)
+                for field, usage_key in _USAGE_FIELD_MAP:
+                    val = usage.get(usage_key)
+                    if isinstance(val, int) and not isinstance(val, bool):
+                        totals[field] += val
+                found = True
+    except OSError:
+        return None
+    total = sum(totals.values())
+    if not found or total <= 0:
+        return None
+    return {
+        "input": totals["input"],
+        "output": totals["output"],
+        "reasoning": None,
+        "cache_read": totals["cache_read"],
+        "cache_write": totals["cache_write"],
+        "total": total,
+    }
+
+
 def get_session_size(uuid: str, base_dir: Optional[str] = None) -> int:
     """Return the on-disk byte size of the JSONL file backing ``uuid``.
 

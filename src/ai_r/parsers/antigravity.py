@@ -437,6 +437,25 @@ def read_messages(
     return _extract_messages_from_brain(Path(session.path))
 
 
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Always ``None`` — the Antigravity brain format records no token usage.
+
+    Present for cross-parser uniformity (F3.3): the brain directory
+    (overview.txt / transcript.jsonl / markdown artifacts) carries no
+    usage counters anywhere, so there is nothing exact to report — the
+    tokens layer (:mod:`ai_r.tokens`) degrades to a labeled transcript
+    estimate instead.  Absence is honest, never fabricated.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    _find_brain(uuid, base_dir)  # validate the id / existence contract
+    return None
+
+
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     """Case-insensitive substring search across Antigravity session titles."""
     needle = (query or "").strip().lower()

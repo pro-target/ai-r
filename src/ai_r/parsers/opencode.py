@@ -864,6 +864,75 @@ def read_messages(
     return _extract_messages_from_db(session.path, session.uuid)
 
 
+def read_token_usage(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    override: Optional[str] = None,
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    OpenCode stores a per-assistant-message ``tokens`` block in the
+    ``message.data`` JSON: ``{"input", "output", "reasoning",
+    "cache": {"read", "write"}}``.  Counts are summed across the session's
+    messages.
+
+    Normalized fields map 1:1 (``cache.read`` → ``cache_read``,
+    ``cache.write`` → ``cache_write``); ``total`` is the sum of all five.
+    Returns ``None`` when no message carries a ``tokens`` block (older
+    schemas) or every counter is zero (placeholder blocks of incomplete
+    messages) — absence is honest, a fabricated exact-zero is not.
+
+    Raises:
+        FileNotFoundError: no DB contains a session with this id.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir, override)
+    totals = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+    }
+    found = False
+    try:
+        cm = _pooled_conn(session.path)
+        with cm as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                "SELECT data FROM message WHERE session_id = ?",
+                (session.uuid,),
+            ).fetchall()
+    except _PoolOpenError:
+        return None
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        data = _json_or_none(row[0])
+        if not isinstance(data, dict):
+            continue
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            continue
+        cache = tokens.get("cache")
+        cache = cache if isinstance(cache, dict) else {}
+        pairs = (
+            ("input", tokens.get("input")),
+            ("output", tokens.get("output")),
+            ("reasoning", tokens.get("reasoning")),
+            ("cache_read", cache.get("read")),
+            ("cache_write", cache.get("write")),
+        )
+        for field, val in pairs:
+            if isinstance(val, int) and not isinstance(val, bool):
+                totals[field] += val
+        found = True
+    total = sum(totals.values())
+    if not found or total <= 0:
+        return None
+    return {**totals, "total": total}
+
+
 def search(
     query: str,
     base_dir: Optional[str] = None,

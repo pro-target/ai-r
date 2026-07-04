@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Better token *estimates* for sessions whose format stores no exact usage
+# numbers (F3.3). Fully optional: without it ai-r falls back to a rough
+# chars/4 heuristic, honestly labeled — never a crash.
+tokens = [
+    "tiktoken>=0.5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",

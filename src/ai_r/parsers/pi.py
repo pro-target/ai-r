@@ -361,6 +361,69 @@ def read_messages(
     return _extract_messages_from_jsonl(Path(session.path))
 
 
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Pi records a per-assistant-message ``usage`` block inside the
+    ``message`` payload: ``{"input", "output", "cacheRead", "cacheWrite",
+    "totalTokens", ...}``.  Counts are summed across the session's
+    assistant messages.
+
+    Normalized fields (format-native semantics): ``input`` / ``output``
+    map 1:1, ``cacheRead`` → ``cache_read``, ``cacheWrite`` →
+    ``cache_write``; Pi has no reasoning breakdown → ``reasoning`` is
+    ``None``.  ``total`` is the sum of the four counters (fallback: the
+    summed ``totalTokens`` when the per-field counters are absent).
+    Returns ``None`` when no message carries a ``usage`` block or the
+    total is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    path, _ = _find_session_file(uuid, base_dir)
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    total_tokens = 0
+    found = False
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "message":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        pairs = (
+            ("input", usage.get("input")),
+            ("output", usage.get("output")),
+            ("cache_read", usage.get("cacheRead")),
+            ("cache_write", usage.get("cacheWrite")),
+        )
+        for field, val in pairs:
+            if isinstance(val, int) and not isinstance(val, bool):
+                totals[field] += val
+        tt = usage.get("totalTokens")
+        if isinstance(tt, int) and not isinstance(tt, bool):
+            total_tokens += tt
+        found = True
+    total = sum(totals.values())
+    if total <= 0:
+        total = total_tokens
+    if not found or total <= 0:
+        return None
+    return {
+        "input": totals["input"],
+        "output": totals["output"],
+        "reasoning": None,
+        "cache_read": totals["cache_read"],
+        "cache_write": totals["cache_write"],
+        "total": total,
+    }
+
+
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     needle = (query or "").strip().lower()
     if not needle:

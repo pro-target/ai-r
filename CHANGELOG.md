@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Token usage in stats (F3.3)**: `session_stats` gains
+  `with_tokens=true` and `aggregate` gains the `tokens` metric. Per
+  session the usage is read from the agent's own files **at request
+  time** (nothing background, no index): **exact** where the format
+  records numbers — Claude per-call `message.usage` (streamed duplicates
+  deduplicated by `(message.id, requestId)`), Codex last cumulative
+  `token_count` event, OpenCode per-assistant-message
+  `message.data.tokens`, Pi per-assistant-message `usage` — via a new
+  per-parser `read_token_usage` (feature-for-all-where-signal); a
+  session without a recorded signal (Antigravity, or older data) gets a
+  transcript-volume **estimate**, labeled `source="estimate"` +
+  `estimator`: tokenized by the **optional** `tiktoken` dependency
+  (`pip install "ai-r[tokens]"` / `AI_R_EXTRAS=tokens bash install.sh` —
+  documented in pyproject extras, install.sh and both READMEs) when
+  installed, else a rough `chars/4` heuristic — degradation, never a
+  crash; no signal at all stays honest `unknown`. The folded block per
+  group/totals is `{input, output, reasoning, cache_read, cache_write,
+  total, exact, estimated, unknown}` — sums are `null` when no row
+  carried the field (never a fabricated 0) and the provenance counters
+  always satisfy `exact + estimated + unknown == rows`. Only
+  ai-r-computed integers and labels are emitted (no raw session text),
+  so the block is outside the redaction surface by construction.
+  Backward-compat: `with_tokens` defaults to `false` — byte-identical
+  historical output. SSOT `ai_r.tokens`; scenarios AGG-5, STAT-4.
 - **Session list as a `query` filter (F3.2)**: the `session` facet of
   `query` (core and MCP) now accepts a **list** of session uuids in
   addition to the single uuid string — one call returns the union of

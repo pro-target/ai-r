@@ -43,6 +43,7 @@ from typing import Any, Dict, Optional
 from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
 from ai_r.parsers import PARSERS, iso, target_agents
+from ai_r.tokens import session_tokens as _session_tokens
 
 __all__ = [
     "GROUP_BY",
@@ -108,6 +109,7 @@ def session_stats(
     group_by: str = "agent",
     top: int = 8,
     edit_path: str = "/",
+    with_tokens: bool = False,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped by ``group_by`` and ranked by session count.
 
@@ -131,6 +133,16 @@ def session_stats(
         edit_path: Substring matched against edited file paths when counting
             edits (forwarded to :func:`find_file_edits`, which requires a
             non-empty path).  Defaults to ``"/"`` (matches absolute paths).
+        with_tokens: When ``True``, every matched session's token usage is
+            read **at request time** (F3.3, SSOT :mod:`ai_r.tokens` —
+            exact where the format records usage, a labeled estimate
+            otherwise, honest ``unknown`` without any signal) and each
+            group / ``totals`` carries a folded ``tokens`` block
+            (``{input, output, reasoning, cache_read, cache_write, total,
+            exact, estimated, unknown}`` — sums are ``None`` when no row
+            carried the field; the three counters say how many sessions
+            were exact / estimated / unknown).  Default ``False`` keeps
+            the historical output byte-identical and pays no read cost.
 
     Returns:
         A dict::
@@ -178,6 +190,8 @@ def session_stats(
         )
     if not isinstance(top, int) or isinstance(top, bool) or top < 0:
         raise ValueError(f"top must be a non-negative integer, got {top!r}")
+    if not isinstance(with_tokens, bool):
+        raise ValueError(f"with_tokens must be a boolean, got {with_tokens!r}")
 
     # ``find_file_edits`` is the canonical validator for agent/since/until.
     # Run it first so an invalid bound or agent raises the same ValueError
@@ -238,7 +252,7 @@ def session_stats(
                 continue
 
             enrich = edits_by_session.get(session.uuid)
-            session_rows.append({
+            row: dict[str, Any] = {
                 "session_uuid": session.uuid,
                 "agent": group_key(session, "agent"),
                 "dir": group_key(session, "dir"),
@@ -247,12 +261,21 @@ def session_stats(
                 "edits": enrich["edits"] if enrich is not None else 0,
                 "intents": sorted(enrich["intents"]) if enrich is not None else [],
                 "messages": int(getattr(session, "message_count", 0) or 0),
-            })
+            }
+            if with_tokens:
+                # F3.3: read the session's own files NOW (request-time,
+                # nothing background) — exact where recorded, labeled
+                # estimate otherwise, honest unknown without signal.
+                row["tokens"] = _session_tokens(session)
+            session_rows.append(row)
 
+    metrics = ["sessions", "edits", "intents", "agents", "messages"]
+    if with_tokens:
+        metrics.append("tokens")
     rolled = _aggregate(
         session_rows,
         group_by=group_by,
-        metrics=["sessions", "edits", "intents", "agents", "messages"],
+        metrics=metrics,
         rank_by="stats",
         kind_split=True,
     )
@@ -273,6 +296,8 @@ def session_stats(
         },
         "kind_split_available": rolled["kind_split_available"],
     }
+    if with_tokens:
+        result["totals"]["tokens"] = rolled["totals"]["tokens"]
     if "note" in rolled:
         result["note"] = rolled["note"]
     return result

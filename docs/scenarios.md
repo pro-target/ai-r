@@ -40,17 +40,17 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 61 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 63 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
 | `query` | 12 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
-| `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
+| `aggregate` | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
 | `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
 | `plan` | 5 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal. |
-| `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
+| `session_stats` (preset) | 4 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
@@ -249,6 +249,14 @@ Rolls up rows (from `query` / `find_file_edits` / session inventory) → `{group
 - **Expected:** `groups == []`; `totals.sessions == 0`; `totals.agents == 0`; `totals.agents_list == []`.
 - **Pass criteria:** GO when the empty result is returned with no crash and the zeroed totals shape.
 
+### AGG-5 — `metrics=["tokens"]` folds token blocks with honest provenance `[hermetic-ok]`
+- **Function:** `aggregate`
+- **Goal:** The `tokens` metric (F3.3) sums per-row token blocks and never fabricates numbers or provenance.
+- **Preconditions:** Synthetic rows carrying `tokens` blocks in the `session_tokens` shape — at least one `source="exact"` row with full sub-fields, one `source="estimate"` row (total only), one bare-int `tokens`, and one row with no `tokens` at all. `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__aggregate(rows=<rows>, group_by="agent", metrics=["count","tokens"])`.
+- **Expected:** Each group and `totals` carry a `tokens` block `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}`; sums cover only rows that carried each field as an int; a field no row carried is `null` (not `0`); the bare-int row contributes to `total` but counts under `unknown` (provenance not claimed); the no-tokens row counts under `unknown`.
+- **Pass criteria:** GO when `exact + estimated + unknown == len(rows)` in every block, the sums match hand-computation, and no absent field surfaces as a fabricated `0`. A block claiming `exact` for an unlabeled total is NO-GO.
+
 ---
 
 ## `diff`
@@ -352,6 +360,14 @@ projected to the legacy totals shape.
 - **Steps:** compute `mcp__ai-r__session_stats(group_by="<dim>")` and the manual `mcp__ai-r__aggregate(rows=<per-session inventory rows>, group_by="<dim>", rank_by="stats", kind_split=true)` on the same frozen snapshot; compare.
 - **Expected:** `groups` and shared totals (`sessions`/`edits`/`agents`/`agents_list`) are identical.
 - **Pass criteria:** GO when the projection matches the manual aggregate byte-for-byte on the frozen snapshot. (Divergence caused only by live-vault mutation between the two calls is a measurement artifact, not a defect — re-measure on a true snapshot.) **MCP-surface scope note:** the *enriched* totals (`edits`/`intents`/`messages`) fold an internal per-session inventory that no read-only MCP verb emits as `rows`, so the live MCP check can only prove parity of the **projection** (rank order + `kind_split` + `note` + `sessions` count); full enriched byte-parity is a pytest-internal guarantee. A GO-with-caveats at the MCP level (projection verified, enriched totals not feedable) is the expected verdict.
+
+### STAT-4 — `with_tokens=true`: request-time token usage, exact vs labeled estimate `[needs-real-vault]`
+- **Function:** `session_stats`
+- **Goal:** Token usage (F3.3) is read from the sessions' own files at request time — exact where the format records it, a labeled estimate otherwise, honest `unknown` without signal; the default output is untouched.
+- **Preconditions:** A vault with sessions from at least Claude or Codex (formats with recorded usage). `[needs-real-vault]`.
+- **Steps:** (1) `mcp__ai-r__session_stats(agent="claude", group_by="agent", with_tokens=true)`; (2) the same call without `with_tokens`; (3) if Antigravity sessions exist, `mcp__ai-r__session_stats(agent="antigravity", group_by="agent", with_tokens=true)`.
+- **Expected:** (1) every group and `totals` carry a `tokens` block; for Claude/Codex/OpenCode/Pi vault data the `exact` counter dominates and `total` is a plausible positive sum; (2) **no** `tokens` key anywhere — byte-identical historical shape; (3) Antigravity sessions count under `estimated` (transcript estimate — tiktoken when the optional extra is installed, chars/4 otherwise) or `unknown`, never under `exact`.
+- **Pass criteria:** GO when the counters are honest (`exact + estimated + unknown == sessions` per group, Antigravity never `exact`), sums that no session carried stay `null`, the block contains only numbers/labels (no raw session text), and omitting `with_tokens` changes nothing. A fabricated exact number for a format without recorded usage, or a crash on a host without tiktoken, is NO-GO.
 
 ---
 

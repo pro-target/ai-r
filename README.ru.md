@@ -182,7 +182,7 @@ TUI. Клин `ai-r` — извлечение «почему» и структу
 
 | verb | назначение | параметры |
 |---|---|---|
-| `query` | фильтр/поиск событий сессий; `with_intent=True` → на каждое событие top-level `intent` (та же `previous_user_intent`, что у legacy); событие `tool_call` несёт ref `is_error` (исход вызова), когда его результат коррелируется (см. *Границы вывода и исход* ниже) | type, agent, session, since, until, file, tool, text, sort(relevance\|date), relative_to+direction(prev\|next)+n(1\|all), step_type, limit, with_intent, noise(include\|exclude\|only), project_dir, redact; kind/parent/group — заглушки (Phase 3) |
+| `query` | фильтр/поиск событий сессий — выдаваемый `text` = **превью** ~160 символов (обрезка после редакции секретов; реальная обрезка помечается хвостовым `…` + `text_truncated: true`), полное тело по требованию через `get_body`; `with_intent=True` → на каждое событие top-level `intent` (та же `previous_user_intent`, что у legacy); событие `tool_call` несёт ref `is_error` (исход вызова), когда его результат коррелируется (см. *Границы вывода и исход* ниже) | type, agent, session, since, until, file, tool, text, sort(relevance\|date), relative_to+direction(prev\|next)+n(1\|all), step_type, limit, with_intent, noise(include\|exclude\|only), project_dir, redact; kind/parent/group — заглушки (Phase 3) |
 | `plan` | нормализованные plan-атомы сессии (final vs drafts, группировка по задачам) | session, kind(draft\|final\|completed_major), group=task, agent, redact |
 | `get_body` | тело on-demand по id события/плана; возвращаемое тело/текст ограничено `max_chars` (по умолчанию 500k) → превышение режется с маркером и помечается `body_truncated` | id, shallow, max_chars, redact |
 | `aggregate` | rollup над rows (query/find_file_edits/session-inventory) → `{groups, totals}`; `rank_by=stats` даёт session_stats-порядок (sessions→edits→label), `kind_split=True` добавляет `kind_split_available`/`note` | rows, group_by(field\|callable), metrics ⊆ count\|sessions\|edits\|intents\|agents\|messages\|files, rank_by(default\|stats), kind_split |
@@ -322,6 +322,14 @@ cd ~/dev/ai-r && bash install.sh
 **Claude**, **Codex**, **OpenCode**, **Antigravity** (где конфиги существуют),
 ставит CLI-скилл **Pi** и прогоняет смоук-тесты.
 
+Необязательное дополнение — `tokens`: `AI_R_EXTRAS=tokens bash install.sh`
+(или `pip install "ai-r[tokens]"`) добавляет
+[tiktoken](https://github.com/openai/tiktoken) — более точные **оценки**
+токенов для сессий, чей формат не хранит точных чисел расхода. Полностью
+опционально: без него точные числа по-прежнему берутся прямо из файлов сессий
+(где записаны), а оценка деградирует до грубой эвристики «символы/4» с честной
+пометкой `estimate` — никогда не падение.
+
 ## Границы: читалка, не охранник
 
 - **Только чтение.** Никогда не запускает код агента и не пишет в его историю —
@@ -343,7 +351,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 56 LLM-executed end-to-end
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 10 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware). |
+| `query` | 10 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware). |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
 | `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |

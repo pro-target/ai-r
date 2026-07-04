@@ -15,6 +15,9 @@
 #   PYTHON         python interpreter to use (default: newest python3.x >= 3.11 on PATH)
 #   AI_R_CMD  override the absolute path of ai-r-mcp to register in
 #                  the agent MCP configs (default: ~/.local/bin/ai-r-mcp)
+#   AI_R_EXTRAS    optional pip extras, comma-separated (e.g. "tokens" to add
+#                  tiktoken for better token estimates in session_stats
+#                  with_tokens; default: none — ai-r works without extras)
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
 
 set -euo pipefail
@@ -173,8 +176,16 @@ else
 fi
 
 # --- 4. pip install ---
-hdr "Step 3/6: pip install $REPO_DIR"
-PIP_ARGS=(install --quiet "$REPO_DIR")
+# Optional extras (pyproject [project.optional-dependencies]), e.g.
+# AI_R_EXTRAS=tokens adds tiktoken for better token estimates; the core
+# never requires them.
+PIP_INSTALL_TARGET="$REPO_DIR"
+if [[ -n "${AI_R_EXTRAS:-}" ]]; then
+    PIP_INSTALL_TARGET="${REPO_DIR}[${AI_R_EXTRAS}]"
+    log "Extras:  ${AI_R_EXTRAS}"
+fi
+hdr "Step 3/6: pip install $PIP_INSTALL_TARGET"
+PIP_ARGS=(install --quiet "$PIP_INSTALL_TARGET")
 if [[ "$USE_VENV" == "0" ]]; then
     PIP_ARGS+=(--break-system-packages)
     if [[ "$USE_SUDO" == "0" ]]; then
