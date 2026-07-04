@@ -322,3 +322,29 @@ def _normalise_title(raw: str) -> str:
     """
     cleaned = raw.replace("\n", " ").replace("\r", " ").strip()
     return cleaned[:_TITLE_MAX_LEN] or "Untitled"
+
+
+def project_dir_matches(candidate: Optional[str], wanted: str) -> bool:
+    """Whether a session's ``project_dir`` matches a ``project_dir`` filter.
+
+    Semantics (documented in ``docs/methods.md``): the filter matches a
+    session whose ``project_dir`` is the SAME directory or a
+    **descendant** of it (path-boundary aware — ``/home/u/dev/ai``
+    never matches a ``/home/u/dev/ai-r`` session).  Rationale: "sessions
+    of this project" must include sessions started in a subdirectory of
+    the project root, while a plain prefix test would leak sibling
+    directories that merely share a name prefix.
+
+    A session without a ``project_dir`` signal (``None``/empty) never
+    matches — absence of a signal is not a wildcard.  Trailing slashes
+    on either side are ignored; no other normalisation (``~``, ``..``,
+    symlinks) is applied — both sides are compared as recorded.
+    """
+    if not candidate:
+        return False
+    base = wanted.rstrip("/") or "/"
+    cand = candidate.rstrip("/") or "/"
+    if cand == base:
+        return True
+    prefix = "/" if base == "/" else base + "/"
+    return cand.startswith(prefix)

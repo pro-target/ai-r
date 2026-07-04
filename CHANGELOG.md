@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session origin — `project_dir` + `launch_surface` (F1.4)**: every
+  session summary now carries two first-class origin fields next to
+  `kind`/`parent_uuid`, both `null` when the source format has no
+  signal (absence is honest, never fabricated). `project_dir` — the
+  project directory the session ran in: Claude record-level transcript
+  `cwd` (fallback: Desktop metadata `cwd`, then a filesystem-verified
+  decode of the `projects/<slug>` storage encoding), Codex
+  `session_meta.payload.cwd`, OpenCode `session.directory` (legacy DBs
+  without the column degrade to `null` via a legacy-SELECT fallback),
+  Pi header `cwd`; Antigravity has no signal. `launch_surface` — where
+  the session was driven from: Claude `"claude-cli"|"claude-desktop"`
+  (from the F1.3 overlay signal), Codex the raw `originator` string
+  verbatim (e.g. `"codex_vscode"`, `"Codex Desktop"`), Antigravity
+  `"antigravity-ide"|"antigravity-cli"` (by brain root); OpenCode/Pi
+  have no signal. `list_sessions` and `query` take a `project_dir`
+  filter — exact match **or descendant**, path-boundary aware (`/a/b`
+  never matches `/a/bc`), applied at the session level before any
+  message is read, fail-loud on a blank value. Session summaries also
+  pass the parser `extra` bag through (e.g. `extra["source_root"]`,
+  `extra["cli_title"]`). See `docs/methods.md` → *Session origin*.
 - **Claude Desktop source root (F1.3)**: the Claude parser now scans the
   Claude Desktop app's own session store
   (`~/.config/Claude/claude-code-sessions`, honouring `AI_R_HOME`) as a

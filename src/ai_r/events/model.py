@@ -23,6 +23,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import to_utc_aware
 from ai_r.parsers import PARSERS, Message, iso, target_agents
+from ai_r.parsers._common import project_dir_matches
 from ai_r.parsers._noise import noise_allows, validate_noise
 
 from ai_r.events._common import (
@@ -460,6 +461,7 @@ def iter_events(
     *,
     session: Optional[str] = None,
     noise: str = "include",
+    project_dir: Optional[str] = None,
     scanned_sessions_out: Optional[dict[str, Any]] = None,
 ) -> Iterable[Event]:
     """Yield the normalized Event stream across sessions, cross-agent.
@@ -474,6 +476,12 @@ def iter_events(
             filtering), ``"exclude"`` (drop subagent sessions), ``"only"``
             (keep only subagent sessions).  Applied *before* reading
             messages, so excluded sessions cost nothing.
+        project_dir: Session-level project filter — keep only sessions
+            whose ``Session.project_dir`` equals this path or is a
+            descendant of it (path-boundary aware, see
+            :func:`ai_r.parsers._common.project_dir_matches`); sessions
+            without a ``project_dir`` signal never match.  Like ``noise``,
+            applied *before* any message is read.
         scanned_sessions_out: Optional out-parameter — a dict the caller
             owns, filled with ``{agent_label: list_sessions() result}`` as
             each agent is scanned.  Lets the caller reuse the enumeration
@@ -497,6 +505,10 @@ def iter_events(
             if session is not None and sess.uuid != session:
                 continue
             if not noise_allows(sess, noise):
+                continue
+            if project_dir is not None and not project_dir_matches(
+                getattr(sess, "project_dir", None), project_dir
+            ):
                 continue
             try:
                 messages = parser.read_messages(sess.uuid)

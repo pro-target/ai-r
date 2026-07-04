@@ -62,8 +62,12 @@ scans both and deduplicates by uuid (``cliSessionId`` == the JSONL stem):
   at the metadata JSON, ``source_root == "desktop"``).
 
 ``extra["source_root"]`` is deliberately a *launch-surface* signal ("was
-this session driven from the Desktop app?") for the upcoming F1.4
-``launch_surface`` work, NOT a "where did the bytes come from" flag.
+this session driven from the Desktop app?"), NOT a "where did the bytes
+come from" flag.  F1.4 surfaces it first-class as
+``Session.launch_surface`` (``"claude-cli"`` | ``"claude-desktop"``),
+alongside ``Session.project_dir`` (record-level ``cwd`` from the
+transcript, else the Desktop metadata ``cwd``, else a
+filesystem-verified decode of the storage slug).
 
 The Desktop root honours the same overrides: an explicit ``desktop_dir``
 argument, else ``$AI_R_HOME/.config/Claude/claude-code-sessions``, else
@@ -294,6 +298,56 @@ def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
     return grandparent_name
 
 
+def _project_dir_from_slug(slug: str) -> Optional[str]:
+    """Best-effort decode of a ``projects/<slug>`` name back to a path.
+
+    Claude flattens the session cwd into the storage slug by replacing
+    ``/`` and ``.`` with ``-`` (``/home/u/dev/ai-r`` →
+    ``-home-u-dev-ai-r``).  The encoding is LOSSY: a dash inside a real
+    directory name is indistinguishable from a separator, so a naive
+    ``-``→``/`` decode would corrupt names like ``ai-r`` → ``ai/r``.
+
+    Decoding therefore searches over the possible segment boundaries
+    (each dash is either a ``/`` separator or a literal dash inside one
+    segment) and verifies against the filesystem at every *segment
+    boundary*: every ancestor of a real cwd is itself an existing
+    directory, so any candidate prefix that is not a directory prunes
+    that branch immediately (bounded DFS, no unverified guessing).
+    Returns the decoded path only when the full directory exists;
+    ``None`` otherwise — this is a *fallback* signal used only when the
+    transcript carries no record-level ``cwd``, and an unverifiable
+    guess is worse than an honest absence.  (Dots flattened by the
+    encoder are NOT recovered; a dotted cwd only resolves if its dashed
+    sibling exists.)
+    """
+    if not slug.startswith("-"):
+        return None
+    tokens = slug[1:].split("-")
+    if not tokens or not all(tokens):
+        return None
+
+    def _resolve(i: int, base: str, pending: str) -> Optional[str]:
+        # ``base`` is a verified existing directory ("" == fs root);
+        # ``pending`` is the segment currently being assembled.
+        if i == len(tokens):
+            full = f"{base}/{pending}"
+            return full if os.path.isdir(full) else None
+        token = tokens[i]
+        # Option 1: the next dash was a literal dash — extend the
+        # pending segment.  Deferred verification (checked at closure).
+        resolved = _resolve(i + 1, base, f"{pending}-{token}")
+        if resolved is not None:
+            return resolved
+        # Option 2: the dash was a separator — close the pending
+        # segment (must exist as a directory) and start a new one.
+        closed = f"{base}/{pending}"
+        if os.path.isdir(closed):
+            return _resolve(i + 1, closed, token)
+        return None
+
+    return _resolve(1, "", tokens[0])
+
+
 def _scan_file(jsonl_path: Path) -> Optional[Session]:
     """Build a :class:`Session` from one Claude JSONL file.
 
@@ -318,11 +372,19 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     message_count = 0
     is_sidechain = False
     inline_parent_uuid: Optional[str] = None
+    record_cwd: Optional[str] = None
 
     for record in iter_jsonl_records(jsonl_path):
         ts = _parse_iso_timestamp(record.get("timestamp", ""))
         if ts is not None:
             last_timestamp = ts
+
+        # Record-level ``cwd`` (present on user/assistant records) is the
+        # authoritative project-dir signal; first occurrence wins.
+        if record_cwd is None:
+            raw_cwd = record.get("cwd")
+            if isinstance(raw_cwd, str) and raw_cwd.strip():
+                record_cwd = raw_cwd.strip()
 
         # Inline sidechain detection: value must be True, the mere
         # presence of the key is not enough (it is False everywhere
@@ -383,6 +445,10 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         slug_dir = slug_dir.parent.parent
     project_slug = slug_dir.name
 
+    # project_dir: the record-level cwd is authoritative; the storage-slug
+    # decode is a filesystem-verified fallback (see _project_dir_from_slug).
+    project_dir = record_cwd or _project_dir_from_slug(project_slug)
+
     return Session(
         uuid=jsonl_path.stem,
         agent=AgentName.CLAUDE,
@@ -392,6 +458,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         message_count=message_count,
         parent_uuid=parent_uuid,
         kind="subagent" if is_subagent else "agent",
+        project_dir=project_dir,
+        launch_surface="claude-cli",
         extra={"project_slug": project_slug, "source_root": "cli"},
     )
 
@@ -505,6 +573,8 @@ def _session_from_desktop_meta(
         message_count=0,
         parent_uuid=None,
         kind="agent",
+        project_dir=cwd if isinstance(cwd, str) and cwd else None,
+        launch_surface="claude-desktop",
         extra=extra,
     )
 
@@ -527,7 +597,16 @@ def _enrich_from_desktop(session: Session, record: dict) -> Session:
         if desktop_title and desktop_title != session.title:
             extra["cli_title"] = session.title
             title = desktop_title
-    return dataclasses.replace(session, title=title, extra=extra)
+    # The transcript-derived project_dir wins (it is what actually ran);
+    # the Desktop metadata cwd only fills an absent signal.
+    project_dir = session.project_dir or extra.get("cwd") or None
+    return dataclasses.replace(
+        session,
+        title=title,
+        project_dir=project_dir,
+        launch_surface="claude-desktop",
+        extra=extra,
+    )
 
 
 def _apply_desktop_overlay(

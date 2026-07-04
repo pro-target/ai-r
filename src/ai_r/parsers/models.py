@@ -69,6 +69,28 @@ class Session:
             ``"agent"``.  Kept consistent with ``parent_uuid`` (a session
             with a parent is a subagent); the noise criterion lives in
             :mod:`ai_r.parsers._noise`.
+        project_dir: Absolute path of the project directory the session
+            ran in, when the format records one; ``None`` when the
+            format carries no signal (never fabricated).  Sources:
+            Claude — the record-level ``cwd`` of the CLI transcript
+            (fallback: Desktop metadata ``cwd``/``originCwd``, then a
+            filesystem-verified decode of the ``projects/<slug>``
+            storage encoding); Codex — ``session_meta.payload.cwd``;
+            OpenCode — the ``session.directory`` column (absent on old
+            schemas → ``None``); Pi — the session-header ``cwd``.
+            Antigravity has no per-session directory signal → always
+            ``None``.
+        launch_surface: The surface the session was driven from, when
+            the format makes it distinguishable; ``None`` when it does
+            not (never fabricated).  Values: Claude —
+            ``"claude-cli"`` | ``"claude-desktop"`` (from the F1.3
+            Desktop-overlay ``source_root`` signal); Codex — the raw
+            ``session_meta.payload.originator`` string (e.g.
+            ``"codex_vscode"``, ``"Codex Desktop"``), passed through
+            verbatim, no invented taxonomy; Antigravity —
+            ``"antigravity-ide"`` | ``"antigravity-cli"`` (from which
+            brain root holds the session).  OpenCode and Pi carry no
+            launch-surface signal → always ``None``.
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.
@@ -82,6 +104,8 @@ class Session:
     message_count: int
     parent_uuid: Optional[str] = None
     kind: str = "agent"
+    project_dir: Optional[str] = None
+    launch_surface: Optional[str] = None
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 

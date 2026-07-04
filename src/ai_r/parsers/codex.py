@@ -7,8 +7,10 @@ Source layout (recursive)::
 
 Each line is a JSON object with one of the following ``type`` values:
 
-* ``"session_meta"``   — payload has the session ``id`` and ``cwd``;
-  this is the canonical UUID.
+* ``"session_meta"``   — payload has the session ``id``, ``cwd``
+  (surfaced as ``Session.project_dir``) and ``originator`` (the launch
+  surface, e.g. ``"codex_vscode"`` / ``"Codex Desktop"``, surfaced
+  verbatim as ``Session.launch_surface``); this is the canonical UUID.
 * ``"response_item"``  — payload is a message (``type: "message"``,
   ``role: "user"``/``"assistant"``, ``content: [...]``).
 * ``"event_msg"``      — extracted when ``payload.type == "user_message"``
@@ -132,6 +134,7 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     """Parse a Codex rollout file into a :class:`Session`."""
     uuid: Optional[str] = None
     cwd: Optional[str] = None
+    originator: Optional[str] = None
     timestamp: Optional[datetime] = None
     title: Optional[str] = None
     parent_uuid: Optional[str] = None
@@ -156,6 +159,13 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
             cwd_val = payload.get("cwd")
             if isinstance(cwd_val, str):
                 cwd = cwd_val
+            # ``originator`` names the surface that spawned the session
+            # (observed values: "codex_vscode", "Codex Desktop", CLI
+            # builds).  Passed through verbatim as ``launch_surface`` —
+            # no invented taxonomy on top of the raw signal.
+            originator_val = payload.get("originator")
+            if isinstance(originator_val, str) and originator_val.strip():
+                originator = originator_val.strip()
             meta_ts = _parse_iso_timestamp(payload.get("timestamp", ""))
             if meta_ts is not None:
                 timestamp = meta_ts
@@ -229,6 +239,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         message_count=message_count,
         parent_uuid=parent_uuid,
         kind="subagent" if is_subagent else "agent",
+        project_dir=cwd,
+        launch_surface=originator,
         extra={"cwd": cwd} if cwd else {},
     )
 

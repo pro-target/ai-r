@@ -18,6 +18,9 @@ Schema (relevant columns only)::
         id              TEXT PRIMARY KEY,
         parent_id       TEXT,
         title           TEXT,
+        directory       TEXT,       -- project dir (newer schemas only;
+                                    -- surfaced as Session.project_dir,
+                                    -- legacy DBs degrade to None)
         time_created    INTEGER,    -- ms epoch
         time_updated    INTEGER,    -- ms epoch
         ... (other fields ignored)
@@ -381,6 +384,13 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         row["time_updated"],
         row["parent_id"],
     )
+    # ``session.directory`` is the project directory the session ran in.
+    # Old OpenCode schemas predate the column — the legacy-SELECT fallback
+    # (see _execute_session_select) yields rows without it → None, never
+    # fabricated.
+    directory = row["directory"] if "directory" in row.keys() else None
+    if not (isinstance(directory, str) and directory.strip()):
+        directory = None
     date = _epoch_ms_to_datetime(time_updated or time_created or 0)
     clean_title = (title or "").strip() or "Untitled"
     return Session(
@@ -394,6 +404,10 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         # A row with a parent is a spawned sub-session: keep ``kind``
         # consistent with ``parent_uuid`` so kind-based filters see it.
         kind="subagent" if parent_id else "agent",
+        project_dir=directory,
+        # OpenCode's schema carries no launch-surface signal (the
+        # ``agent`` column is the *mode* — plan/build — not a surface).
+        launch_surface=None,
         extra={
             "time_created": time_created,
             "time_updated": time_updated,
@@ -401,17 +415,45 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
     )
 
 
+_SESSION_COLUMNS = "id, title, time_created, time_updated, parent_id"
+# ``directory`` (the session's project dir) appeared in newer OpenCode
+# schemas; the legacy variants below keep old DBs readable (a missing
+# column would otherwise abort the whole per-DB scan).
 _SELECT_SESSION = (
-    "SELECT id, title, time_created, time_updated, parent_id "
-    "FROM session "
-    "WHERE id = ?"
+    f"SELECT {_SESSION_COLUMNS}, directory FROM session WHERE id = ?"
+)
+_SELECT_SESSION_LEGACY = (
+    f"SELECT {_SESSION_COLUMNS} FROM session WHERE id = ?"
 )
 _SELECT_ALL_SESSIONS = (
-    "SELECT id, title, time_created, time_updated, parent_id "
-    "FROM session "
+    f"SELECT {_SESSION_COLUMNS}, directory FROM session "
     "ORDER BY time_updated DESC"
 )
+_SELECT_ALL_SESSIONS_LEGACY = (
+    f"SELECT {_SESSION_COLUMNS} FROM session ORDER BY time_updated DESC"
+)
 _SELECT_MESSAGE_COUNT = "SELECT COUNT(*) FROM message WHERE session_id = ?"
+
+
+def _execute_session_select(
+    cursor: sqlite3.Cursor,
+    sql: str,
+    legacy_sql: str,
+    params: tuple = (),
+) -> sqlite3.Cursor:
+    """Execute a session SELECT, degrading to the legacy column set.
+
+    Newer OpenCode schemas carry ``session.directory``; on an old DB the
+    extended SELECT raises ``OperationalError: no such column`` — retry
+    with the legacy statement so old installations keep enumerating
+    (their sessions then surface with ``project_dir=None``).
+    """
+    try:
+        return cursor.execute(sql, params)
+    except sqlite3.OperationalError as exc:
+        if "no such column" not in str(exc):
+            raise
+        return cursor.execute(legacy_sql, params)
 
 
 def list_sessions(
@@ -435,7 +477,13 @@ def list_sessions(
             # Materialise the SELECT first: nesting ``execute`` on the
             # same cursor would invalidate the iteration when we look
             # up the per-session message count below.
-            rows = list(list_cursor.execute(_SELECT_ALL_SESSIONS))
+            rows = list(
+                _execute_session_select(
+                    list_cursor,
+                    _SELECT_ALL_SESSIONS,
+                    _SELECT_ALL_SESSIONS_LEGACY,
+                )
+            )
             for row in rows:
                 sid = row["id"]
                 if sid in seen_ids:
@@ -476,7 +524,9 @@ def _read_session_by_uuid(
             conn.row_factory = sqlite3.Row
             session_cursor = conn.cursor()
             count_cursor = conn.cursor()
-            row = session_cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
+            row = _execute_session_select(
+                session_cursor, _SELECT_SESSION, _SELECT_SESSION_LEGACY, (uuid,)
+            ).fetchone()
             if row is None:
                 continue
             count = count_cursor.execute(
@@ -843,7 +893,9 @@ def session_exists(
         try:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            row = cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
+            row = _execute_session_select(
+                cursor, _SELECT_SESSION, _SELECT_SESSION_LEGACY, (uuid,)
+            ).fetchone()
         except sqlite3.Error:
             continue
         if row is not None:

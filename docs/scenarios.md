@@ -40,11 +40,11 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 50 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 52 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 9 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
+| `query` | 10 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware). |
 | `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
 | `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
@@ -53,7 +53,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 50 LLM-executed end-to-end
 | `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 4 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference. |
+| `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
 | `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
 | `read_session` | 3 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`. |
 | `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
@@ -141,6 +141,16 @@ parameters. Events carry **references** (`refs`), never inlined bodies.
 - **Steps:** `mcp__ai-r__query(agent="<agent>")` (default `noise="include"`); then the same call with `noise="exclude"`; then `noise="only"`; then `noise="bogus"`.
 - **Expected:** `include` returns events of both sessions; `exclude` returns only events whose `session_id` is the top-level session; `only` returns only the subagent session's events; `set(exclude) ∪ set(only) == set(include)` and the two are disjoint; `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
 - **Pass criteria:** GO when the three modes partition the event stream exactly by session kind and the unknown mode is a loud error, never a silently unfiltered result.
+
+---
+
+### QRY-10 — session-level `project_dir` filter (events of this project)
+- **Function:** `query`
+- **Goal:** `project_dir` keeps only events of sessions whose `project_dir` equals the given path or is a descendant of it (path-boundary aware); sessions without a signal never match; an empty value fails loud.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` three Claude sessions with record-level `cwd` values `/home/u/dev/x`, `/home/u/dev/x/sub` and `/home/u/dev/xy`.
+- **Steps:** `mcp__ai-r__query(agent="claude", type="user_turn", project_dir="/home/u/dev/x")`; then `project_dir="/nowhere"`; then `project_dir=""`.
+- **Expected:** The first call returns only events of the `/home/u/dev/x` and `/home/u/dev/x/sub` sessions — the sibling `/home/u/dev/xy` is excluded (prefix ≠ subpath); `/nowhere` returns `count=0` with `diagnostics.filters.project_dir` echoed; `""` returns `{"error": "invalid_argument", …}`.
+- **Pass criteria:** GO when descendant sessions are included, the path boundary excludes the sibling, absence of signal never matches, and the blank filter is a loud error.
 
 ---
 
@@ -412,6 +422,14 @@ Cross-agent session inventory: newest-first, paginated, each summary self-descri
 - **Steps:** `mcp__ai-r__list_sessions(agent="claude", limit=50)`; pick one Desktop metadata `title` from the store; `mcp__ai-r__search_sessions(query=<its distinctive words>, agent="claude", scope="title")`.
 - **Expected:** At least one session with `extra["source_root"]="desktop"`; no uuid appears twice; the search by the Desktop-app title returns that session.
 - **Pass criteria:** GO when a desktop-marked, dedup-clean, title-searchable session is found; NO-GO on duplicates or a Desktop title that search cannot find.
+
+### LIST-5 — origin fields + `project_dir` filter
+- **Function:** `list_sessions` (F1.4 session origin)
+- **Goal:** Every summary carries top-level `project_dir` and `launch_surface` (null when the format has no signal — e.g. Antigravity `project_dir`, OpenCode/Pi `launch_surface`), and the `project_dir` filter narrows the inventory exact-or-descendant, path-boundary aware.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` (a) a Claude transcript with record-level `cwd="/home/u/dev/x"`, (b) a Claude transcript with `cwd="/home/u/dev/x/sub"`, (c) a Claude transcript with `cwd="/home/u/dev/xy"`, (d) an Antigravity brain under `.gemini/antigravity-cli/brain/`.
+- **Steps:** `mcp__ai-r__list_sessions()`; then `mcp__ai-r__list_sessions(agent="claude", project_dir="/home/u/dev/x")`; then `project_dir="   "`.
+- **Expected:** Claude summaries carry `project_dir` = the seeded cwd and `launch_surface="claude-cli"`; the Antigravity summary carries `project_dir=null` and `launch_surface="antigravity-cli"` (fields present, null where no signal, nothing fabricated); the filtered call returns exactly the `/home/u/dev/x` and `/home/u/dev/x/sub` sessions (sibling `/home/u/dev/xy` excluded); the blank filter returns `{"error": "invalid_argument", …}`.
+- **Pass criteria:** GO when both fields are top-level on every summary, null exactly where the format has no signal, and the filter is boundary-exact with a loud blank-value error.
 
 ---
 

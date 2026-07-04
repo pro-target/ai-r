@@ -212,6 +212,10 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         message_count=message_count,
         parent_uuid=parent_session,
         kind="subagent" if parent_session else "agent",
+        # The session-header ``cwd`` is the project directory.  Pi has no
+        # launch-surface signal (header carries only type/version/id/
+        # timestamp/cwd) → launch_surface stays None, never fabricated.
+        project_dir=cwd,
         extra=extra,
     )
 

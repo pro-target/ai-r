@@ -67,6 +67,7 @@ from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noq
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import Session  # noqa: E402
+from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
 from ai_r.events import (  # noqa: E402
@@ -127,8 +128,13 @@ mcp = FastMCP(
 
 
 def _session_summary(session: Session) -> dict[str, Any]:
-    """Project a :class:`Session` to a JSON-safe summary dict."""
-    return {
+    """Project a :class:`Session` to a JSON-safe summary dict.
+
+    ``project_dir`` / ``launch_surface`` are top-level fields (next to
+    ``kind`` / ``parent_uuid``) and stay ``None`` when the source format
+    carries no signal — absence is honest, never fabricated (F1.4).
+    """
+    result = {
         "uuid": session.uuid,
         "agent": session.agent.value,
         "title": session.title,
@@ -136,7 +142,12 @@ def _session_summary(session: Session) -> dict[str, Any]:
         "message_count": session.message_count,
         "kind": session.kind,
         "parent_uuid": session.parent_uuid,
+        "project_dir": session.project_dir,
+        "launch_surface": session.launch_surface,
     }
+    if session.extra:
+        result["extra"] = session.extra
+    return result
 
 
 def _codex_text(parts: object) -> str:
@@ -515,6 +526,7 @@ def list_sessions(
     offset: int = 0,
     kind: Optional[str] = None,
     noise: str = "include",
+    project_dir: Optional[str] = None,
 ) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
@@ -527,6 +539,19 @@ def list_sessions(
     (the parent session's uuid for subagents, else ``None``).  Subagent
     detection covers Claude, OpenCode, Codex and Pi; Antigravity's format
     has no parent signal, so it always reports ``kind="agent"``.
+
+    Each summary also carries the F1.4 origin fields, ``None`` when the
+    source format has no signal (never fabricated):
+
+    * ``project_dir`` — the project directory the session ran in
+      (Claude: transcript ``cwd`` / Desktop metadata / verified slug
+      decode; Codex: ``session_meta.cwd``; OpenCode:
+      ``session.directory``; Pi: header ``cwd``; Antigravity: no signal).
+    * ``launch_surface`` — where the session was driven from (Claude:
+      ``"claude-cli"`` | ``"claude-desktop"``; Codex: the raw
+      ``originator``, e.g. ``"codex_vscode"``; Antigravity:
+      ``"antigravity-ide"`` | ``"antigravity-cli"``; OpenCode/Pi: no
+      signal).
 
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
@@ -543,6 +568,11 @@ def list_sessions(
             ``"include"`` (default) returns everything, ``"exclude"`` drops
             noise sessions, ``"only"`` returns only noise sessions.
             ``kind`` and ``noise`` compose (AND).
+        project_dir: Keep only sessions whose ``project_dir`` equals this
+            path or is a **descendant** of it (path-boundary aware:
+            ``/a/b`` matches ``/a/b`` and ``/a/b/sub``, never ``/a/bc``);
+            trailing slashes ignored.  Sessions without a ``project_dir``
+            signal never match.  Composes with the other filters (AND).
 
     Returns:
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
@@ -566,6 +596,12 @@ def list_sessions(
         return {"error": "invalid_argument",
                 "message": f"noise must be one of {'/'.join(NOISE_MODES)}, "
                            f"got {noise!r}"}
+    if project_dir is not None and (
+        not isinstance(project_dir, str) or not project_dir.strip()
+    ):
+        return {"error": "invalid_argument",
+                "message": "project_dir must be a non-empty path string "
+                           f"or null, got {project_dir!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -583,6 +619,10 @@ def list_sessions(
             if kind is not None and session.kind != kind:
                 continue
             if not noise_allows(session, noise):
+                continue
+            if project_dir is not None and not project_dir_matches(
+                session.project_dir, project_dir
+            ):
                 continue
             summaries.append(_session_summary(session))
 
@@ -606,6 +646,7 @@ def list_sessions(
                 "kind": kind,
                 # "include" is the no-op default — never a cause of emptiness.
                 "noise": None if noise == "include" else noise,
+                "project_dir": project_dir,
             },
             scanned_sessions=scanned_sessions,
         )
@@ -1132,6 +1173,7 @@ def query(
     limit: int = 0,
     with_intent: bool = False,
     noise: str = "include",
+    project_dir: Optional[str] = None,
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
@@ -1176,6 +1218,13 @@ def query(
     only).  Ignored on the ``relative_to`` walk, like every other filter
     facet.
 
+    ``project_dir`` also filters at the *session* level: keep only events
+    of sessions whose ``project_dir`` equals this path or is a
+    **descendant** of it (path-boundary aware, trailing slashes ignored) —
+    "events of this project".  Sessions without a ``project_dir`` signal
+    never match.  Ignored on the ``relative_to`` walk, like every other
+    filter facet.
+
     ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
     **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
     non-``None`` value is a fail-loud error (returns the standard
@@ -1209,6 +1258,7 @@ def query(
             limit=limit,
             with_intent=with_intent,
             noise=noise,
+            project_dir=project_dir,
             kind=kind,
             parent=parent,
             group=group,
@@ -1231,6 +1281,7 @@ def query(
                 "relative_to": relative_to,
                 # "include" is the no-op default — never a cause of emptiness.
                 "noise": None if noise == "include" else noise,
+                "project_dir": project_dir,
             },
             scanned_sessions=scanned_sessions,
         )

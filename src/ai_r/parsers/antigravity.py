@@ -159,8 +159,38 @@ def _extract_title_from_markdown(brain: Path) -> str:
     return ""
 
 
+def _launch_surface_for_brain(brain: Path) -> Optional[str]:
+    """Launch surface from WHICH brain root holds the session.
+
+    Antigravity keeps two separate stores — ``antigravity/brain`` (the
+    IDE app) and ``antigravity-cli/brain`` (the CLI) — so the root name
+    is a real, data-backed launch-surface signal.  Returns
+    ``"antigravity-ide"`` / ``"antigravity-cli"`` accordingly, or
+    ``None`` when the layout does not match (e.g. an explicit
+    ``base_dir`` pointing at an arbitrary fixture directory) — the
+    signal is derived, never fabricated.
+    """
+    parent = brain.parent
+    if parent.name != "brain":
+        return None
+    root_name = parent.parent.name
+    if root_name == "antigravity-cli":
+        return "antigravity-cli"
+    if root_name == "antigravity":
+        return "antigravity-ide"
+    return None
+
+
 def _scan_brain(brain: Path) -> Optional[Session]:
-    """Build a :class:`Session` from one brain directory."""
+    """Build a :class:`Session` from one brain directory.
+
+    ``project_dir`` is always ``None``: the parsed Antigravity surface
+    (overview.txt / transcript*.jsonl) carries NO structured cwd/
+    directory field (verified on real data — record keys are
+    step_index/source/type/status/created_at/content/tool_calls/...),
+    and guessing a directory out of message text would fabricate a
+    signal.  Recheck if the format grows one.
+    """
     if not brain.is_dir():
         return None
 
@@ -221,6 +251,7 @@ def _scan_brain(brain: Path) -> Optional[Session]:
         date=timestamp,
         path=str(brain),
         message_count=count,
+        launch_surface=_launch_surface_for_brain(brain),
     )
 
 

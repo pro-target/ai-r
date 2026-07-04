@@ -155,6 +155,7 @@ def query(
     limit: int = 0,
     with_intent: bool = False,
     noise: str = "include",
+    project_dir: Optional[str] = None,
     # --- Phase-2/3 placeholders (accepted, TODO not-yet-implemented) ---
     kind: Optional[str] = None,
     parent: Optional[str] = None,
@@ -199,6 +200,14 @@ def query(
       session level, before messages are read.  Ignored on the
       ``relative_to`` walk (the anchor pins one concrete session), like
       every other filter facet.
+    * ``project_dir`` — session-level project filter: keep only events of
+      sessions whose ``Session.project_dir`` equals this path or is a
+      **descendant** of it (path-boundary aware, trailing slashes
+      ignored; semantics SSOT:
+      :func:`ai_r.parsers._common.project_dir_matches`).  Sessions
+      without a ``project_dir`` signal never match.  Like ``noise``,
+      applied before any message is read, and ignored on the
+      ``relative_to`` walk.
 
     ``scanned_sessions_out`` is a caller-owned out-dict forwarded to
     :func:`iter_events` — it collects the per-agent ``list_sessions()``
@@ -225,6 +234,13 @@ def query(
             f"sort must be 'relevance' or 'date', got {sort!r}"
         )
     validate_noise(noise)
+    if project_dir is not None and (
+        not isinstance(project_dir, str) or not project_dir.strip()
+    ):
+        raise ValueError(
+            "project_dir must be a non-empty path string or None, "
+            f"got {project_dir!r}"
+        )
     # Normalize ``n``: accepts 1/all (or any positive int / "all").
     n_all = False
     n_int = 1
@@ -284,6 +300,7 @@ def query(
         agent,
         session=session,
         noise=noise,
+        project_dir=project_dir,
         scanned_sessions_out=scanned_sessions_out,
     ):
         if type is not None and not _type_matches(ev.type, type):
