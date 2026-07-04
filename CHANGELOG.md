@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session list as a `query` filter (F3.2)**: the `session` facet of
+  `query` (core and MCP) now accepts a **list** of session uuids in
+  addition to the single uuid string — one call returns the union of
+  those sessions' events (e.g. the ids picked from a
+  `search_sessions`/`list_sessions` result), in the usual chronological
+  order across sessions. Duplicates collapse; an unknown uuid
+  contributes nothing (the same honest empty-miss semantics as the
+  single-uuid form). Fail-loud validation (SSOT
+  `ai_r.events.model.normalize_session_filter`, shared by
+  `iter_events`): an empty list or a non-string/blank item is a
+  `ValueError` (`invalid_argument` over MCP) — never a silent
+  full-corpus scan; the facet is validated even on the `relative_to`
+  walk where it may otherwise go unused. Backward-compat: the scalar
+  string form is byte-identical to before; empty-result diagnostics
+  echo the list value under `filters.session`. Scenario QRY-12.
 - **Real names under wrappers (F3.1)**: every tool call is now classified
   wrapper-aware. Each `tool_call` event (`query`) and every
   `find_tool_calls` record carries `tool_kind` — one of

@@ -43,7 +43,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Union
 
 _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
@@ -1313,7 +1313,7 @@ def search_sessions(
 def query(
     type: Optional[str] = None,
     agent: Optional[str] = None,
-    session: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     file: Optional[str] = None,
@@ -1347,7 +1347,12 @@ def query(
       ``tool_call(edit|write|read|bash|other)`` | ``plan_event``.  Bare
       ``tool_call`` matches every subtype.
     * ``agent`` — one of claude/codex/opencode/antigravity/pi (all if omitted).
-    * ``session`` — restrict to a single session uuid.
+    * ``session`` — restrict to a single session uuid, OR a list of uuids
+      (the union of those sessions' events in one call — e.g. the ids
+      picked from a ``search_sessions`` / ``list_sessions`` result).
+      Duplicates collapse; an unknown uuid contributes nothing.  An empty
+      list or a non-string item is a fail-loud ``invalid_argument`` —
+      never a silent unfiltered scan.
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on the event ts.
     * ``file`` — substring matched against an event's referenced file path.
     * ``tool`` — substring (pattern) matched against the referenced tool

@@ -20,7 +20,7 @@ from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.parsers._noise import validate_noise
 
 from ai_r.events._common import Event, TOOL_KIND
-from ai_r.events.model import iter_events
+from ai_r.events.model import iter_events, normalize_session_filter
 
 
 # --- query facets ----------------------------------------------------------
@@ -188,7 +188,7 @@ def query(
     *,
     type: Optional[str] = None,
     agent: Optional[str] = None,
-    session: Optional[str] = None,
+    session: Optional[Any] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     file: Optional[str] = None,
@@ -220,7 +220,13 @@ def query(
       ``tool_call(<sub>)`` | ``plan_event``.  Bare ``tool_call`` matches
       every subtype.
     * ``agent`` — restrict to one agent (``claude``/``codex``/...).
-    * ``session`` — restrict to one session uuid.
+    * ``session`` — restrict to one session uuid, OR a list of uuids
+      (F3.2): the union of those sessions' events, one scan.  Duplicates
+      collapse; a uuid absent from the corpus contributes nothing (same
+      honest semantics as the single-uuid miss).  Fail-loud validation
+      (SSOT :func:`~ai_r.events.model.normalize_session_filter`): an
+      empty list or a non-string item raises :class:`ValueError` —
+      never a silent unfiltered scan.
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on ``ts``.
     * ``file`` — substring matched against any ``refs[*].file``.
     * ``tool`` — substring (pattern) matched against any ``refs[*].tool``
@@ -311,6 +317,10 @@ def query(
         )
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
+    # F3.2: validate the session facet up front (single uuid or a list of
+    # uuids), so a malformed value fails loud even on the ``relative_to``
+    # walk — where, like every other facet, it may otherwise go unused.
+    normalize_session_filter(session)
     # Normalize ``n``: accepts 1/all (or any positive int / "all").
     n_all = False
     n_int = 1

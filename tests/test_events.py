@@ -106,6 +106,37 @@ def multi_turn_claude(tmp_sessions_dir: Path) -> str:
     return session_id
 
 
+@pytest.fixture
+def second_claude_session(tmp_sessions_dir: Path) -> str:
+    """A second, later Claude session next to ``multi_turn_claude`` (F3.2)."""
+    session_id = "events-multi-2"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-e"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "later session ask"},
+                "timestamp": "2026-06-15T09:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "later on it"}],
+                },
+                "timestamp": "2026-06-15T09:00:05Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
 # ---------------------------------------------------------------------------
 # classify_tool
 # ---------------------------------------------------------------------------
@@ -394,6 +425,95 @@ def test_phase2_facets_rejected(multi_turn_claude: str) -> None:
     for facet in ("kind", "parent", "group"):
         with pytest.raises(ValueError, match="not yet supported"):
             query(session=multi_turn_claude, **{facet: "x"})
+
+
+# ---------------------------------------------------------------------------
+# F3.2: the ``session`` facet accepts a LIST of uuids (union of sessions)
+# ---------------------------------------------------------------------------
+
+
+def test_session_list_returns_union_of_sessions(
+    multi_turn_claude: str, second_claude_session: str
+) -> None:
+    got = query(
+        type="user_turn",
+        session=[multi_turn_claude, second_claude_session],
+    )
+    # Union of both sessions' user turns, chronological across sessions.
+    assert {e["session_id"] for e in got} == {
+        multi_turn_claude, second_claude_session
+    }
+    texts = [e["text"] for e in got]
+    assert texts == [
+        "first request",
+        "second request please",
+        "third and final",
+        "later session ask",  # 2026-06-15 > 2026-06-14 → last
+    ]
+    ts = [e["ts"] for e in got]
+    assert ts == sorted(ts)
+
+
+def test_session_list_single_element_equals_scalar(
+    multi_turn_claude: str, second_claude_session: str
+) -> None:
+    # A one-element list is exactly the historical single-uuid filter.
+    assert query(session=[multi_turn_claude]) == query(
+        session=multi_turn_claude
+    )
+
+
+def test_session_list_dedups_and_ignores_unknown_uuid(
+    multi_turn_claude: str, second_claude_session: str
+) -> None:
+    # Duplicates collapse; an unknown uuid contributes nothing (the same
+    # honest empty-miss semantics as the single-uuid form) — no invented
+    # events, no error.
+    got = query(
+        session=[multi_turn_claude, multi_turn_claude, "no-such-session"]
+    )
+    assert got == query(session=multi_turn_claude)
+
+
+def test_session_list_empty_raises() -> None:
+    # [] is ambiguous ("no filter" vs "match nothing") → fail-loud, never
+    # a silent unfiltered scan.
+    with pytest.raises(ValueError, match="session list must not be empty"):
+        query(session=[])
+
+
+def test_session_list_bad_items_raise() -> None:
+    for bad in ([123], ["ok-uuid", ""], ["ok-uuid", "   "], [None]):
+        with pytest.raises(ValueError, match="session list items"):
+            query(session=bad)
+
+
+def test_session_non_string_scalar_raises() -> None:
+    with pytest.raises(ValueError, match="session must be"):
+        query(session=123)
+
+
+def test_session_list_validated_on_relative_walk_too() -> None:
+    # Like tool_kind/sort, the session facet is validated even when the
+    # relative_to walk would otherwise ignore it.
+    with pytest.raises(ValueError, match="session list must not be empty"):
+        query(relative_to="x:0", session=[])
+
+
+def test_iter_events_accepts_session_list(
+    multi_turn_claude: str, second_claude_session: str
+) -> None:
+    events = list(
+        iter_events(
+            "claude", session=[multi_turn_claude, second_claude_session]
+        )
+    )
+    assert {e.session_id for e in events} == {
+        multi_turn_claude, second_claude_session
+    }
+    # Scalar fast-path unchanged.
+    only_first = list(iter_events("claude", session=multi_turn_claude))
+    assert {e.session_id for e in only_first} == {multi_turn_claude}
 
 
 # ---------------------------------------------------------------------------

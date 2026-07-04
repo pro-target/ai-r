@@ -468,10 +468,57 @@ def _messages_to_events(
     return events
 
 
+def normalize_session_filter(
+    session: Optional[Any],
+) -> Optional[frozenset]:
+    """Normalize a ``session`` facet value into a uuid set, or ``None``.
+
+    F3.2: the ``session`` facet accepts a single uuid string OR a list of
+    uuid strings (an explicit session batch — e.g. the ids picked from a
+    ``search_sessions`` result).  Returns ``None`` for "no filter", else a
+    ``frozenset`` of uuids to keep.
+
+    Fail-loud, never a silent surprise:
+
+    * an empty list raises :class:`ValueError` — ``[]`` is ambiguous
+      ("no filter" vs "match nothing"), the caller must omit the facet
+      to scan everything;
+    * a non-string item (or a blank/empty string item) raises
+      :class:`ValueError`;
+    * any other type (int/dict/...) raises :class:`ValueError`.
+
+    A bare string is passed through as a one-element set unchanged —
+    including the (pre-existing) degenerate ``""``, which keeps the
+    historical "matches nothing" behaviour for backward compatibility.
+    """
+    if session is None:
+        return None
+    if isinstance(session, str):
+        return frozenset((session,))
+    if isinstance(session, (list, tuple, set, frozenset)):
+        items = list(session)
+        if not items:
+            raise ValueError(
+                "session list must not be empty — omit the session "
+                "facet to scan all sessions"
+            )
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "session list items must be non-empty session-uuid "
+                    f"strings, got {item!r}"
+                )
+        return frozenset(items)
+    raise ValueError(
+        "session must be a session-uuid string or a list of them, "
+        f"got {session!r}"
+    )
+
+
 def iter_events(
     agent: Optional[str] = None,
     *,
-    session: Optional[str] = None,
+    session: Optional[Any] = None,
     noise: str = "include",
     project_dir: Optional[str] = None,
     scanned_sessions_out: Optional[dict[str, Any]] = None,
@@ -481,8 +528,12 @@ def iter_events(
     Args:
         agent: Optional agent filter (``claude``/``codex``/...); ``None``
             = every agent.
-        session: Optional session-uuid filter; restrict the scan to a
-            single session (cheap fast-path for ``relative_to`` walks).
+        session: Optional session-uuid filter — a single uuid string or a
+            list of uuid strings (F3.2); restrict the scan to those
+            sessions (cheap fast-path for ``relative_to`` walks and
+            explicit session batches).  Validation SSOT:
+            :func:`normalize_session_filter` (fail-loud on an empty list
+            or non-string items).
         noise: Session-level noise filter (see
             :mod:`ai_r.parsers._noise`): ``"include"`` (default, no
             filtering), ``"exclude"`` (drop subagent sessions), ``"only"``
@@ -507,6 +558,7 @@ def iter_events(
         prefers a partial view to a crash), mirroring ``find_file_edits``.
     """
     validate_noise(noise)
+    wanted_sessions = normalize_session_filter(session)
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
@@ -514,7 +566,7 @@ def iter_events(
         if scanned_sessions_out is not None:
             scanned_sessions_out[agent_lc] = sessions
         for sess in sessions:
-            if session is not None and sess.uuid != session:
+            if wanted_sessions is not None and sess.uuid not in wanted_sessions:
                 continue
             if not noise_allows(sess, noise):
                 continue
@@ -538,4 +590,4 @@ def iter_events(
 
 # ``Message`` is re-exported so downstream modules that build the enrichment
 # message cache can import the parser type from here alongside the stream.
-__all__ = ["Event", "Message", "iter_events"]
+__all__ = ["Event", "Message", "iter_events", "normalize_session_filter"]

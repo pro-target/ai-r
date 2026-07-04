@@ -2542,6 +2542,71 @@ def test_query_over_mcp_client(fake_claude_session_with_tools: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# query session-list facet (F3.2): one call, union of several sessions
+# ---------------------------------------------------------------------------
+
+
+def test_query_session_list_direct(
+    fake_claude_session: Path, fake_claude_session_with_tools: Path
+) -> None:
+    # Two distinct sessions in the fake vault: "test-claude-1" and
+    # "claude-tools-1".  A list unions them in ONE call.
+    res = query(
+        type="user_turn",
+        agent="claude",
+        session=["test-claude-1", "claude-tools-1"],
+    )
+    assert res["count"] == 2
+    assert {e["session_id"] for e in res["events"]} == {
+        "test-claude-1", "claude-tools-1"
+    }
+    # The scalar form is unchanged (backward compat).
+    single = query(type="user_turn", agent="claude", session="test-claude-1")
+    assert single["count"] == 1
+    assert single["events"][0]["session_id"] == "test-claude-1"
+
+
+def test_query_session_empty_list_returns_error_dict() -> None:
+    res = query(session=[])
+    assert res["error"] == "invalid_argument"
+    assert "session list" in res["message"]
+
+
+def test_query_session_list_empty_result_diagnostics_echo_list(
+    fake_claude_session: Path,
+) -> None:
+    # Unknown uuids → honest empty result; the diagnostics echo the LIST
+    # value so the caller sees exactly which filter produced the zero.
+    res = query(session=["no-such-1", "no-such-2"], agent="claude")
+    assert res["count"] == 0
+    assert res["diagnostics"]["filters"]["session"] == [
+        "no-such-1", "no-such-2"
+    ]
+
+
+def test_query_session_list_over_mcp_client(
+    fake_claude_session: Path, fake_claude_session_with_tools: Path
+) -> None:
+    # The JSON-array form must survive the real MCP transport (schema
+    # accepts string OR array of strings).
+    out = _run(
+        _call(
+            "query",
+            {
+                "type": "user_turn",
+                "agent": "claude",
+                "session": ["test-claude-1", "claude-tools-1"],
+            },
+        )
+    )
+    payload = json.loads(out[0])
+    assert payload["count"] == 2
+    assert {e["session_id"] for e in payload["events"]} == {
+        "test-claude-1", "claude-tools-1"
+    }
+
+
+# ---------------------------------------------------------------------------
 # query reference-by-default (QRY-1): text preview at the MCP boundary
 # ---------------------------------------------------------------------------
 
