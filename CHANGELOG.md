@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`incidents` preset: dangerous command + regret reaction (F4.1)**: new
+  MCP tool `incidents` (core `ai_r.incidents`) answers "where did an agent
+  run something destructive — and did it then apologise?" in one call. A
+  preset over the existing core, not a second engine: ONE
+  `query(type="tool_call", tool_kind="bash")` scan supplies the candidates;
+  a deterministic **danger dictionary** (19 patterns, `fs`/`git`/`db`/`net`,
+  harvested from public agent-guardrail rule sets and calibrated on real
+  host history 2026-07-04 — 297 candidates / 4 confirmed; `db.truncate`
+  tightened after firing on English prose) selects dangerous commands from
+  the extracted command field (a Bash `description` alone never fires;
+  `--force-with-lease` is not force-push); a bilingual (ru+en) **regret
+  dictionary** scans the next `reaction_window` messages (default 6) for an
+  apology/rollback reaction — the two-step check behind `confirmed`, never
+  guessed. Each record carries the query event `id` (context on-demand via
+  `relative_to` / `read_session`), `patterns` + `categories`, a char-capped
+  `command` fragment centred on the hit (token budget), tri-state
+  `is_error` (`null` where the agent's format has no correlated outcome
+  signal — honest, cross-agent) and `reaction` (marker labels + capped
+  preview; `null` when unconfirmed). Filters are all parameters: `agent`,
+  `session` (uuid or list), `since`/`until`, `category`, `confirmed`
+  (`include`/`only`/`exclude`), `noise`, `project_dir`;
+  `count`/`confirmed_count`/`by_pattern` always reflect the FULL match set
+  independent of `limit`. Unknown `category`/`confirmed` values fail loud;
+  emitted fields are redacted by default (F2.1) while matching runs on RAW
+  text; zero incidents → empty-result `diagnostics` (F1.1). Documented
+  caveat: the dictionary cannot tell mention from execution (an `echo`-ed
+  dangerous string can match). Scenarios INC-1..4.
+
 - **Plan iterations v2: draft numbering, quote→section anchoring, rounds
   (F3.4 v2)**: (a) every plan atom now carries `version` — its 1-based
   revision number within the task group in chronological `(ts, seq)`

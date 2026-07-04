@@ -40,7 +40,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 70 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 74 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -52,6 +52,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 70 LLM-executed end-to-end
 | `plan` | 11 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape; v2 — every atom carries `version` (v1…vN per task, chronological, final = vN), every pair carries `plan_version` + `round` + `section` (the quote anchored to its source-markdown section through markup-stripping normalization — miss or multi-section ambiguity is an honest `null`, never a nearest guess; a rejected plan-file `Write` correlates like an `ExitPlanMode` verdict), and `rounds=all\|last` filters to each session's final feedback round (unknown value fails loud). |
 | `session_stats` (preset) | 4 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
 | `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
+| `incidents` (preset) | 4 | One call finds dangerous shell commands + regret reactions (F4.1) via a baked chain — ONE `query(type=tool_call, tool_kind=bash)` scan → deterministic danger dictionary on the extracted command (a Bash `description` alone never fires; `--force-with-lease` is not force-push) → bilingual (ru+en) regret-marker scan over the next `reaction_window` messages (default 6) — the two-step `confirmed` verdict, never guessed; each record carries the query event `id` (context on-demand via `relative_to`), `patterns`+`categories`, a char-capped `command` fragment centred on the hit, tri-state `is_error` (`null` where the agent's format has no correlated outcome signal) and `reaction` (marker labels + capped preview, `null` when unconfirmed); `count`/`confirmed_count`/`by_pattern` reflect the FULL match set independent of `limit`; `category`/`confirmed` filters fail loud on unknown values; emitted fields are redacted by default while matching runs on RAW text; zero incidents → `diagnostics`; documented dictionary caveat: quoting a dangerous string (echo/grep/test payloads) can still match — mention vs execution is not decidable by regex. |
 | `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
 | `list_sessions` | 5 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant. |
 | `outcome` (read_session field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
@@ -447,6 +448,50 @@ the legacy shell-scan branch.
 - **Steps:** `mcp__ai-r__session_diff("<codex-uuid>", "codex")`.
 - **Expected:** Targets recovered from `printf … > path` and `cat > path <<EOF`; edits via `tee` / `sed -i` / `cp` / `mv` are **silently skipped** (documented blind spots).
 - **Pass criteria:** GO when `printf >` / `cat > <<EOF` targets appear correctly. GO-with-caveats is the expected verdict when the session also contains `tee`/`sed -i`/`cp`/`mv` edits — their absence is a documented limitation, not a defect. An undocumented missing edit is NO-GO.
+
+---
+
+## `incidents` (preset)
+
+The F4.1 preset: dangerous shell command + regret reaction, one call. A baked chain over the
+existing core (never a second engine): ONE `query(type="tool_call", tool_kind="bash")` scan supplies
+the candidates → the deterministic **danger dictionary** (harvested from public agent-guardrail rule
+sets, calibrated on real host history 2026-07-04) selects dangerous commands → the bilingual (ru+en)
+**regret dictionary** scans the following `reaction_window` messages (default 6) for an
+apology/rollback reaction — the two-step check behind `confirmed`. Zero LLM: no dictionary hit → no
+incident, no reaction → `confirmed: false`, never inferred.
+
+### INC-1 — dangerous command surfaces as an incident (two-step record shape) `[needs-real-vault]`
+- **Function:** `incidents`
+- **Goal:** A real dangerous shell call comes back as an incident record with the full two-step shape.
+- **Preconditions:** A vault whose history contains at least one dangerous shell command (e.g. `git reset --hard`, `rm -rf`). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__incidents(limit=10)`; pick one record; cross-check its `id` via `mcp__ai-r__query(relative_to="<id>", direction="prev")` and `mcp__ai-r__read_session(<session_id>)`.
+- **Expected:** `{incidents:[…], count, confirmed_count, by_pattern, truncated, reaction_window}`; every record carries `id` (a query event id), `agent`, `session_id`, `ts`, `tool`, non-empty `patterns` (ids like `git.reset_hard`) + `categories` (`fs`/`git`/`db`/`net`), a `command` fragment containing the matched text (char-capped, `command_truncated` flagged on a real cut), `confirmed` and `reaction`; records are chronological (ts ascending); the `id` resolves to the same call via `get_body`/`query`; `message_index` is the raw parser index — `read_session` offsets are projected (tool-role entries dropped), so the same call may sit at a shifted offset there.
+- **Pass criteria:** GO when the record's `command` really matches its `patterns`, the `id` walks back to the true preceding user turn, and `by_pattern` sums match the per-record pattern counts over the FULL match set (independent of `limit`).
+
+### INC-2 — two-step check: `confirmed` verdict + `confirmed`/`category` filters `[needs-real-vault]`
+- **Function:** `incidents`
+- **Goal:** The regret reaction drives `confirmed`, and the filters compose honestly.
+- **Preconditions:** A vault with at least one confirmed incident (dangerous command followed by an apology/rollback within the window). `[needs-real-vault]`; on a vault without confirmed incidents the confirmed-shape check is skipped (GO-with-caveats), the subset algebra still runs.
+- **Steps:** `mcp__ai-r__incidents(confirmed="only")`, `mcp__ai-r__incidents(confirmed="exclude")`, `mcp__ai-r__incidents()`; then `mcp__ai-r__incidents(category="git")`.
+- **Expected:** `only` ∪ `exclude` = `include` (counts add up); every `only` record has `reaction` (`message_index`, `offset` ≤ `reaction_window`, `role`, marker labels — e.g. `извинение`/`apology` — and a capped `preview`); every `exclude` record has `reaction: null` and `confirmed: false`; `category="git"` keeps only records with ≥1 `git.*` pattern.
+- **Pass criteria:** GO when the subset algebra holds, a confirmed record's `reaction.preview` really contains regret wording, and no record is ever confirmed without a dictionary hit in the window (never guessed).
+
+### INC-3 — fail-loud validation + empty-result diagnostics `[hermetic-ok]`
+- **Function:** `incidents`
+- **Goal:** Unknown parameter values fail loud; an empty result is explainable.
+- **Preconditions:** None (empty vault is fine). `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__incidents(category="network")`, `mcp__ai-r__incidents(confirmed="maybe")`, `mcp__ai-r__incidents(reaction_window=-1)`; then a valid call on an empty/filtered-to-zero corpus.
+- **Expected:** Each invalid call returns `{"error": "invalid_argument", "message": …}` naming the offending parameter — never a silent empty result; the valid zero-match call returns `count: 0` **plus** `diagnostics` (scanned agents, corpus bounds, cause hints).
+- **Pass criteria:** GO when all three invalid calls fail loud and the zero-result response carries `diagnostics` (a non-empty response never does).
+
+### INC-4 — cross-agent honesty: tri-state `is_error`, RAW matching, redacted emission `[needs-real-vault]`
+- **Function:** `incidents`
+- **Goal:** All agents participate on equal terms and honesty rules hold on real data.
+- **Preconditions:** A vault with shell calls from ≥2 agents (e.g. claude + codex/opencode). `[needs-real-vault]`.
+- **Steps:** `mcp__ai-r__incidents(limit=0)`; inspect per-agent records; compare one record with `redact=false`.
+- **Expected:** Records from every agent whose history has dangerous shell calls (not only Claude); `is_error` is `true`/`false` only where a correlated result outcome exists and `null` elsewhere (e.g. codex — no per-result flag), never fabricated; with `redact=true` (default) any secret in `command`/`reaction.preview`/`session_title` is masked as `[REDACTED_<TYPE>]` with a `redactions` type→count dict, while the SAME record is found either way (matching ran on RAW text).
+- **Pass criteria:** GO when non-Claude agents appear (given signal), no `is_error` is invented for formats without the flag, and redaction changes only the emitted fields — never the match set.
 
 ---
 

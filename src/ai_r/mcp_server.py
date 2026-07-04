@@ -64,6 +64,7 @@ from ai_r.find_file_edits import (  # noqa: E402
 )
 from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # noqa: E402
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
+from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
 from ai_r.parsers import ParserModule, Session  # noqa: E402
@@ -1061,6 +1062,84 @@ def session_stats(
             top=top,
             edit_path=edit_path,
             with_tokens=with_tokens,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def incidents(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    category: Optional[str] = None,
+    confirmed: str = "include",
+    reaction_window: int = 6,
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Dangerous shell commands + regret reactions — the *incidents* preset.
+
+    One call answers "where did an agent run something destructive — and
+    did it then apologise?".  A preset over the existing core, not a second
+    engine: ONE ``query`` scan (``type="tool_call"``, ``tool_kind="bash"``)
+    supplies the candidates, a deterministic **danger dictionary** (harvested
+    from public agent-guardrail rule sets, calibrated on real history)
+    selects the dangerous commands, and a bilingual (ru + en) **regret
+    dictionary** scans the next ``reaction_window`` messages (default 6) for
+    an apology/rollback reaction — the two-step check behind the
+    ``confirmed`` flag.  Zero LLM, zero guessing: no dictionary hit → no
+    incident; no reaction → ``confirmed: false``, never inferred.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list of
+    uuids), ``since``/``until`` (ISO bounds on the call ts), ``category``
+    (``fs``/``git``/``db``/``net`` — unknown values fail loud),
+    ``confirmed`` (``include`` default | ``only`` | ``exclude``), ``noise``
+    and ``project_dir`` (session-level, same semantics as ``query``).
+
+    Each incident record carries the query event ``id`` (walk its context
+    via ``query(relative_to=...)`` / ``read_session``), the matched
+    ``patterns`` + ``categories``, a char-capped ``command`` fragment
+    centred on the hit (token budget — full context stays on-demand),
+    ``is_error`` (``null`` when the agent's format has no correlated
+    outcome signal — honest, cross-agent), ``confirmed`` and ``reaction``
+    (``message_index``/``offset``/``role``/marker labels/capped preview;
+    ``null`` when unconfirmed).  ``count``/``confirmed_count``/
+    ``by_pattern`` always reflect the FULL match set; ``limit`` (default
+    50, ``0`` = no cap) bounds only the emitted records (``truncated``).
+
+    Dictionary caveat (documented, not hidden): patterns are a
+    deterministic dictionary, not a shell interpreter — a command that
+    merely *mentions* a dangerous string (e.g. ``echo "rm -rf /"``) can
+    still match.  Matching runs on the extracted command field (a Bash
+    ``description`` alone never fires) and always on the RAW stored text;
+    ``redact=true`` (default) masks secrets only in the emitted
+    ``session_title``/``command``/``reaction.preview`` fields
+    (``redactions`` type→count dict when anything was masked).  When
+    ``count == 0`` the response carries ``diagnostics`` so an empty result
+    is explainable (missing source dir vs all-excluding filter vs a
+    genuinely clean history).
+
+    Thin wrapper over :func:`ai_r.incidents.incidents` that translates the
+    core ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _incidents_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            category=category,
+            confirmed=confirmed,
+            reaction_window=reaction_window,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
