@@ -65,6 +65,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Resolve ``ai_r`` from the working tree, never a stale site-packages wheel:
+# ``pytest`` prepends these to ``sys.path`` so ``make test-hermetic`` targets
+# the source under edit regardless of what ``pip install`` left installed.
+pythonpath = ["src"]
 addopts = "-v --tb=short"
 asyncio_mode = "auto"
 markers = [
