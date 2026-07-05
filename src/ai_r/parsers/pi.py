@@ -259,6 +259,62 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
 
 
 
+# ``message.usage`` key → normalized token-usage field (F3.3).
+_USAGE_FIELD_MAP = (
+    ("input", "input"),
+    ("output", "output"),
+    ("cache_read", "cacheRead"),
+    ("cache_write", "cacheWrite"),
+)
+
+
+def _usage_counters(usage: object) -> Optional[dict]:
+    """Extract raw counters from a Pi ``message.usage`` block.
+
+    Returns ``{"input", "output", "cache_read", "cache_write",
+    "total_tokens"}`` with non-int counters defaulting to ``0``
+    (``total_tokens`` is the block's own ``totalTokens``, kept separate
+    because the fallback rules differ between the session sum and the
+    per-message view), or ``None`` when ``usage`` is not a dict.  Shared
+    by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message :func:`_message_tokens` so extraction can never drift.
+    """
+    if not isinstance(usage, dict):
+        return None
+    counters: dict = {}
+    for field, usage_key in _USAGE_FIELD_MAP:
+        val = usage.get(usage_key)
+        counters[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    tt = usage.get("totalTokens")
+    counters["total_tokens"] = (
+        tt if isinstance(tt, int) and not isinstance(tt, bool) else 0
+    )
+    return counters
+
+
+def _message_tokens(usage: object) -> Optional[dict]:
+    """Normalize one message's ``usage`` into the F3.3 token block.
+
+    ``total`` is the sum of the four counters, falling back to the
+    block's ``totalTokens`` when the per-field counters are absent
+    (mirrors :func:`read_token_usage`); Pi records no reasoning
+    breakdown → ``reasoning`` is ``None``.  Returns ``None`` when there
+    is no ``usage`` dict or the total is zero — absence is honest.
+    """
+    counters = _usage_counters(usage)
+    if counters is None:
+        return None
+    total_tokens = counters.pop("total_tokens")
+    total = sum(counters.values())
+    if total <= 0:
+        total = total_tokens
+    if total <= 0:
+        return None
+    return {**counters, "reasoning": None, "total": total}
+
+
 # NOTE (interactive question→answer pairs): the Pi session format has NO
 # native interactive-question tool — its only ``toolCall`` names observed
 # in real sessions are ordinary tools (bash/read/edit/write/...), with no
@@ -272,11 +328,14 @@ def _pi_extract_message(
     Returns ``None`` for roles we do not surface (``toolResult`` records
     with no usable content are still emitted as ``tool`` messages so the
     audit trail is complete).  ``toolCall`` blocks become ``tool_use``
-    entries; ``thinking`` blocks are skipped from ``text``.
+    entries; ``thinking`` blocks surface via :attr:`Message.thinking`
+    (kept out of ``text``); assistant messages with a ``usage`` block
+    carry it normalized on :attr:`Message.tokens`.
     """
     role = message.get("role")
     content = message.get("content", "")
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     if isinstance(content, str):
         text_chunks.append(content)
@@ -300,13 +359,27 @@ def _pi_extract_message(
                     except (TypeError, ValueError):
                         input_str = str(args)
                 tool_use.append({"name": name, "input": input_str})
-            # ``thinking`` blocks are intentionally skipped here.
+            elif part_type == "thinking":
+                # Marked reasoning: the plaintext lives in the ``thinking``
+                # key (``text`` accepted for forward-compatibility, same
+                # tolerance as ``_extract_text``).
+                thought = part.get("thinking") or part.get("text")
+                if isinstance(thought, str) and thought:
+                    thinking_chunks.append(thought)
     if role in ("user", "assistant"):
         return Message(
             role=role,
             text="\n".join(text_chunks),
             tool_use=tuple(tool_use),
             timestamp=timestamp,
+            thinking="\n".join(thinking_chunks),
+            # Pi writes ``usage`` on assistant messages only — mirror the
+            # session-level reader and never attach user-side blocks.
+            tokens=(
+                _message_tokens(message.get("usage"))
+                if role == "assistant"
+                else None
+            ),
         )
     if role == "toolResult":
         result_text = "\n".join(text_chunks)
@@ -393,21 +466,12 @@ def read_token_usage(
         message = record.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        usage = message.get("usage")
-        if not isinstance(usage, dict):
+        counters = _usage_counters(message.get("usage"))
+        if counters is None:
             continue
-        pairs = (
-            ("input", usage.get("input")),
-            ("output", usage.get("output")),
-            ("cache_read", usage.get("cacheRead")),
-            ("cache_write", usage.get("cacheWrite")),
-        )
-        for field, val in pairs:
-            if isinstance(val, int) and not isinstance(val, bool):
-                totals[field] += val
-        tt = usage.get("totalTokens")
-        if isinstance(tt, int) and not isinstance(tt, bool):
-            total_tokens += tt
+        for field in totals:
+            totals[field] += counters[field]
+        total_tokens += counters["total_tokens"]
         found = True
     total = sum(totals.values())
     if total <= 0:

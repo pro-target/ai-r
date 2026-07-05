@@ -1229,9 +1229,10 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
           ``step-start`` → ``reasoning`` → ``text`` → ``tool`` (call+result
           combined, status=completed) → ``tool`` (error, no output) →
           ``file`` → ``patch`` → ``step-finish``.
-    Covers: text, reasoning inlined, tool-call, tool-result, tool-error
-    (no output), metadata-only file/patch parts, step-* boundary markers
-    skipped, multi-part ordering.
+    Covers: text, reasoning (surfaced as ``Message.thinking``, not
+    inlined into text), tool-call, tool-result, tool-error (no output),
+    metadata-only file/patch parts, step-* boundary markers skipped,
+    multi-part ordering.
     """
     db_path = tmp_sessions_dir / "opencode_tools.db"
     conn = sqlite3.connect(str(db_path))

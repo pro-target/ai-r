@@ -332,7 +332,9 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     become user/assistant :class:`Message` objects.  ``function_call``
     payloads (and the ``local_shell_call`` family) become assistant
     ``tool_use`` entries; ``function_call_output`` payloads become
-    ``tool`` messages with a ``tool_result`` entry.  Codex carries no
+    ``tool`` messages with a ``tool_result`` entry.  ``reasoning``
+    payloads with a non-empty plaintext ``summary`` become assistant
+    messages carrying :attr:`Message.thinking`.  Codex carries no
     per-result error flag, so ``tool_result.is_error`` defaults ``False``
     (best-effort).  Other record types are skipped.
 
@@ -398,6 +400,35 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                         timestamp=env_ts,
                     )
                 )
+            elif ptype == "reasoning":
+                # Codex stores model reasoning as ``reasoning`` response
+                # items: the plaintext lives in ``summary[].text`` while
+                # ``encrypted_content`` is opaque ciphertext (no plaintext
+                # → skipped, absence is honest).  Verified against real
+                # ~/.codex/sessions rollouts (2026-07 snapshot): ``summary``
+                # is the only plaintext carrier and is often empty ([]),
+                # so summary-less items are skipped rather than emitted as
+                # blank assistant messages.  No per-message usage exists in
+                # the format (cumulative ``token_count`` only) → tokens
+                # stays None.
+                summary = payload.get("summary")
+                thinking_chunks: List[str] = []
+                if isinstance(summary, list):
+                    for entry in summary:
+                        if not isinstance(entry, dict):
+                            continue
+                        text = entry.get("text", "")
+                        if isinstance(text, str) and text:
+                            thinking_chunks.append(text)
+                if thinking_chunks:
+                    messages.append(
+                        Message(
+                            role="assistant",
+                            text="",
+                            thinking="\n".join(thinking_chunks),
+                            timestamp=env_ts,
+                        )
+                    )
             elif ptype == "web_search_call":
                 # Codex's native web access is not a function_call: the
                 # rollout stores a ``web_search_call`` response item whose

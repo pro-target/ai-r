@@ -648,6 +648,40 @@ def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _normalize_tokens(tokens: object) -> Optional[dict]:
+    """Normalize a ``message.data.tokens`` block into the F3.3 token dict.
+
+    OpenCode's shape is ``{"input", "output", "reasoning",
+    "cache": {"read", "write"}}``; non-int counters default to ``0``.
+    Returns ``{"input", "output", "reasoning", "cache_read",
+    "cache_write", "total"}``, or ``None`` when ``tokens`` is not a dict
+    or every counter is zero (the placeholder block of an incomplete
+    message) — absence is honest, a fabricated exact-zero is not.
+    Shared by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message ``Message.tokens`` attachment in :func:`_build_message`
+    so the two can never drift.
+    """
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache")
+    cache = cache if isinstance(cache, dict) else {}
+    block: dict = {}
+    for field, val in (
+        ("input", tokens.get("input")),
+        ("output", tokens.get("output")),
+        ("reasoning", tokens.get("reasoning")),
+        ("cache_read", cache.get("read")),
+        ("cache_write", cache.get("write")),
+    ):
+        block[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    total = sum(block.values())
+    if total <= 0:
+        return None
+    return {**block, "total": total}
+
+
 def _build_message(
     message_data: Optional[dict],
     parts: List[_PartTuple],
@@ -655,10 +689,15 @@ def _build_message(
 ) -> Optional[Message]:
     """Assemble a :class:`Message` from metadata + ordered ``(part, ptime)`` tuples.
 
-    * ``text``      = concatenation of ``text`` parts + ``reasoning``
-                      parts (reasoning inlined unmarked; kept in-order
-                      so the dialogue reads naturally — matches how the
-                      Codex/Claude parsers fold thinking into text).
+    * ``text``      = concatenation of ``text`` parts only.
+    * ``thinking``  = concatenation of ``reasoning`` parts (kept OUT of
+                      ``text`` so narrative and model reasoning are never
+                      conflated nor double-counted by token estimates —
+                      matches how the Claude/Codex/Pi parsers surface
+                      marked reasoning via :attr:`Message.thinking`).
+    * ``tokens``    = the ``message.data.tokens`` block normalized via
+                      :func:`_normalize_tokens` (``None`` when absent or
+                      an all-zero placeholder).
     * ``tool_use``  = one entry per ``tool`` part
                       (``{name: tool, input: state.input, timestamp: ...}``).
                       The per-entry ``timestamp`` is the originating
@@ -683,6 +722,7 @@ def _build_message(
         return None
 
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     qa: List[dict] = []
@@ -709,7 +749,7 @@ def _build_message(
         if ptype in ("text", "reasoning"):
             t = part.get("text", "")
             if isinstance(t, str) and t:
-                text_chunks.append(t)
+                (thinking_chunks if ptype == "reasoning" else text_chunks).append(t)
         elif ptype == "tool":
             name = part.get("tool") or part.get("toolName") or part.get("name") or ""
             state_raw = part.get("state")
@@ -754,6 +794,15 @@ def _build_message(
             )
         # step-start / step-finish / unknown → skip
 
+    # Per-message exact usage: OpenCode keeps a ``tokens`` block inside
+    # ``message.data``; an all-zero placeholder (incomplete message)
+    # normalizes to None — absence is honest.
+    tokens = (
+        _normalize_tokens(message_data.get("tokens"))
+        if message_data is not None
+        else None
+    )
+
     return Message(
         role=role,
         text="\n".join(text_chunks),
@@ -761,6 +810,8 @@ def _build_message(
         tool_result=tuple(tool_result),
         timestamp=timestamp,
         qa=tuple(qa),
+        thinking="\n".join(thinking_chunks),
+        tokens=tokens,
     )
 
 
@@ -911,21 +962,14 @@ def read_token_usage(
         data = _json_or_none(row[0])
         if not isinstance(data, dict):
             continue
-        tokens = data.get("tokens")
-        if not isinstance(tokens, dict):
+        # All-zero placeholders normalize to None and are skipped — that
+        # matches the previous inline behavior (they contributed nothing
+        # to the totals and a zero-only session still returns None).
+        block = _normalize_tokens(data.get("tokens"))
+        if block is None:
             continue
-        cache = tokens.get("cache")
-        cache = cache if isinstance(cache, dict) else {}
-        pairs = (
-            ("input", tokens.get("input")),
-            ("output", tokens.get("output")),
-            ("reasoning", tokens.get("reasoning")),
-            ("cache_read", cache.get("read")),
-            ("cache_write", cache.get("write")),
-        )
-        for field, val in pairs:
-            if isinstance(val, int) and not isinstance(val, bool):
-                totals[field] += val
+        for field in totals:
+            totals[field] += block[field]
         found = True
     total = sum(totals.values())
     if not found or total <= 0:

@@ -153,6 +153,23 @@ class Message:
             ``answer`` is the chosen label(s) joined by ``" | "`` for
             multi-select.  Empty when the message carries no answered
             question, so existing consumers are unaffected.
+        thinking: Model reasoning text, where the format marks it as
+            such: Claude ``thinking`` content blocks (``redacted_thinking``
+            carries no plaintext and is skipped), Codex ``reasoning``
+            response items (the plaintext ``summary`` — the
+            ``encrypted_content`` blob is opaque), OpenCode ``reasoning``
+            parts, Pi ``thinking`` blocks.  Antigravity has no marked
+            reasoning signal → always ``""``.  Kept out of :attr:`text`
+            so narrative and reasoning are never conflated (nor
+            double-counted by token estimates).
+        tokens: The format's own per-assistant-message usage, normalized
+            to ``{"input", "output", "reasoning", "cache_read",
+            "cache_write", "total"}`` (same shape as the session-level
+            ``read_token_usage`` blocks; a counter the format does not
+            record is ``None``).  ``None`` where the format records no
+            per-message usage — Codex (cumulative session counter only),
+            Antigravity (no usage at all), user messages — absence is
+            honest, never fabricated.  Not part of the equality contract.
     """
 
     role: str
@@ -161,6 +178,8 @@ class Message:
     tool_result: Tuple[dict, ...] = ()
     timestamp: Optional[datetime] = None
     qa: Tuple[dict, ...] = ()
+    thinking: str = ""
+    tokens: Optional[dict] = field(default=None, compare=False)
 
 
 __all__ = ["AgentName", "Message", "Session"]

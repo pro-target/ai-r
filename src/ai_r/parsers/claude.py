@@ -748,8 +748,10 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
 
     Returns ``None`` for blank lines, malformed JSON, non-dict records,
     and records whose ``type`` is not ``"user"`` or ``"assistant"``.
-    Assistant records yield ``text`` (from ``text`` blocks) and
-    ``tool_use`` entries (from ``tool_use`` blocks).  User records yield
+    Assistant records yield ``text`` (from ``text`` blocks),
+    ``thinking`` (from ``thinking`` blocks) and ``tool_use`` entries
+    (from ``tool_use`` blocks), plus a normalized ``tokens`` block when
+    the record carries ``message.usage``.  User records yield
     ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
     they carry (Claude embeds tool results in user-role records); each
     result carries ``is_error`` from the block's ``is_error`` flag.
@@ -783,6 +785,7 @@ def _message_from_record(record: dict) -> Optional[Message]:
         return None
     content = payload.get("content", "")
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     if isinstance(content, list):
@@ -794,6 +797,14 @@ def _message_from_record(record: dict) -> Optional[Message]:
                 text = part.get("text", "")
                 if isinstance(text, str) and text:
                     text_chunks.append(text)
+            elif part_type == "thinking":
+                # Extended-thinking block: the reasoning plaintext lives in
+                # the ``thinking`` key.  ``redacted_thinking`` blocks carry
+                # only an encrypted ``data`` blob (no plaintext) and are
+                # intentionally NOT matched here — absence is honest.
+                thought = part.get("thinking", "")
+                if isinstance(thought, str) and thought:
+                    thinking_chunks.append(thought)
             elif part_type == "tool_use":
                 name = part.get("name", "")
                 raw_input = part.get("input", "")
@@ -850,12 +861,34 @@ def _message_from_record(record: dict) -> Optional[Message]:
                 tool_result.append(result_entry)
     elif isinstance(content, str):
         text_chunks.append(content)
+    # Per-record exact usage (assistant records only).  A streamed API
+    # call writes ONE JSONL record per content block, ALL carrying the
+    # same (message.id, requestId) and identical usage numbers — and the
+    # first record may be thinking-only, which downstream projections
+    # drop.  So the block is attached to EVERY record of the call plus an
+    # internal ``_call`` key; consumers dedup by ``_call`` and emit the
+    # block once per API call, on whichever record survives their view.
+    tokens: Optional[dict] = None
+    if rec_type == "assistant":
+        block = _usage_block(payload)
+        if block is not None:
+            msg_id = payload.get("id")
+            request_id = record.get("requestId")
+            tokens = {
+                **block,
+                "_call": "{}|{}".format(
+                    msg_id if isinstance(msg_id, str) else "",
+                    request_id if isinstance(request_id, str) else "",
+                ),
+            }
     return Message(
         role=rec_type,
         text="\n".join(text_chunks),
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
         timestamp=ts,
+        thinking="\n".join(thinking_chunks),
+        tokens=tokens,
     )
 
 
@@ -957,6 +990,11 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
                 tool_result=_scrub_tool_result(msg.tool_result),
                 timestamp=msg.timestamp,
                 qa=tuple(qa),
+                # Reconstruction MUST carry every remaining field —
+                # dropping ``thinking``/``tokens`` here would silently
+                # lose them on any qa-bearing message.
+                thinking=msg.thinking,
+                tokens=msg.tokens,
             )
         )
     return out
@@ -985,6 +1023,34 @@ _USAGE_FIELD_MAP: Tuple[Tuple[str, str], ...] = (
     ("cache_read", "cache_read_input_tokens"),
     ("cache_write", "cache_creation_input_tokens"),
 )
+
+
+def _usage_block(message: dict) -> Optional[dict]:
+    """Normalize a record's ``message.usage`` into the F3.3 token block.
+
+    Returns ``{"input", "output", "reasoning", "cache_read",
+    "cache_write", "total"}`` with non-int counters defaulting to ``0``
+    (``reasoning`` is always ``None`` — Claude records no reasoning
+    breakdown), or ``None`` when the message carries no ``usage`` dict.
+    Shared by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message ``Message.tokens`` attachment in ``_message_from_record``
+    so the two can never drift.
+    """
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    block: dict = {}
+    for field, usage_key in _USAGE_FIELD_MAP:
+        val = usage.get(usage_key)
+        block[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    block["reasoning"] = None
+    block["total"] = (
+        block["input"] + block["output"]
+        + block["cache_read"] + block["cache_write"]
+    )
+    return block
 
 
 def read_token_usage(
@@ -1030,8 +1096,8 @@ def read_token_usage(
                 message = record.get("message")
                 if not isinstance(message, dict):
                     continue
-                usage = message.get("usage")
-                if not isinstance(usage, dict):
+                block = _usage_block(message)
+                if block is None:
                     continue
                 msg_id = message.get("id")
                 if isinstance(msg_id, str) and msg_id:
@@ -1039,10 +1105,8 @@ def read_token_usage(
                     if key in seen_calls:
                         continue
                     seen_calls.add(key)
-                for field, usage_key in _USAGE_FIELD_MAP:
-                    val = usage.get(usage_key)
-                    if isinstance(val, int) and not isinstance(val, bool):
-                        totals[field] += val
+                for field in totals:
+                    totals[field] += block[field]
                 found = True
     except OSError:
         return None

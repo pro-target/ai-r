@@ -233,9 +233,11 @@ def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -
     assert user.text == "run tests"
     assistant = msgs[1]
     assert assistant.role == "assistant"
-    # text = reasoning + text parts, in order; step-* skipped.
-    assert "thinking..." in assistant.text
-    assert "okay" in assistant.text
+    # text = text parts only; reasoning surfaces via ``thinking``
+    # (kept out of text so narrative and model reasoning never mix);
+    # step-* skipped.
+    assert assistant.text == "okay"
+    assert assistant.thinking == "thinking..."
     # step-start/step-finish leak no text
     assert "snapshot" not in assistant.text
     assert "tokens" not in assistant.text
@@ -443,3 +445,81 @@ def test_sweep_reaps_old_and_caps_orphans_skips_live(
     assert "ai_r_opencode_LIVE.db" in remaining, "live temp file must survive"
     # Live + at most _MAX_TEMP_FILES fresh orphans.
     assert len(remaining) == 1 + oc._MAX_TEMP_FILES
+
+
+# ---------------------------------------------------------------------------
+# Per-message token usage (F3.3 breakdown groundwork)
+# ---------------------------------------------------------------------------
+
+
+def test_per_message_tokens_from_message_data(tmp_path: Path) -> None:
+    """``message.data.tokens`` normalizes onto ``Message.tokens``; the
+    all-zero placeholder of an incomplete message stays None (honest)."""
+    db = tmp_path / "tokens.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT,
+            time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+            time_created INTEGER, time_updated INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT,
+            session_id TEXT, time_created INTEGER, time_updated INTEGER,
+            data TEXT NOT NULL);
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES ('oc-tok', NULL, 'tokens', 1, 2)"
+    )
+    conn.executemany(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        [
+            ("m0", "oc-tok", 1, 1, json.dumps({"role": "user"})),
+            ("m1", "oc-tok", 2, 2, json.dumps({
+                "role": "assistant",
+                "tokens": {"input": 30, "output": 12, "reasoning": 3,
+                           "cache": {"read": 100, "write": 4}},
+            })),
+            ("m2", "oc-tok", 3, 3, json.dumps({
+                "role": "assistant",
+                # Placeholder of an incomplete message: all-zero → None.
+                "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}},
+            })),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("m0-p0", "m0", "oc-tok", 1, 1,
+             json.dumps({"type": "text", "text": "hi"})),
+            ("m1-p0", "m1", "oc-tok", 2, 2,
+             json.dumps({"type": "reasoning", "text": "pondering"})),
+            ("m1-p1", "m1", "oc-tok", 3, 3,
+             json.dumps({"type": "text", "text": "answer"})),
+            ("m2-p0", "m2", "oc-tok", 4, 4,
+             json.dumps({"type": "text", "text": "later"})),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    msgs = opencode.read_messages("oc-tok", override=str(db))
+    assert len(msgs) == 3
+    assert msgs[0].tokens is None            # user: no tokens block
+    assistant = msgs[1]
+    # Reasoning part rides ``thinking`` while the exact block rides tokens.
+    assert assistant.text == "answer"
+    assert assistant.thinking == "pondering"
+    assert assistant.tokens == {
+        "input": 30, "output": 12, "reasoning": 3,
+        "cache_read": 100, "cache_write": 4, "total": 149,
+    }
+    assert msgs[2].tokens is None            # all-zero placeholder → None
+
+    # The session SSOT sums only the real block (zero placeholder skipped).
+    usage = opencode.read_token_usage("oc-tok", override=str(db))
+    assert usage == {
+        "input": 30, "output": 12, "reasoning": 3,
+        "cache_read": 100, "cache_write": 4, "total": 149,
+    }
