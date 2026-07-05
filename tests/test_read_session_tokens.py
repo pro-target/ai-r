@@ -109,7 +109,7 @@ def codex_tokens_session(tmp_sessions_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# with_tokens=True — Claude (dedup, exact + categories)
+# with_tokens=True — Claude (dedup, exact flat + component estimate)
 # ---------------------------------------------------------------------------
 
 
@@ -119,15 +119,17 @@ def test_read_session_with_tokens_claude(
     result = read_session(claude_tokens_session, agent="claude", with_tokens=True)
     assert "error" not in result
 
-    # Session block: exact outer numbers + independent estimate categories.
+    # Session block: flat exact numbers, no categories/breakdown key.
     st = result["tokens"]
     assert st["source"] == "exact"
     assert st["total"] == 195  # (100+50+10+5) + (10+20)
-    cats = st["categories"]
-    assert cats is not None and cats["source"] == "estimate"
-    assert cats["estimator"] == "chars/4"
-    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
-    assert four == cats["total"]
+    assert "categories" not in st
+
+    # Separate per-component estimate breakdown.
+    comp = result["component_tokens"]
+    assert comp is not None and comp["source"] == "estimate"
+    assert comp["estimator"] == "chars/4"
+    assert isinstance(comp["tool_call"], dict)
 
     # Per-message: exactly ONE block per API call; ``_call`` never leaks.
     with_tokens = [m for m in result["messages"] if "tokens" in m]
@@ -155,7 +157,9 @@ def test_read_session_with_tokens_codex(
     st = result["tokens"]
     assert st["source"] == "exact"
     assert st["total"] == 240
-    assert st["categories"] is not None  # categories still estimated
+    assert "categories" not in st
+    # Component breakdown attached separately, always an estimate.
+    assert result["component_tokens"]["source"] == "estimate"
 
     # Codex records no per-message usage → NO ``tokens`` key on any entry
     # (absent, not null).
@@ -176,6 +180,8 @@ def test_read_session_without_tokens_unchanged(
     )
     assert base == explicit_false
     assert "tokens" not in base
+    assert "component_tokens" not in base
+    assert "subagent_rollup" not in base
     assert all("tokens" not in m for m in base["messages"])
 
 
@@ -192,6 +198,95 @@ def test_read_session_with_tokens_invalid_type(
     )
     assert result["error"] == "invalid_argument"
     assert "with_tokens" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# include_subagents — parent + spawned child rollup
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_parent_with_child(tmp_sessions_dir: Path) -> str:
+    """A Claude parent session plus one spawned subagent child under it."""
+    parent = "rs-parent-1"
+    slug = "proj-sub"
+    proj = tmp_sessions_dir / ".claude" / "projects" / slug
+    _write_jsonl(
+        proj / f"{parent}.jsonl",
+        [
+            {"type": "user",
+             "message": {"role": "user", "content": "spawn a subagent please"},
+             "timestamp": "2026-06-14T10:00:00Z", "sessionId": parent},
+            {"type": "assistant",
+             "message": {"id": "pm1", "role": "assistant",
+                         "content": [{"type": "text", "text": "on it"}]},
+             "timestamp": "2026-06-14T10:00:05Z", "sessionId": parent},
+        ],
+    )
+    # Subagent child: directory form ``<parent-uuid>/subagents/agent-*.jsonl``.
+    child = "agent-child-1"
+    _write_jsonl(
+        proj / parent / "subagents" / f"{child}.jsonl",
+        [
+            {"type": "user",
+             "message": {"role": "user", "content": "do the subtask"},
+             "timestamp": "2026-06-14T10:00:06Z", "sessionId": child,
+             "isSidechain": True, "parentUuid": parent},
+            {"type": "assistant",
+             "message": {"id": "cm1", "role": "assistant",
+                         "content": [{"type": "text", "text": "subtask done"}]},
+             "timestamp": "2026-06-14T10:00:07Z", "sessionId": child,
+             "isSidechain": True, "parentUuid": parent},
+        ],
+    )
+    return parent
+
+
+def test_read_session_include_subagents_rollup(
+    claude_parent_with_child: str, _no_tiktoken: None
+) -> None:
+    result = read_session(
+        claude_parent_with_child, agent="claude", include_subagents=True
+    )
+    assert "error" not in result
+    rollup = result["subagent_rollup"]
+    assert rollup["parent"] is not None
+    assert rollup["parent"]["source"] == "estimate"
+    # Exactly one spawned child was found and rolled up.
+    assert len(rollup["children"]) == 1
+    child = rollup["children"][0]
+    assert child["agent"] == "claude"
+    assert child["component_tokens"]["source"] == "estimate"
+    # The folded total sums parent + child.
+    total = rollup["total"]
+    assert total["source"] == "estimate"
+    assert total["total"] == (
+        rollup["parent"]["total"] + child["component_tokens"]["total"]
+    )
+    assert total["estimated"] == 2 and total["unknown"] == 0
+
+
+def test_read_session_include_subagents_childless(
+    claude_tokens_session: str, _no_tiktoken: None
+) -> None:
+    """A parent with no spawned children → empty children, total == parent."""
+    result = read_session(
+        claude_tokens_session, agent="claude", include_subagents=True
+    )
+    rollup = result["subagent_rollup"]
+    assert rollup["children"] == []
+    assert rollup["total"]["total"] == rollup["parent"]["total"]
+
+
+def test_read_session_include_subagents_invalid_type(
+    claude_tokens_session: str,
+) -> None:
+    result = read_session(
+        claude_tokens_session, agent="claude",
+        include_subagents="yes",  # type: ignore[arg-type]
+    )
+    assert result["error"] == "invalid_argument"
+    assert "include_subagents" in result["message"]
 
 
 # ---------------------------------------------------------------------------

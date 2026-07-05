@@ -38,18 +38,49 @@ deterministic, read-only, pure-stdlib (no new dependencies).
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
-from ai_r.parsers import PARSERS, iso, target_agents
+from ai_r.parsers import PARSERS, Session, iso, target_agents
 from ai_r.tokens import session_tokens as _session_tokens
 
 __all__ = [
     "GROUP_BY",
+    "children_of",
     "group_key",
     "session_stats",
 ]
+
+
+def children_of(
+    parent_uuid: str, *, agent: Optional[str] = None
+) -> List[Session]:
+    """Return the spawned subagent sessions whose parent is ``parent_uuid``.
+
+    Scans the session inventory of every in-scope agent (``target_agents``
+    resolves the optional ``agent`` filter) and keeps the sessions whose
+    :attr:`ai_r.parsers.Session.parent_uuid` equals ``parent_uuid``.  Reuses
+    the same ``list_sessions`` spine the rollups consume — no re-parse of
+    transcripts, purely inventory metadata.
+
+    Note: Antigravity never records a ``parent_uuid``, so a parent under that
+    agent (or any childless parent) yields an empty list — an honest "no
+    children found", not an error.
+    """
+    if not parent_uuid or not str(parent_uuid).strip():
+        return []
+    out: List[Session] = []
+    for agent_name in target_agents(agent):
+        parser = PARSERS[agent_name]
+        try:
+            sessions = parser.list_sessions()
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        for session in sessions:
+            if session.parent_uuid == parent_uuid:
+                out.append(session)
+    return out
 
 
 # The dimensions a caller may roll up by.  Kept as an explicit, validated

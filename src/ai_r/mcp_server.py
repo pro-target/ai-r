@@ -67,8 +67,11 @@ from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noq
 from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
-from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
-from ai_r.tokens import session_tokens  # noqa: E402
+from ai_r.session_stats import (  # noqa: E402
+    children_of as _children_of,
+    session_stats as _session_stats_core,
+)
+from ai_r.tokens import component_tokens, session_tokens  # noqa: E402
 from ai_r.parsers import ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
@@ -458,7 +461,8 @@ def _message_token_blocks(
         if emit is not None:
             # A per-message block is always the format's own recorded usage
             # → tag it ``source="exact"`` so the tier reads the same as the
-            # session block (and never mixes with the estimate categories).
+            # session block (and never mixes with the estimate component
+            # breakdown).
             emit["source"] = "exact"
         out.append(emit)
         if hard_cap and hard_cap > 0 and len(out) >= hard_cap:
@@ -801,6 +805,7 @@ def read_session(
     limit: int = _MESSAGES_CAP,
     redact: bool = True,
     with_tokens: bool = False,
+    include_subagents: bool = False,
 ) -> dict[str, Any]:
     """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
@@ -825,11 +830,17 @@ def read_session(
         with_tokens: When ``True`` (F3.3) attach token usage read at
             request time (nothing runs in the background):
 
-            * ``summary["tokens"]`` — the session's
-              :func:`ai_r.tokens.session_tokens` block *with* a
-              ``categories`` breakdown (exact outer numbers where the agent
-              records usage, an independent estimate sub-block always
-              labeled ``source="estimate"`` — tiers never merged);
+            * ``summary["tokens"]`` — the session's flat
+              :func:`ai_r.tokens.session_tokens` block (exact where the agent
+              records usage, a labeled estimate otherwise, honest
+              ``source=None`` without any signal);
+            * ``summary["component_tokens"]`` — the
+              :func:`ai_r.tokens.component_tokens` breakdown: the transcript's
+              estimated token volume split across ai-r's event taxonomy
+              (``user_turn`` / ``assistant_turn`` / ``thinking`` / ``plan``
+              and a ``tool_call`` per-``tool_kind`` sub-dict), always
+              ``source="estimate"`` (never merged with the exact tier),
+              ``None`` on an empty transcript;
             * per-message ``tokens`` on projected entries that carry exact
               usage — Claude (deduplicated per streamed API call), OpenCode
               and Pi.  Codex / Antigravity / user turns carry **no**
@@ -838,10 +849,20 @@ def read_session(
               page boundaries never shift which record is "first" for a call.
 
             Default ``False``: output is byte-identical to the historical
-            shape (no ``tokens`` key on the summary or any message).  The
-            token blocks carry only integers and ai-r-authored labels
-            (never raw session text), so they stay outside the F2.1
-            redaction pass by construction.
+            shape (no ``tokens`` / ``component_tokens`` key on the summary or
+            any message).  The token blocks carry only integers and
+            ai-r-authored labels (never raw session text), so they stay
+            outside the F2.1 redaction pass by construction.
+        include_subagents: When ``True`` attach
+            ``summary["subagent_rollup"]`` — the parent session's
+            ``component_tokens`` block plus one per spawned subagent child
+            (resolved via :func:`ai_r.session_stats.children_of` on
+            ``parent_uuid``) and a ``total`` folding parent + children through
+            the ``aggregate`` ``component_tokens`` metric.  A childless parent
+            (or an agent like Antigravity that never records ``parent_uuid``)
+            yields an empty ``children`` list and a ``total`` equal to the
+            parent's own block — honest, not an error.  Independent of
+            ``with_tokens``.  Default ``False``.
 
     Returns:
         A dict with session metadata plus:
@@ -882,6 +903,12 @@ def read_session(
     if not isinstance(with_tokens, bool):
         return {"error": "invalid_argument",
                 "message": f"with_tokens must be a bool, got {with_tokens!r}"}
+    if not isinstance(include_subagents, bool):
+        return {"error": "invalid_argument",
+                "message": (
+                    f"include_subagents must be a bool, "
+                    f"got {include_subagents!r}"
+                )}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -981,15 +1008,53 @@ def read_session(
     # dictionary marker labels (never raw session text), so it stays
     # outside the redaction pass by construction (SSOT ai_r.outcome).
     summary["outcome"] = _session_outcome(raw_messages, session.agent)
-    # Session token usage (F3.3, only when requested): exact where the agent
-    # records it (with an independent estimate ``categories`` breakdown) —
-    # reuses the already-parsed ``raw_messages`` so the transcript is not
-    # parsed a second time for the categories.  Integers + ai-r labels only,
-    # so it is outside the redaction pass by construction.
+    # Session token usage (F3.3, only when requested): the flat block (exact
+    # where the agent records it, labeled estimate otherwise) plus a separate
+    # per-component estimate breakdown.  Both reuse the already-parsed
+    # ``raw_messages`` so the transcript is not parsed a second time.
+    # Integers + ai-r labels only, so they are outside the redaction pass by
+    # construction.
     if with_tokens:
-        summary["tokens"] = session_tokens(
-            session, breakdown=True, messages=raw_messages
+        summary["tokens"] = session_tokens(session, messages=raw_messages)
+        summary["component_tokens"] = component_tokens(
+            raw_messages, agent=session.agent
         )
+    # Subagent rollup (F3.3, only when requested): parent's component_tokens +
+    # one per spawned child, folded via the aggregate ``component_tokens``
+    # metric.  Independent of ``with_tokens``.  A childless parent (or an
+    # agent that never records ``parent_uuid``) yields empty ``children`` and
+    # a ``total`` equal to the parent block.
+    if include_subagents:
+        parent_block = component_tokens(raw_messages, agent=session.agent)
+        rollup_rows: List[dict[str, Any]] = [
+            {"component_tokens": parent_block}
+        ]
+        children_out: List[dict[str, Any]] = []
+        for child in _children_of(session.uuid):
+            child_parser: Optional[ParserModule] = _PARSERS.get(child.agent)
+            child_msgs: List[Any] = []
+            if child_parser is not None:
+                try:
+                    child_msgs = child_parser.read_messages(child.uuid)
+                except (FileNotFoundError, ValueError, OSError):
+                    child_msgs = []
+            child_block = component_tokens(child_msgs, agent=child.agent)
+            children_out.append({
+                "uuid": child.uuid,
+                "agent": child.agent.value.lower(),
+                "component_tokens": child_block,
+            })
+            rollup_rows.append({"component_tokens": child_block})
+        folded = _aggregate_core(
+            rollup_rows,
+            group_by=lambda _r: "all",
+            metrics=["component_tokens"],
+        )
+        summary["subagent_rollup"] = {
+            "parent": parent_block,
+            "children": children_out,
+            "total": folded["totals"]["component_tokens"],
+        }
     # Emission-time redaction (F2.1): after pagination so only the emitted
     # page pays; the raw transcript on disk is never touched.
     if redact:
@@ -2000,7 +2065,8 @@ def aggregate(
             under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
-            ``messages`` / ``files`` / ``tokens``.  Defaults to ``["count"]``.
+            ``messages`` / ``files`` / ``tokens`` / ``component_tokens``.
+            Defaults to ``["count"]``.
             ``tokens`` (F3.3) folds per-row ``tokens`` blocks (the shape
             ``session_stats(with_tokens=True)`` rows carry, or a bare int
             total) into ``{input, output, reasoning, cache_read,
@@ -2008,6 +2074,14 @@ def aggregate(
             rows that carry each field (``null`` when none does) plus
             honest provenance counters (``exact + estimated + unknown ==
             len(rows)``).
+            ``component_tokens`` (F3.3) folds per-row ``component_tokens``
+            blocks (the shape :func:`ai_r.tokens.component_tokens` produces,
+            as ``read_session(with_tokens=True)`` attaches) into summed
+            event-taxonomy components (``user_turn`` / ``assistant_turn`` /
+            ``thinking`` / ``plan`` and a ``tool_call`` per-kind sub-dict) +
+            ``total`` + provenance counters (``estimated`` / ``unknown``;
+            never ``exact`` — always an estimate).  A component/kind no row
+            carried stays absent (never a fabricated ``0``).
         rank_by: Group ordering — ``"default"`` (edits→sessions→count→label,
             the ``file_frequency`` order) or ``"stats"`` (sessions→edits→label,
             the ``session_stats`` order).
