@@ -21,7 +21,12 @@ from ai_r import tokens as tokens_mod
 from ai_r.events.aggregate import aggregate
 from ai_r.parsers import AgentName, Session, antigravity, claude, codex, opencode, pi
 from ai_r.session_stats import session_stats
-from ai_r.tokens import TOKEN_FIELDS, estimate_tokens, session_tokens
+from ai_r.tokens import (
+    TOKEN_FIELDS,
+    estimate_tokens,
+    session_tokens,
+    transcript_categories,
+)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -565,3 +570,138 @@ def test_mcp_session_stats_with_tokens_invalid_is_error_dict() -> None:
     result = mcp_session_stats(with_tokens="yes")  # type: ignore[arg-type]
     assert result["error"] == "invalid_argument"
     assert "with_tokens" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# transcript_categories + session_tokens(breakdown=...) — Step 3
+# ---------------------------------------------------------------------------
+
+
+from ai_r.parsers.models import Message  # noqa: E402
+
+
+def _msg(
+    role: str = "assistant",
+    text: str = "",
+    thinking: str = "",
+    tool_use=(),
+    tool_result=(),
+    tokens=None,
+) -> Message:
+    return Message(
+        role=role,
+        text=text,
+        thinking=thinking,
+        tool_use=tuple(tool_use),
+        tool_result=tuple(tool_result),
+        tokens=tokens,
+    )
+
+
+def test_transcript_categories_sum_invariant_chars4(_no_tiktoken: None) -> None:
+    messages = [
+        _msg(role="user", text="hello there"),
+        _msg(
+            text="an answer here",
+            thinking="let me think about it",
+            tool_use=({"name": "Bash", "input": "ls -la /tmp"},),
+            tool_result=({"content": "a very long tool result body", "is_error": False},),
+        ),
+    ]
+    cats = transcript_categories(messages)
+    assert cats is not None
+    assert cats["source"] == "estimate"
+    assert cats["estimator"] == "chars/4"
+    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
+    assert four == cats["total"]
+    # Every category measured a non-empty surface here.
+    for k in ("text", "thinking", "tool_input", "tool_result"):
+        assert cats[k] > 0
+
+
+def test_estimate_session_total_equals_categories_total(
+    fake_codex_session: Path, _no_tiktoken: None
+) -> None:
+    """On an estimate-tier session: session total == categories total == sum(4)."""
+    session = codex.read_session("test-codex-1")
+    parser_msgs = codex.read_messages("test-codex-1")
+
+    block = session_tokens(session, breakdown=True, messages=parser_msgs)
+    assert block["source"] == "estimate"
+    cats = block["categories"]
+    assert cats is not None
+    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
+    assert four == cats["total"]
+    assert block["total"] == cats["total"]
+
+    # And the plain (no-breakdown) estimate total matches too — single defn.
+    plain = session_tokens(session, messages=parser_msgs)
+    assert plain["source"] == "estimate"
+    assert plain["total"] == cats["total"]
+
+
+def test_breakdown_on_exact_session_keeps_tiers_separate(
+    claude_token_session: str, _no_tiktoken: None
+) -> None:
+    session = claude.read_session(claude_token_session)
+    block = session_tokens(session, breakdown=True)
+    # Outer numbers stay exact (SSOT session totals).
+    assert block["source"] == "exact"
+    assert block["total"] == 195
+    assert "estimator" not in block  # exact tier carries no estimator
+    # categories is an independent estimate — labeled, never merged.
+    cats = block["categories"]
+    assert cats is not None
+    assert cats["source"] == "estimate"
+    assert cats["estimator"] == "chars/4"
+    # The estimate total is the text volume, NOT the exact 195.
+    assert cats["total"] != block["total"]
+    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
+    assert four == cats["total"]
+
+
+def test_breakdown_empty_session_categories_none(_no_tiktoken: None) -> None:
+    assert transcript_categories([]) is None
+    # A message list with only empty surfaces also measures to None.
+    assert transcript_categories([_msg(role="user", text="")]) is None
+
+
+def test_breakdown_false_shape_byte_identical(
+    claude_token_session: str, _no_tiktoken: None
+) -> None:
+    session = claude.read_session(claude_token_session)
+    plain = session_tokens(session)
+    assert "categories" not in plain
+    # Same keys as the historical exact block: TOKEN_FIELDS + source.
+    assert set(plain) == set(TOKEN_FIELDS) | {"source"}
+
+
+def test_thinking_only_fixture_nonzero_thinking(_no_tiktoken: None) -> None:
+    messages = [_msg(thinking="pure reasoning with no visible text at all")]
+    cats = transcript_categories(messages)
+    assert cats is not None
+    assert cats["thinking"] > 0
+    assert cats["text"] == 0
+    assert cats["tool_input"] == 0
+    assert cats["tool_result"] == 0
+    assert cats["total"] == cats["thinking"]
+
+
+def test_aggregate_tolerates_extra_categories_key() -> None:
+    """The aggregate ``tokens`` fold ignores an extra ``categories`` key."""
+    rows = [
+        {"agent": "claude", "tokens": {
+            "input": 100, "output": 50, "reasoning": None,
+            "cache_read": 10, "cache_write": 5, "total": 165,
+            "source": "exact",
+            "categories": {"text": 1, "thinking": 2, "tool_input": 3,
+                           "tool_result": 4, "total": 10,
+                           "source": "estimate", "estimator": "chars/4"},
+        }},
+    ]
+    result = aggregate(rows, group_by="agent", metrics=["tokens"])
+    block = result["groups"][0]["tokens"]
+    # The fold sums the flat sub-fields and ignores ``categories`` entirely.
+    assert block["total"] == 165
+    assert block["input"] == 100
+    assert (block["exact"], block["estimated"], block["unknown"]) == (1, 0, 0)
