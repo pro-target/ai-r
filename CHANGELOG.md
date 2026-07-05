@@ -391,6 +391,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- mypy: `python_version` 3.11 → 3.12 (numpy stubs pulled in by the
+  `semantic` extra require 3.12+; a bare `mypy src/` failed on config);
+  guard a `None` plan id in plan feedback rows (`events/plan.py`).
+  README (EN/RU) now lists `numpy` among the semantic extra deps.
 - **`query` events are reference-by-default again (QRY-1 contract)**: the
   MCP `query` response inlined each event's FULL `text` (measured up to
   ~12.5 KB per event), violating the "events carry references, never

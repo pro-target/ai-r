@@ -441,7 +441,7 @@ def plan_feedback(
                     "session_id": sid,
                     "agent": agent_by_session.get(sid),
                     "plan_id": plan_id,
-                    "plan_version": version_by_id.get(plan_id),
+                    "plan_version": version_by_id.get(plan_id) if plan_id is not None else None,
                     "verdict": resp.verdict,
                     "round": round_no,
                     "quote": quote,

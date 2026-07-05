@@ -372,7 +372,7 @@ cd ~/dev/ai-r && bash install.sh
 локальной многоязычной моделью эмбеддингов (embeddings) —
 [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
 (int8 ONNX, ~118 МБ, MIT), напрямую через
-[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers),
+[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
 без torch и без постоянного индекса. Почему эта модель: сильный межъязыковой
 поиск (русский запрос находит английскую сессию и наоборот) при малом размере.
 Как устроен балл, простыми словами: BM25 отбирает 50 лучших совпадений по

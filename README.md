@@ -367,7 +367,7 @@ the BM25 top-50 candidates are re-ranked by **meaning** with a local
 multilingual embedding model —
 [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
 (int8 ONNX, ~118 MB, MIT), run directly via
-[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers),
+[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
 no torch, no persistent index. Why this model: strong cross-lingual retrieval
 (a Russian query finds an English session and vice versa) at a small size. How
 the score works, in plain words: BM25 picks the 50 best word-matches (a cost
