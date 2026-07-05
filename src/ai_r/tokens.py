@@ -44,28 +44,35 @@ session text), so it stays outside the F2.1 redaction pass by construction.
 Consumed by ``session_stats(with_tokens=True)`` (per-session blocks folded by
 the ``aggregate`` ``tokens`` metric) — see :mod:`ai_r.events.aggregate`.
 
-Category breakdown (``breakdown=True``)
----------------------------------------
+Component breakdown (:func:`component_tokens`)
+----------------------------------------------
 
-On request :func:`session_tokens` attaches a ``categories`` sub-block that
-splits the transcript volume into four honest surfaces —
+:func:`component_tokens` splits a transcript's estimated token volume across
+ai-r's **existing event taxonomy** — it reuses the same classifiers the
+event layer uses (``resolve_tool`` for ``tool_kind``, the ``_plan_signal_*``
+detector for plans, the ``user``/``assistant`` role), so it is one more
+*measurement* over the established components, NOT a second classifier:
 
-* ``text``        — each message's plain-text content;
-* ``thinking``    — each message's model-reasoning text;
-* ``tool_input``  — each tool-call's ``input``;
-* ``tool_result`` — each tool-result's ``content``.
+* ``user_turn``      — each user message's text (the question / request);
+* ``assistant_turn`` — each assistant message's text (the answer);
+* ``thinking``       — each message's model-reasoning text;
+* ``plan``           — the input of plan-authoring tool calls (Claude
+  ``ExitPlanMode`` / ``Write plans/*.md``, Codex ``update_plan``), detected
+  via the SAME plan-signal machinery the event stream uses, so their tokens
+  land here and are NOT double-counted under ``tool_call``;
+* ``tool_call``      — a ``{tool_kind: tokens}`` dict; each non-plan call's
+  ``input`` plus its correlated ``tool_result`` ``content`` (matched by
+  ``tool_use_id``; an orphan result falls under ``other``), bucketed by the
+  wrapper-aware ``tool_kind`` (``edit``/``write``/``read``/``bash``/``task``/
+  ``skill``/``mcp``/``web``/``other``).
 
-All four are tokenized with **one estimator chosen once** for the whole
+All surfaces are tokenized with **one estimator chosen once** for the whole
 block (:func:`_estimate_many`), so the ``estimator`` label can never differ
-between categories.  The sub-block therefore ALWAYS carries its own
-``source="estimate"`` + ``estimator`` — a **tier-separation invariant**:
-even when the outer block is ``source="exact"`` the categories are an
-independent estimate and are NEVER merged into the exact numbers.  The four
-category counts sum exactly to ``categories["total"]``; on the estimate path
-the outer ``total`` is *defined* as that same sum (single source of truth,
-no drift between the two).  An all-empty transcript (nothing to measure)
-yields ``categories: None``; a measured-but-empty category is an honest
-``0`` — the pass ran, it just found no text there.
+between components.  The block ALWAYS carries ``source="estimate"`` +
+``estimator`` — it is a volume estimate, never mixed with the ``exact``
+recorded-usage tier.  ``total`` is the sum of every component (scalars +
+the ``tool_call`` sub-values).  An all-empty transcript (nothing to measure)
+yields ``None``; a measured-but-empty component is an honest ``0``.
 """
 
 from __future__ import annotations
@@ -76,17 +83,19 @@ from ai_r.parsers import PARSERS, Session
 
 __all__ = [
     "TOKEN_FIELDS",
+    "COMPONENT_FIELDS",
+    "component_tokens",
     "estimate_tokens",
     "session_tokens",
-    "transcript_categories",
 ]
 
-# The four transcript surfaces split out by ``transcript_categories``.
-CATEGORY_FIELDS: Tuple[str, ...] = (
-    "text",
+# The scalar (non-``tool_call``) components emitted by ``component_tokens``.
+# ``tool_call`` is a separate ``{tool_kind: tokens}`` sub-dict.
+COMPONENT_FIELDS: Tuple[str, ...] = (
+    "user_turn",
+    "assistant_turn",
     "thinking",
-    "tool_input",
-    "tool_result",
+    "plan",
 )
 
 
@@ -161,9 +170,9 @@ def _estimate_many(texts: Sequence[str]) -> Tuple[List[int], str]:
     The estimator is chosen exactly once for the whole batch (tiktoken when
     importable and functional, else the ``chars/4`` heuristic), so the
     label can never differ between the texts fed in — the guarantee the
-    category breakdown relies on to keep all four surfaces on the same
-    tier.  Never raises: a tokenizer failure mid-batch degrades the whole
-    batch to the heuristic.
+    :func:`component_tokens` breakdown relies on to keep every surface on
+    the same tier.  Never raises: a tokenizer failure mid-batch degrades the
+    whole batch to the heuristic.
     """
     enc = _tiktoken_encoder()
     if enc is not None:
@@ -184,62 +193,129 @@ def _estimate_many(texts: Sequence[str]) -> Tuple[List[int], str]:
     return counts, ESTIMATOR_HEURISTIC
 
 
-def transcript_categories(messages: Sequence[Any]) -> Optional[dict[str, Any]]:
-    """Split a transcript's estimated token volume into four surfaces.
+def component_tokens(
+    messages: Sequence[Any], *, agent: str
+) -> Optional[dict[str, Any]]:
+    """Estimate token volume per ai-r conversation component.
 
-    Builds four separate concatenations from ``messages`` —
+    Reuses ai-r's existing taxonomy — the ``user``/``assistant`` role, the
+    wrapper-aware :func:`ai_r.events._common.resolve_tool` classifier and
+    the ``_plan_signal_from_tool`` detector from :mod:`ai_r.events.model` —
+    so this is one more *measurement* over the established components, never
+    a second classifier.  ``agent`` is required: the plan-signal detector is
+    per-agent (Claude ``ExitPlanMode``/``Write plans/*.md``, Codex
+    ``update_plan``).
 
-    * ``text``        — each ``Message.text``;
-    * ``thinking``    — each ``Message.thinking``;
-    * ``tool_input``  — each ``tool_use`` dict's ``"input"``;
-    * ``tool_result`` — each ``tool_result`` dict's ``"content"``.
+    Returns (all surfaces tokenized with ONE estimator via
+    :func:`_estimate_many`)::
 
-    All four are tokenized with a **single** estimator (via
-    :func:`_estimate_many`) so the ``estimator`` label is identical across
-    categories.  Returns::
-
-        {"text": n, "thinking": n, "tool_input": n, "tool_result": n,
-         "total": <sum of the four>, "source": "estimate",
+        {"user_turn": n, "assistant_turn": n, "thinking": n, "plan": n,
+         "tool_call": {"<tool_kind>": n, ...},
+         "total": <sum of every component>, "source": "estimate",
          "estimator": "tiktoken" | "chars/4"}
 
-    ``None`` when all four surfaces are empty (nothing to measure).  A
-    measured-but-empty category is an honest ``0`` (the pass ran).
+    ``tool_call`` carries only the tool kinds actually present.  Plan-authoring
+    tool calls land in ``plan`` (not ``tool_call``) — no double count.  A
+    ``tool_result`` is bucketed under its call's kind via ``tool_use_id``; an
+    orphan result falls under ``other``.  ``None`` when every surface is empty
+    (nothing to measure); a measured-but-empty scalar component is an honest
+    ``0``.
     """
-    text_chunks: List[str] = []
+    # Lazy import keeps module load order robust (tokens is imported early by
+    # mcp_server; events.model pulls in the parser/event graph).
+    from ai_r.events._common import _coerce_tool_input, resolve_tool
+    from ai_r.events.model import _plan_signal_from_tool
+
+    # ``_plan_signal_from_tool`` compares the agent against lowercase literals
+    # (``"claude"`` / ``"codex"``); an ``AgentName`` enum (value ``"CLAUDE"``)
+    # or any cased string is normalized here so plan detection is never
+    # silently skipped when a caller passes the enum straight through.
+    agent = getattr(agent, "value", agent)
+    agent = agent.lower() if isinstance(agent, str) else agent
+
+    user_chunks: List[str] = []
+    assistant_chunks: List[str] = []
     thinking_chunks: List[str] = []
-    tool_input_chunks: List[str] = []
-    tool_result_chunks: List[str] = []
-    for m in messages:
+    plan_chunks: List[str] = []
+    tool_chunks: dict[str, List[str]] = {}
+    # ``tool_use_id`` → the bucket its result should join: ("plan", None) or
+    # ("tool", "<kind>").  Built in the tool_use pass, read in the result pass.
+    id_bucket: dict[str, Tuple[str, Optional[str]]] = {}
+
+    def _tool_bucket(kind: str) -> List[str]:
+        return tool_chunks.setdefault(kind, [])
+
+    for idx, m in enumerate(messages):
+        role = getattr(m, "role", None)
         text = getattr(m, "text", "")
         if isinstance(text, str) and text:
-            text_chunks.append(text)
+            if role == "user":
+                user_chunks.append(text)
+            elif role == "assistant":
+                assistant_chunks.append(text)
         thinking = getattr(m, "thinking", "")
         if isinstance(thinking, str) and thinking:
             thinking_chunks.append(thinking)
         for tool in getattr(m, "tool_use", ()) or ():
-            if isinstance(tool, dict):
-                inp = tool.get("input", "")
-                if inp:
-                    tool_input_chunks.append(str(inp))
-        for res in getattr(m, "tool_result", ()) or ():
-            if isinstance(res, dict):
-                content = res.get("content", "")
-                if content:
-                    tool_result_chunks.append(str(content))
+            if not isinstance(tool, dict):
+                continue
+            inp = tool.get("input", "")
+            inp_str = str(inp) if inp else ""
+            tuid = tool.get("tool_use_id")
+            tuid = tuid if isinstance(tuid, str) and tuid else None
+            sig = _plan_signal_from_tool(tool, agent=agent, message_index=idx)
+            if sig is not None:
+                if inp_str:
+                    plan_chunks.append(inp_str)
+                if tuid is not None:
+                    id_bucket[tuid] = ("plan", None)
+                continue
+            kind, _ = resolve_tool(
+                tool.get("name", ""), _coerce_tool_input(inp)
+            )
+            if inp_str:
+                _tool_bucket(kind).append(inp_str)
+            if tuid is not None:
+                id_bucket[tuid] = ("tool", kind)
 
+    # Second pass: correlate every tool_result to its call's bucket.
+    for m in messages:
+        for res in getattr(m, "tool_result", ()) or ():
+            if not isinstance(res, dict):
+                continue
+            content = res.get("content", "")
+            if not content:
+                continue
+            content = str(content)
+            tuid = res.get("tool_use_id")
+            bucket = id_bucket.get(tuid) if isinstance(tuid, str) else None
+            if bucket is not None and bucket[0] == "plan":
+                plan_chunks.append(content)
+            elif bucket is not None:
+                _tool_bucket(bucket[1] or "other").append(content)
+            else:
+                _tool_bucket("other").append(content)
+
+    # Tokenize every surface in ONE batch so the estimator label is shared.
+    tool_kinds = sorted(tool_chunks)
     surfaces = [
-        "\n".join(text_chunks),
+        "\n".join(user_chunks),
+        "\n".join(assistant_chunks),
         "\n".join(thinking_chunks),
-        "\n".join(tool_input_chunks),
-        "\n".join(tool_result_chunks),
-    ]
-    if not any(s for s in surfaces):
+        "\n".join(plan_chunks),
+    ] + ["\n".join(tool_chunks[k]) for k in tool_kinds]
+    if not any(surfaces):
         # Nothing to measure at all → honest absence (not a block of zeros).
         return None
 
     counts, estimator = _estimate_many(surfaces)
-    block: dict[str, Any] = dict(zip(CATEGORY_FIELDS, counts))
-    block["total"] = sum(counts)
+    scalars = counts[: len(COMPONENT_FIELDS)]
+    tool_counts = counts[len(COMPONENT_FIELDS):]
+    block: dict[str, Any] = dict(zip(COMPONENT_FIELDS, scalars))
+    block["tool_call"] = {
+        k: c for k, c in zip(tool_kinds, tool_counts) if c
+    }
+    block["total"] = sum(scalars) + sum(block["tool_call"].values())
     block["source"] = "estimate"
     block["estimator"] = estimator
     return block
@@ -252,7 +328,6 @@ def _empty_block() -> dict[str, Any]:
 def session_tokens(
     session: Session,
     *,
-    breakdown: bool = False,
     messages: Optional[Sequence[Any]] = None,
 ) -> dict[str, Any]:
     """Return the normalized token-usage block for ``session``.
@@ -264,55 +339,24 @@ def session_tokens(
        ``estimator`` (``"tiktoken"`` | ``"chars/4"``);
     3. nothing to go on → all-``None`` fields, ``source=None``.
 
+    The estimate total is the sum of the :func:`component_tokens` breakdown
+    (single source of truth — the same estimator, no drift).  The flat block
+    carries no per-component detail; ``read_session`` / ``aggregate`` surface
+    that via :func:`component_tokens` separately.
+
     Any parser-level I/O / decode failure degrades down the same ladder —
     this function never raises on a readable inventory row.
 
     Args:
-        breakdown: When ``True`` attach a ``categories`` sub-block
-            (:func:`transcript_categories`) on BOTH the exact and estimate
-            paths.  On the exact path the outer fields stay exact and the
-            sub-block carries its own ``source="estimate"`` + ``estimator``
-            — the tier-separation invariant (never merged).  A parser read
-            failure while gathering messages for the categories yields
-            ``"categories": None``.  When ``False`` the output shape is
-            byte-identical to the historical block (no ``categories`` key).
         messages: Already-parsed :class:`~ai_r.parsers.models.Message`
-            objects to reuse for the estimate / categories.  When ``None``
-            the messages are read from the owning parser on demand — pass
-            them to avoid a second parse when the caller already has them
-            (e.g. ``read_session``).
-
-    On the estimate path the outer ``total`` is defined as the sum of the
-    four categories (single source of truth), so ``total`` ==
-    ``categories["total"]`` there.
+            objects to reuse for the estimate.  When ``None`` the messages
+            are read from the owning parser on demand — pass them to avoid a
+            second parse when the caller already has them (``read_session``).
     """
     parser = PARSERS.get(session.agent)
     block = _empty_block()
     if parser is None:  # pragma: no cover — every AgentName has a parser
         return {**block, "source": None}
-
-    # Lazily read messages at most once, reusing a caller-supplied list.
-    # ``_read_failed`` distinguishes "read raised" (categories → None) from
-    # "read returned an empty list" (categories → None too, but via the
-    # empty-surface path).
-    _msg_cache: dict[str, Any] = {"loaded": messages is not None,
-                                   "value": messages, "failed": False}
-
-    def _messages() -> Sequence[Any]:
-        if not _msg_cache["loaded"]:
-            _msg_cache["loaded"] = True
-            try:
-                _msg_cache["value"] = parser.read_messages(session.uuid)
-            except (FileNotFoundError, ValueError, OSError):
-                _msg_cache["value"] = []
-                _msg_cache["failed"] = True
-        return _msg_cache["value"] or []
-
-    def _categories() -> Optional[dict[str, Any]]:
-        msgs = _messages()
-        if _msg_cache["failed"]:
-            return None
-        return transcript_categories(msgs)
 
     reader = getattr(parser, "read_token_usage", None)
     if callable(reader):
@@ -321,29 +365,14 @@ def session_tokens(
         except (FileNotFoundError, ValueError, OSError):
             exact = None
         if isinstance(exact, dict) and isinstance(exact.get("total"), int):
-            result = {**block, **exact, "source": "exact"}
-            if breakdown:
-                # Tier separation: the exact outer numbers stay exact; the
-                # categories are an independent estimate labeled as such.
-                result["categories"] = _categories()
-            return result
+            return {**block, **exact, "source": "exact"}
 
-    if breakdown:
-        cats = _categories()
-        if cats is not None:
-            # Estimate path: the outer total IS the category sum (SSOT).
-            return {
-                **block,
-                "total": cats["total"],
-                "source": "estimate",
-                "estimator": cats["estimator"],
-                "categories": cats,
-            }
-        # Nothing to estimate from (empty or unreadable transcript).
-        return {**block, "source": None, "categories": cats}
-
-    # ``breakdown=False`` — historical shape, single estimate total.
-    cats = transcript_categories(_messages())
+    if messages is None:
+        try:
+            messages = parser.read_messages(session.uuid)
+        except (FileNotFoundError, ValueError, OSError):
+            messages = []
+    cats = component_tokens(messages or [], agent=session.agent)
     if cats is not None:
         return {
             **block,

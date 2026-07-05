@@ -31,6 +31,11 @@ use so Phase 3b can retarget them onto this verb with byte-identical output:
 * ``tokens``   — fold of per-row ``tokens`` blocks (F3.3): sums the
   normalized usage sub-fields and counts row provenance
   (``exact``/``estimated``/``unknown``) — see :func:`_metric_tokens`.
+* ``component_tokens`` — fold of per-row ``component_tokens`` blocks
+  (F3.3): sums each event-taxonomy component (``user_turn``/
+  ``assistant_turn``/``thinking``/``plan`` and the ``tool_call`` per-kind
+  sub-dict) and counts row provenance (``estimated``/``unknown``; never
+  ``exact`` — always an estimate) — see :func:`_metric_component_tokens`.
 
 ``totals`` carries the same metrics folded over the WHOLE row set (never the
 truncated ``groups``), plus ``sessions``/``agents``/``agents_list`` mirrors
@@ -192,6 +197,73 @@ def _metric_tokens(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {**sums, "exact": exact, "estimated": estimated, "unknown": unknown}
 
 
+# The scalar (non-``tool_call``) components a ``component_tokens`` block
+# carries (mirrors :data:`ai_r.tokens.COMPONENT_FIELDS`, duplicated here to
+# keep this pure-fold module free of a ``tokens`` import).
+_COMPONENT_SCALARS: tuple[str, ...] = (
+    "user_turn", "assistant_turn", "thinking", "plan",
+)
+
+
+def _metric_component_tokens(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Fold per-row ``component_tokens`` blocks into one bucket summary.
+
+    Each row may carry ``component_tokens`` as the dict produced by
+    :func:`ai_r.tokens.component_tokens` (``{user_turn, assistant_turn,
+    thinking, plan, tool_call: {<kind>: n}, total, source, estimator}``).
+    Unlike :func:`_metric_tokens` there is no ``exact`` tier — a
+    ``component_tokens`` block is ALWAYS an estimate — so provenance is two
+    counters:
+
+    * ``estimated`` — rows whose block says ``source == "estimate"``;
+    * ``unknown``   — rows with no usable block.
+
+    The reducer sums each scalar component and each ``tool_call`` kind over
+    the rows that carry one; a component/kind no row carried stays **absent**
+    (never a fabricated ``0`` — mirrors ``_metric_tokens`` honesty).  One
+    ``estimator`` label is kept (the first block that has one).  ``source``
+    is ``"estimate"`` whenever any row contributed a block, else absent.
+
+    Invariant: ``estimated + unknown == len(rows)``.
+    """
+    scalars: dict[str, int] = {}
+    tool_call: dict[str, int] = {}
+    estimated = unknown = 0
+    estimator: Optional[str] = None
+    for r in rows:
+        block = r.get("component_tokens")
+        if isinstance(block, bool) or not isinstance(block, dict):
+            unknown += 1
+            continue
+        if block.get("source") == "estimate":
+            estimated += 1
+        else:
+            unknown += 1
+        if estimator is None and isinstance(block.get("estimator"), str):
+            estimator = block["estimator"]
+        for field in _COMPONENT_SCALARS:
+            val = block.get(field)
+            if isinstance(val, int) and not isinstance(val, bool):
+                scalars[field] = scalars.get(field, 0) + val
+        sub = block.get("tool_call")
+        if isinstance(sub, dict):
+            for kind, val in sub.items():
+                if isinstance(kind, str) and isinstance(val, int) \
+                        and not isinstance(val, bool):
+                    tool_call[kind] = tool_call.get(kind, 0) + val
+    out: dict[str, Any] = dict(scalars)
+    if tool_call:
+        out["tool_call"] = tool_call
+    out["total"] = sum(scalars.values()) + sum(tool_call.values())
+    out["estimated"] = estimated
+    out["unknown"] = unknown
+    if estimated:
+        out["source"] = "estimate"
+    if estimator is not None:
+        out["estimator"] = estimator
+    return out
+
+
 # Metric name → (reducer, kind).  ``kind`` shapes the emitted value:
 # ``"int"`` scalar, ``"list"`` sorted-distinct-list.
 _METRICS: "dict[str, tuple[Any, str]]" = {
@@ -203,6 +275,7 @@ _METRICS: "dict[str, tuple[Any, str]]" = {
     "messages": (_metric_messages, "int"),
     "files": (_metric_files, "int"),
     "tokens": (_metric_tokens, "dict"),
+    "component_tokens": (_metric_component_tokens, "dict"),
 }
 
 
@@ -238,8 +311,8 @@ def aggregate(
             ``row -> str``.  Missing/empty values bucket under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
-            ``messages`` / ``files`` / ``tokens`` (see the module-level
-            table).  Unknown names raise :class:`ValueError`.
+            ``messages`` / ``files`` / ``tokens`` / ``component_tokens`` (see
+            the module-level table).  Unknown names raise :class:`ValueError`.
         rank_by: Group ordering.  ``"default"`` (edits desc, sessions desc,
             count desc, label asc — the ``file_frequency`` order) or
             ``"stats"`` (sessions desc, edits desc, label asc — the

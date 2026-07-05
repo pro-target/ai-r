@@ -22,10 +22,11 @@ from ai_r.events.aggregate import aggregate
 from ai_r.parsers import AgentName, Session, antigravity, claude, codex, opencode, pi
 from ai_r.session_stats import session_stats
 from ai_r.tokens import (
+    COMPONENT_FIELDS,
     TOKEN_FIELDS,
+    component_tokens,
     estimate_tokens,
     session_tokens,
-    transcript_categories,
 )
 
 
@@ -573,7 +574,7 @@ def test_mcp_session_stats_with_tokens_invalid_is_error_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
-# transcript_categories + session_tokens(breakdown=...) — Step 3
+# component_tokens — per-component estimate over the event taxonomy
 # ---------------------------------------------------------------------------
 
 
@@ -598,110 +599,227 @@ def _msg(
     )
 
 
-def test_transcript_categories_sum_invariant_chars4(_no_tiktoken: None) -> None:
+def test_component_tokens_taxonomy_chars4(_no_tiktoken: None) -> None:
+    """user→user_turn, assistant→assistant_turn, thinking→thinking, Bash→tool_call.bash."""
     messages = [
-        _msg(role="user", text="hello there"),
+        _msg(role="user", text="hello there, please run ls"),
         _msg(
-            text="an answer here",
+            role="assistant",
+            text="here is an answer",
             thinking="let me think about it",
-            tool_use=({"name": "Bash", "input": "ls -la /tmp"},),
-            tool_result=({"content": "a very long tool result body", "is_error": False},),
+            tool_use=(
+                {"name": "Bash", "input": "ls -la /tmp", "tool_use_id": "t1"},
+            ),
+            tool_result=(
+                {"content": "a tool result body", "is_error": False,
+                 "tool_use_id": "t1"},
+            ),
         ),
     ]
-    cats = transcript_categories(messages)
-    assert cats is not None
-    assert cats["source"] == "estimate"
-    assert cats["estimator"] == "chars/4"
-    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
-    assert four == cats["total"]
-    # Every category measured a non-empty surface here.
-    for k in ("text", "thinking", "tool_input", "tool_result"):
-        assert cats[k] > 0
+    block = component_tokens(messages, agent="claude")
+    assert block is not None
+    assert block["source"] == "estimate"
+    assert block["estimator"] == "chars/4"
+    assert block["user_turn"] > 0
+    assert block["assistant_turn"] > 0
+    assert block["thinking"] > 0
+    # No plan surface here → plan measured 0 (honest, present).
+    assert block["plan"] == 0
+    assert set(block["tool_call"]) == {"bash"}
+    assert block["tool_call"]["bash"] > 0
 
 
-def test_estimate_session_total_equals_categories_total(
+def test_component_tokens_plan_not_tool_call(_no_tiktoken: None) -> None:
+    """An ExitPlanMode call → plan, NOT tool_call; its result also → plan (g)."""
+    messages = [
+        _msg(
+            role="assistant",
+            tool_use=(
+                {"name": "ExitPlanMode",
+                 "input": {"plan": "# Title\n\nstep one\nstep two"},
+                 "tool_use_id": "p1"},
+            ),
+            tool_result=(
+                {"content": "plan approved by the user", "is_error": False,
+                 "tool_use_id": "p1"},
+            ),
+        ),
+    ]
+    block = component_tokens(messages, agent="claude")
+    assert block is not None
+    assert block["plan"] > 0
+    # No non-plan tool call → the tool_call sub-dict is empty.
+    assert block["tool_call"] == {}
+
+
+def test_component_tokens_total_is_sum(_no_tiktoken: None) -> None:
+    messages = [
+        _msg(role="user", text="a request from the user side here"),
+        _msg(
+            role="assistant",
+            text="an assistant answer",
+            thinking="reasoning trace",
+            tool_use=(
+                {"name": "Read", "input": "/etc/hosts", "tool_use_id": "r1"},
+                {"name": "Bash", "input": "echo hi", "tool_use_id": "b1"},
+            ),
+        ),
+    ]
+    block = component_tokens(messages, agent="claude")
+    assert block is not None
+    scalar_sum = sum(block[f] for f in COMPONENT_FIELDS)
+    tool_sum = sum(block["tool_call"].values())
+    assert block["total"] == scalar_sum + tool_sum
+    # Two distinct kinds present.
+    assert set(block["tool_call"]) == {"read", "bash"}
+
+
+def test_component_tokens_one_estimator_tiktoken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With tiktoken injected every component shares the tiktoken label."""
+    fake = types.ModuleType("tiktoken")
+    fake.get_encoding = lambda name: types.SimpleNamespace(  # type: ignore[attr-defined]
+        encode=lambda s, disallowed_special=(): list(range(len(s)))
+    )
+    monkeypatch.setitem(sys.modules, "tiktoken", fake)
+    monkeypatch.setattr(
+        tokens_mod, "_ENCODER_STATE", {"loaded": False, "encoder": None}
+    )
+    messages = [
+        _msg(role="user", text="hello"),
+        _msg(role="assistant", text="world",
+             tool_use=({"name": "Bash", "input": "ls"},)),
+    ]
+    block = component_tokens(messages, agent="claude")
+    assert block is not None
+    assert block["estimator"] == "tiktoken"
+
+
+def test_component_tokens_all_empty_is_none(_no_tiktoken: None) -> None:
+    assert component_tokens([], agent="claude") is None
+    assert component_tokens([_msg(role="user", text="")], agent="claude") is None
+
+
+def test_component_tokens_orphan_result_is_other(_no_tiktoken: None) -> None:
+    """A tool_result with no matching tool_use_id → tool_call.other."""
+    messages = [
+        _msg(
+            role="assistant",
+            tool_result=(
+                {"content": "orphan result text with no matching call",
+                 "is_error": False, "tool_use_id": "no-such-id"},
+            ),
+        ),
+    ]
+    block = component_tokens(messages, agent="claude")
+    assert block is not None
+    assert "other" in block["tool_call"]
+    assert block["tool_call"]["other"] > 0
+
+
+def test_component_tokens_opencode_reasoning_is_thinking(_no_tiktoken: None) -> None:
+    """OpenCode reasoning lands on Message.thinking → counted under thinking."""
+    messages = [
+        _msg(role="assistant", thinking="opencode reasoning part text"),
+    ]
+    block = component_tokens(messages, agent="opencode")
+    assert block is not None
+    assert block["thinking"] > 0
+    assert block["assistant_turn"] == 0
+
+
+def test_component_tokens_accepts_agent_enum(_no_tiktoken: None) -> None:
+    """Passing the AgentName enum still detects plans (agent normalized)."""
+    messages = [
+        _msg(
+            role="assistant",
+            tool_use=(
+                {"name": "ExitPlanMode", "input": {"plan": "# P\n\nstep"},
+                 "tool_use_id": "p1"},
+            ),
+        ),
+    ]
+    block = component_tokens(messages, agent=AgentName.CLAUDE)
+    assert block is not None
+    assert block["plan"] > 0
+    assert block["tool_call"] == {}
+
+
+def test_estimate_session_total_equals_component_total(
     fake_codex_session: Path, _no_tiktoken: None
 ) -> None:
-    """On an estimate-tier session: session total == categories total == sum(4)."""
+    """On an estimate-tier session: session_tokens total == component_tokens total."""
     session = codex.read_session("test-codex-1")
     parser_msgs = codex.read_messages("test-codex-1")
 
-    block = session_tokens(session, breakdown=True, messages=parser_msgs)
+    block = session_tokens(session, messages=parser_msgs)
     assert block["source"] == "estimate"
-    cats = block["categories"]
-    assert cats is not None
-    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
-    assert four == cats["total"]
-    assert block["total"] == cats["total"]
+    assert "categories" not in block
+    # Flat block carries only TOKEN_FIELDS + source + estimator.
+    assert set(block) == set(TOKEN_FIELDS) | {"source", "estimator"}
 
-    # And the plain (no-breakdown) estimate total matches too — single defn.
-    plain = session_tokens(session, messages=parser_msgs)
-    assert plain["source"] == "estimate"
-    assert plain["total"] == cats["total"]
+    comp = component_tokens(parser_msgs, agent=session.agent)
+    assert comp is not None
+    assert block["total"] == comp["total"]
 
 
-def test_breakdown_on_exact_session_keeps_tiers_separate(
+def test_session_tokens_exact_shape_byte_identical(
     claude_token_session: str, _no_tiktoken: None
 ) -> None:
+    """The exact-tier flat block has no categories/breakdown key."""
     session = claude.read_session(claude_token_session)
-    block = session_tokens(session, breakdown=True)
-    # Outer numbers stay exact (SSOT session totals).
+    block = session_tokens(session)
     assert block["source"] == "exact"
     assert block["total"] == 195
-    assert "estimator" not in block  # exact tier carries no estimator
-    # categories is an independent estimate — labeled, never merged.
-    cats = block["categories"]
-    assert cats is not None
-    assert cats["source"] == "estimate"
-    assert cats["estimator"] == "chars/4"
-    # The estimate total is the text volume, NOT the exact 195.
-    assert cats["total"] != block["total"]
-    four = cats["text"] + cats["thinking"] + cats["tool_input"] + cats["tool_result"]
-    assert four == cats["total"]
-
-
-def test_breakdown_empty_session_categories_none(_no_tiktoken: None) -> None:
-    assert transcript_categories([]) is None
-    # A message list with only empty surfaces also measures to None.
-    assert transcript_categories([_msg(role="user", text="")]) is None
-
-
-def test_breakdown_false_shape_byte_identical(
-    claude_token_session: str, _no_tiktoken: None
-) -> None:
-    session = claude.read_session(claude_token_session)
-    plain = session_tokens(session)
-    assert "categories" not in plain
+    assert "categories" not in block
     # Same keys as the historical exact block: TOKEN_FIELDS + source.
-    assert set(plain) == set(TOKEN_FIELDS) | {"source"}
+    assert set(block) == set(TOKEN_FIELDS) | {"source"}
 
 
-def test_thinking_only_fixture_nonzero_thinking(_no_tiktoken: None) -> None:
-    messages = [_msg(thinking="pure reasoning with no visible text at all")]
-    cats = transcript_categories(messages)
-    assert cats is not None
-    assert cats["thinking"] > 0
-    assert cats["text"] == 0
-    assert cats["tool_input"] == 0
-    assert cats["tool_result"] == 0
-    assert cats["total"] == cats["thinking"]
-
-
-def test_aggregate_tolerates_extra_categories_key() -> None:
-    """The aggregate ``tokens`` fold ignores an extra ``categories`` key."""
+def test_aggregate_component_tokens_fold(_no_tiktoken: None) -> None:
+    """Fold component_tokens over 2 rows: summed scalars + tool union + provenance."""
     rows = [
-        {"agent": "claude", "tokens": {
-            "input": 100, "output": 50, "reasoning": None,
-            "cache_read": 10, "cache_write": 5, "total": 165,
-            "source": "exact",
-            "categories": {"text": 1, "thinking": 2, "tool_input": 3,
-                           "tool_result": 4, "total": 10,
-                           "source": "estimate", "estimator": "chars/4"},
+        {"agent": "claude", "component_tokens": {
+            "user_turn": 10, "assistant_turn": 20, "thinking": 5, "plan": 0,
+            "tool_call": {"bash": 7, "read": 3},
+            "total": 45, "source": "estimate", "estimator": "chars/4",
+        }},
+        {"agent": "claude", "component_tokens": {
+            "user_turn": 4, "assistant_turn": 6,
+            # no thinking / no plan keys on this row → None-not-0 honesty
+            "tool_call": {"bash": 1, "edit": 9},
+            "total": 21, "source": "estimate", "estimator": "chars/4",
         }},
     ]
-    result = aggregate(rows, group_by="agent", metrics=["tokens"])
-    block = result["groups"][0]["tokens"]
-    # The fold sums the flat sub-fields and ignores ``categories`` entirely.
-    assert block["total"] == 165
-    assert block["input"] == 100
-    assert (block["exact"], block["estimated"], block["unknown"]) == (1, 0, 0)
+    result = aggregate(rows, group_by="agent", metrics=["component_tokens"])
+    block = result["groups"][0]["component_tokens"]
+    assert block["user_turn"] == 14
+    assert block["assistant_turn"] == 26
+    assert block["thinking"] == 5      # only one row carried it
+    assert block["plan"] == 0          # one row had 0, summed
+    # Union of tool kinds, summed per kind.
+    assert block["tool_call"] == {"bash": 8, "read": 3, "edit": 9}
+    assert block["total"] == 14 + 26 + 5 + 0 + 8 + 3 + 9
+    assert (block["estimated"], block["unknown"]) == (2, 0)
+    assert block["source"] == "estimate"
+    assert block["estimator"] == "chars/4"
+
+
+def test_aggregate_component_tokens_none_not_fabricated() -> None:
+    """A component no row carried stays absent (never a fabricated 0)."""
+    rows = [
+        {"agent": "claude", "component_tokens": {
+            "user_turn": 3, "tool_call": {}, "total": 3,
+            "source": "estimate", "estimator": "chars/4",
+        }},
+        {"agent": "claude"},  # no block → unknown
+    ]
+    result = aggregate(rows, group_by="agent", metrics=["component_tokens"])
+    block = result["groups"][0]["component_tokens"]
+    assert block["user_turn"] == 3
+    # assistant_turn / thinking / plan absent — no row carried them.
+    assert "assistant_turn" not in block
+    assert "thinking" not in block
+    assert "plan" not in block
+    assert (block["estimated"], block["unknown"]) == (1, 1)
