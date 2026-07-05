@@ -8,30 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Token breakdown per object (F3.3 follow-up)**: `read_session` gains a
-  `with_tokens` parameter (default `false` → output byte-identical to
-  before). With `with_tokens=true` the response carries two honest,
-  never-merged tiers:
-  - a session-level `tokens` block (the existing exact-or-estimate usage)
-    now with a `categories` sub-block splitting the estimated volume across
-    four surfaces — `text` / `thinking` / `tool_input` / `tool_result` —
-    tokenized with a single estimator (`tiktoken` when
-    `pip install "ai-r[tokens]"`, else `chars/4`). The four sum to
-    `categories.total`. `categories` **always** carries its own
-    `source: "estimate"` + `estimator`, so an exact session block plus an
-    estimate breakdown never mix tiers; an empty transcript yields
-    `categories: null`.
-  - per-assistant-message **exact** `tokens` on projected entries where the
-    format records usage per message — Claude (per API call, deduplicated
-    by `(message.id, requestId)`), OpenCode (`message.data.tokens`), Pi
-    (`usage`). Codex records only a cumulative total and Antigravity records
-    none → those entries carry no `tokens` key (absent, not null — honest).
+- **Per-component token breakdown (F3.3 follow-up)** on ai-r's existing event
+  taxonomy — `ai_r.tokens.component_tokens(messages, agent=…)` splits a
+  transcript's estimated token volume across `user_turn` (question/request) /
+  `assistant_turn` (answer) / `thinking` (reasoning) / `plan` /
+  `tool_call.<tool_kind>`, reusing the same classifiers the event layer uses
+  (`resolve_tool`, the plan-signal detector, the user/assistant role) — a
+  measurement over the established components, not a second classifier.
+  Plan-authoring tool calls (`ExitPlanMode` / `Write plans/*.md` /
+  `update_plan`) count under `plan`, not `tool_call` (no double count); a
+  `tool_result` joins its call's kind by `tool_use_id`. All surfaces share
+  ONE estimator (`tiktoken` when `pip install "ai-r[tokens]"`, else
+  `chars/4`); the block is always `source: "estimate"` — never mixed with the
+  exact recorded-usage tier.
+  - `read_session(with_tokens=true)` attaches `summary.component_tokens` (the
+    breakdown) alongside the flat `summary.tokens` usage block, plus
+    per-assistant-message **exact** `tokens` where the format records usage
+    per message — Claude (per API call, deduplicated by
+    `(message.id, requestId)`), OpenCode (`message.data.tokens`), Pi
+    (`usage`); Codex (cumulative-only), Antigravity and user turns carry no
+    per-message `tokens` key (absent, not null). Default `false` →
+    byte-identical to before.
+  - `aggregate` gains a `component_tokens` metric folding per-row blocks
+    (per-component sums + `estimated`/`unknown` provenance; a component no row
+    carried stays absent, never a fabricated `0`).
+  - `read_session(include_subagents=true)` attaches `summary.subagent_rollup`
+    — the parent session's `component_tokens` plus one per spawned subagent
+    child (`ai_r.session_stats.children_of(parent_uuid)`) and a folded total.
+    Antigravity records no `parent_uuid` → childless (honest empty list).
+  - CLI `ai-r read <uuid> --with-tokens` prints a human
+    `COMPONENT | TOKENS | SOURCE` table (`--json` emits the block); MCP stays
+    JSON.
 - **`Message.thinking` / `Message.tokens`** on the parser model. Model
   reasoning text is now captured for Claude, Codex, OpenCode and Pi (Claude,
   Codex and Pi previously dropped it) and is searchable via the body
   haystack for every agent that marks it (feature-for-all-where-signal).
-- New core: `ai_r.tokens.transcript_categories()` and
-  `session_tokens(..., breakdown=, messages=)`.
 - Test guardrail: `pyproject.toml` `[tool.pytest.ini_options] pythonpath = ["src"]`
   so `pytest` / `make test-hermetic` always resolve `ai_r` from the working
   tree, never a stale installed wheel.
@@ -42,8 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (previously inlined unmarked); `read_session` content and the events
   layer's `assistant_turn` text for OpenCode no longer interleave reasoning
   with narration — body search still matches it via the thinking haystack.
-- Estimate token totals are now the sum of the four per-category
-  tokenizations; totals may shift slightly versus the previous
+- The token estimate total is the sum of the per-component `component_tokens`
+  breakdown; totals may shift slightly versus the previous
   single-concatenation estimate (still estimator-labeled).
 
 ## [0.3.0] - 2026-07-05
