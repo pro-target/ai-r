@@ -664,6 +664,50 @@ def test_cli_read_messages_missing_session(
 
 
 # ---------------------------------------------------------------------------
+# read --with-tokens
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_with_tokens_json(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read --with-tokens --json`` embeds a ``tokens`` component block."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", uuid, "--with-tokens", "--json"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    tokens = payload["tokens"]
+    assert tokens is not None
+    assert tokens["source"] == "estimate"
+    # Component keys present + a tool_call sub-dict.
+    for key in ("user_turn", "assistant_turn", "thinking", "plan", "tool_call"):
+        assert key in tokens
+    assert isinstance(tokens["tool_call"], dict)
+
+
+def test_cli_read_with_tokens_human(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read --with-tokens`` (human) prints the COMPONENT/TOKENS/SOURCE table."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", uuid, "--with-tokens"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "COMPONENT" in out
+    assert "TOKENS" in out
+    assert "SOURCE" in out
+    # The table always ends with a ``total`` row.
+    assert "total" in out
+
+
+# ---------------------------------------------------------------------------
 # search — new scope/operator flags (delegated to mcp_server.search_sessions)
 # ---------------------------------------------------------------------------
 
