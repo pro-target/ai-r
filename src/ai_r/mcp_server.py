@@ -68,6 +68,7 @@ from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
+from ai_r.tokens import session_tokens  # noqa: E402
 from ai_r.parsers import ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
@@ -405,6 +406,66 @@ def _project_message_content(m: Any) -> str:
     return "\n".join(chunks)
 
 
+def _message_token_blocks(
+    messages: Sequence[Any],
+    hard_cap: int = 0,
+) -> List[Optional[dict[str, Any]]]:
+    """Per-surfaced-message exact token blocks, aligned with ``_project_messages``.
+
+    Walks the messages applying the *exact same* surface-drop logic as
+    :func:`_project_messages` (drop non-user/assistant records without qa,
+    then drop empty-content records) and returns one entry per SURFACED
+    message — so the result lines up positionally with
+    ``_project_messages(messages, hard_cap)``.  Each entry is the message's
+    exact ``tokens`` block (F3.3) to attach, or ``None`` when the record
+    carries no per-message usage (Codex / Antigravity / user turns).
+
+    Claude dedup: a streamed API call writes several JSONL records sharing
+    one ``(message.id, requestId)`` — every one carries an identical
+    ``tokens`` block tagged with an internal ``_call`` key.  The block is
+    emitted only on the FIRST surviving (surfaced) record per ``_call``;
+    later records of the same call get ``None``.  The internal ``_call``
+    key is stripped from the emitted block so it never leaks to the client.
+    OpenCode / Pi carry no ``_call`` key → each assistant block is attached
+    directly.
+
+    CRITICAL: this walk is over the FULL message list (the caller runs it
+    BEFORE the ``[offset:offset+limit]`` page slice), so which record is
+    "first" for a ``_call`` is decided on absolute positions and never
+    shifts with the page window.
+    """
+    out: List[Optional[dict[str, Any]]] = []
+    seen_calls: set[str] = set()
+    for m in messages:
+        qa = getattr(m, "qa", ()) or ()
+        if m.role not in ("user", "assistant") and not qa:
+            continue
+        content = _project_message_content(m)
+        if not content:
+            continue
+        block = getattr(m, "tokens", None)
+        emit: Optional[dict[str, Any]] = None
+        if isinstance(block, dict):
+            call = block.get("_call")
+            if isinstance(call, str):
+                # Claude streamed-call dedup on absolute position.
+                if call not in seen_calls:
+                    seen_calls.add(call)
+                    emit = {k: v for k, v in block.items() if k != "_call"}
+            else:
+                # OpenCode / Pi: no dedup key, attach directly.
+                emit = dict(block)
+        if emit is not None:
+            # A per-message block is always the format's own recorded usage
+            # → tag it ``source="exact"`` so the tier reads the same as the
+            # session block (and never mixes with the estimate categories).
+            emit["source"] = "exact"
+        out.append(emit)
+        if hard_cap and hard_cap > 0 and len(out) >= hard_cap:
+            break
+    return out
+
+
 def _project_messages(
     messages: Sequence[Any],
     hard_cap: int = 0,
@@ -739,6 +800,7 @@ def read_session(
     offset: int = 0,
     limit: int = _MESSAGES_CAP,
     redact: bool = True,
+    with_tokens: bool = False,
 ) -> dict[str, Any]:
     """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
@@ -760,6 +822,26 @@ def read_session(
             ``[REDACTED_<TYPE>]`` and the response carries a
             ``redactions`` type→count dict when any replacement happened
             (see ``ai_r.redact``); ``False`` returns the raw content.
+        with_tokens: When ``True`` (F3.3) attach token usage read at
+            request time (nothing runs in the background):
+
+            * ``summary["tokens"]`` — the session's
+              :func:`ai_r.tokens.session_tokens` block *with* a
+              ``categories`` breakdown (exact outer numbers where the agent
+              records usage, an independent estimate sub-block always
+              labeled ``source="estimate"`` — tiers never merged);
+            * per-message ``tokens`` on projected entries that carry exact
+              usage — Claude (deduplicated per streamed API call), OpenCode
+              and Pi.  Codex / Antigravity / user turns carry **no**
+              ``tokens`` key at all (absent, not ``null``).  The dedup/attach
+              is decided on absolute message positions BEFORE pagination, so
+              page boundaries never shift which record is "first" for a call.
+
+            Default ``False``: output is byte-identical to the historical
+            shape (no ``tokens`` key on the summary or any message).  The
+            token blocks carry only integers and ai-r-authored labels
+            (never raw session text), so they stay outside the F2.1
+            redaction pass by construction.
 
     Returns:
         A dict with session metadata plus:
@@ -797,6 +879,9 @@ def read_session(
         return {"error": "invalid_argument", "message": "offset must be >= 0"}
     if not isinstance(limit, int) or isinstance(limit, bool):
         return {"error": "invalid_argument", "message": "limit must be an integer"}
+    if not isinstance(with_tokens, bool):
+        return {"error": "invalid_argument",
+                "message": f"with_tokens must be a bool, got {with_tokens!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -862,6 +947,23 @@ def read_session(
     if messages_truncated:
         projected = projected[:_MESSAGES_HARD_CAP]
     total = len(projected)
+    # Per-message exact token blocks (F3.3, only when requested).  Built
+    # over the FULL projected list with the SAME hard cap so it aligns 1:1
+    # with ``projected`` — the Claude ``_call`` dedup is thus decided on
+    # absolute positions, BEFORE the page slice below.
+    token_blocks: List[Optional[dict[str, Any]]] = []
+    if with_tokens:
+        token_blocks = _message_token_blocks(
+            raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1
+        )
+        if messages_truncated:
+            token_blocks = token_blocks[:_MESSAGES_HARD_CAP]
+        # Attach on absolute positions before pagination so a call's block
+        # is not re-emitted on a later page when its first record was
+        # already surfaced (and consumed) on an earlier one.
+        for entry, block in zip(projected, token_blocks):
+            if block is not None:
+                entry["tokens"] = block
     if offset > 0:
         projected = projected[offset:]
     if limit and limit > 0:
@@ -879,6 +981,15 @@ def read_session(
     # dictionary marker labels (never raw session text), so it stays
     # outside the redaction pass by construction (SSOT ai_r.outcome).
     summary["outcome"] = _session_outcome(raw_messages, session.agent)
+    # Session token usage (F3.3, only when requested): exact where the agent
+    # records it (with an independent estimate ``categories`` breakdown) —
+    # reuses the already-parsed ``raw_messages`` so the transcript is not
+    # parsed a second time for the categories.  Integers + ai-r labels only,
+    # so it is outside the redaction pass by construction.
+    if with_tokens:
+        summary["tokens"] = session_tokens(
+            session, breakdown=True, messages=raw_messages
+        )
     # Emission-time redaction (F2.1): after pagination so only the emitted
     # page pays; the raw transcript on disk is never touched.
     if redact:
@@ -2004,12 +2115,18 @@ def _build_haystack(
     messages: Sequence[Any],
     max_chars: int = _HAYSTACK_CHARS_CAP,
 ) -> str:
-    """Concatenate message text + tool_use inputs + tool_result contents.
+    """Concatenate message text + thinking + tool_use inputs + tool_result contents.
 
     Lowercased once on return. Includes content that lives in tool calls
     and tool results, not just plain text — this is what makes the
     full-text search actually useful for finding references buried in
     Bash/file/etc. invocations.
+
+    ``m.thinking`` (model reasoning) is folded in too so body/search
+    matches reasoning for ALL agents (feature-for-all-where-signal).  This
+    also preserves OpenCode's searchability after its reasoning was moved
+    out of ``text`` into ``thinking``, and newly surfaces Claude / Codex /
+    Pi reasoning that was previously discarded.
     """
     chunks: List[str] = []
     total_chars = 0
@@ -2018,6 +2135,10 @@ def _build_haystack(
         if isinstance(text, str) and text:
             chunks.append(text)
             total_chars += len(text)
+        thinking = getattr(m, "thinking", "")
+        if isinstance(thinking, str) and thinking:
+            chunks.append(thinking)
+            total_chars += len(thinking)
         for tool in getattr(m, "tool_use", ()) or ():
             if isinstance(tool, dict):
                 inp = tool.get("input", "")

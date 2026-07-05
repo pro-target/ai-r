@@ -6,6 +6,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Token breakdown per object (F3.3 follow-up)**: `read_session` gains a
+  `with_tokens` parameter (default `false` → output byte-identical to
+  before). With `with_tokens=true` the response carries two honest,
+  never-merged tiers:
+  - a session-level `tokens` block (the existing exact-or-estimate usage)
+    now with a `categories` sub-block splitting the estimated volume across
+    four surfaces — `text` / `thinking` / `tool_input` / `tool_result` —
+    tokenized with a single estimator (`tiktoken` when
+    `pip install "ai-r[tokens]"`, else `chars/4`). The four sum to
+    `categories.total`. `categories` **always** carries its own
+    `source: "estimate"` + `estimator`, so an exact session block plus an
+    estimate breakdown never mix tiers; an empty transcript yields
+    `categories: null`.
+  - per-assistant-message **exact** `tokens` on projected entries where the
+    format records usage per message — Claude (per API call, deduplicated
+    by `(message.id, requestId)`), OpenCode (`message.data.tokens`), Pi
+    (`usage`). Codex records only a cumulative total and Antigravity records
+    none → those entries carry no `tokens` key (absent, not null — honest).
+- **`Message.thinking` / `Message.tokens`** on the parser model. Model
+  reasoning text is now captured for Claude, Codex, OpenCode and Pi (Claude,
+  Codex and Pi previously dropped it) and is searchable via the body
+  haystack for every agent that marks it (feature-for-all-where-signal).
+- New core: `ai_r.tokens.transcript_categories()` and
+  `session_tokens(..., breakdown=, messages=)`.
+- Test guardrail: `pyproject.toml` `[tool.pytest.ini_options] pythonpath = ["src"]`
+  so `pytest` / `make test-hermetic` always resolve `ai_r` from the working
+  tree, never a stale installed wheel.
+
+### Changed
+
+- OpenCode reasoning parts moved from `Message.text` into `Message.thinking`
+  (previously inlined unmarked); `read_session` content and the events
+  layer's `assistant_turn` text for OpenCode no longer interleave reasoning
+  with narration — body search still matches it via the thinking haystack.
+- Estimate token totals are now the sum of the four per-category
+  tokenizations; totals may shift slightly versus the previous
+  single-concatenation estimate (still estimator-labeled).
+
 ## [0.3.0] - 2026-07-05
 
 ### Added
