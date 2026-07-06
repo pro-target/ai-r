@@ -102,9 +102,16 @@ def iter_jsonl_records(
                         over_long = False
                         continue
                     yield from _parse_jsonl_line_str(raw, max_line_bytes)
-                # Guard the still-incomplete fragment: if it alone already
-                # blew the cap, mark it so we drop the rest of the line.
-                if not over_long and len(pending) > max_line_bytes:
+                # Bound the still-incomplete fragment. In ``over_long`` state we
+                # are discarding everything up to the next newline, so the tail
+                # accumulated so far can be dropped now — otherwise a
+                # newline-free (or long-tailed) file would let ``pending``
+                # regrow chunk-by-chunk all the way to ``max_total_bytes``
+                # (~1 GiB), defeating the per-line cap. Otherwise, if the
+                # fragment alone already blew the cap, start dropping its line.
+                if over_long:
+                    pending = ""
+                elif len(pending) > max_line_bytes:
                     over_long = True
                     pending = ""
             # Flush any final line without a trailing newline.
