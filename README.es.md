@@ -171,6 +171,14 @@ configuraciones MCP para **Claude**, **Codex**, **OpenCode**, **Antigravity**
 (donde existen las configuraciones), instala el skill de CLI de **Pi**, y ejecuta
 smoke tests.
 
+**Extra opcional — `tokens`:** `AI_R_EXTRAS=tokens bash install.sh` (o
+`pip install "ai-r[tokens]"`) añade [tiktoken](https://github.com/openai/tiktoken)
+para mejores **estimaciones** de tokens en sesiones cuyo formato no almacena
+cifras de uso exactas. Totalmente opcional: sin él, las cifras exactas siguen
+saliendo directamente de los archivos de sesión donde están registradas, y la
+estimación de reserva degrada a una heurística aproximada de `chars/4`,
+etiquetada honestamente como `estimate` — nunca una caída.
+
 **Extra opcional — `semantic`** (`AI_R_EXTRAS=semantic bash install.sh`
 o `pip install "ai-r[semantic]"` + una descarga única del modelo, que el
 instalador hace por sí solo): habilita `sort="semantic"` en la búsqueda de texto

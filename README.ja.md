@@ -169,6 +169,8 @@ cd ~/dev/ai-r && bash install.sh
 存在する場所で）パッチし、**Pi** の CLI スキルをインストールし、スモーク
 テストを実行します。
 
+**オプションのエクストラ — `tokens`**: `AI_R_EXTRAS=tokens bash install.sh`（または `pip install "ai-r[tokens]"`）は [tiktoken](https://github.com/openai/tiktoken) を追加し、正確な使用量の数値をフォーマット上保存していないセッションで、より良いトークンの**見積もり**を得られるようにします。完全に任意です: これがなくても、記録されているセッションファイルからは正確な数値がそのまま得られ、フォールバックの見積もりは大まかな `chars/4` ヒューリスティックに劣化しますが、正直に `estimate` とラベル付けされます — 決してクラッシュしません。
+
 **オプションのエクストラ — `semantic`**（`AI_R_EXTRAS=semantic bash install.sh`
 または `pip install "ai-r[semantic]"` ＋ 一度きりのモデルダウンロード。これは
 インストーラが自動で行います）: テキスト検索（`query`、`search_sessions`）で

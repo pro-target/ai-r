@@ -147,6 +147,12 @@ cd ~/dev/ai-r && bash install.sh
 **Antigravity** 修补 MCP 配置（在配置存在的地方），安装 **Pi** CLI 技能，
 并运行冒烟测试。
 
+**可选扩展 —— `tokens`**：`AI_R_EXTRAS=tokens bash install.sh`（或
+`pip install "ai-r[tokens]"`）会加入 [tiktoken](https://github.com/openai/tiktoken)，
+让那些格式里不存精确用量数字的会话得到更准的 token **估算**。完全可选：没有它，
+凡是会话文件里记录了精确数字的地方仍会照原样直接给出；回退时估算会降级为粗略的
+`chars/4` 启发式，并如实标注为 `estimate`——绝不崩溃。
+
 **可选扩展 —— `semantic`**（`AI_R_EXTRAS=semantic bash install.sh` 或
 `pip install "ai-r[semantic]"` + 一次性的模型下载，安装器会自行完成）：为文本
 搜索（`query`、`search_sessions`）启用 `sort="semantic"` —— BM25 给出的前 50 个
