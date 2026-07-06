@@ -9,6 +9,8 @@ socket-activation.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ai_r.serve import (
@@ -143,3 +145,35 @@ def test_listen_fds_zero_returns_none() -> None:
 def test_default_port_is_documented_value() -> None:
     """Guard the documented default so docs/config stay in sync."""
     assert DEFAULT_PORT == 8756
+
+
+# --- systemd unit hardening claims -----------------------------------------
+
+_UNIT = (
+    Path(__file__).resolve().parents[1]
+    / "packaging" / "systemd" / "ai-r-mcp.service"
+)
+
+
+def test_systemd_unit_readonly_claim_is_honest() -> None:
+    """The unit must not claim a $HOME write it cannot deliver (NIT 4).
+
+    ``ProtectSystem=strict`` makes the whole filesystem — including $HOME —
+    read-only.  The old comment claimed "writes (semantic model cache under
+    ~/.cache) still work", which is FALSE under strict without an explicit
+    ``ReadWritePaths=``/``CacheDirectory=``.  The server is read-only at
+    runtime (the semantic cache is populated by install.sh, only read here),
+    so the invariant is: EITHER strict + no false write claim + no
+    write-grant directive, OR (if some runtime write is ever added) an
+    explicit grant must accompany it.
+    """
+    text = _UNIT.read_text(encoding="utf-8")
+    assert "ProtectSystem=strict" in text
+    # The specific false claim must be gone.
+    assert "still work" not in text
+    grants_write = ("ReadWritePaths=" in text) or ("CacheDirectory=" in text)
+    # No write grant present -> the unit must not promise any write survives.
+    if not grants_write:
+        lowered = text.lower()
+        assert "writes" not in lowered or "does not write" in lowered \
+            or "no readwritepaths" in lowered
