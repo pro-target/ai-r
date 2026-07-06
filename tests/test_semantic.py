@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -26,8 +27,11 @@ from ai_r import semantic
 from ai_r.mcp_server import query as mcp_query, search_sessions
 from ai_r.semantic import (
     _Embedder,
+    _is_idle,
     _mean_pool_normalize,
     _minmax,
+    _thread_cap,
+    release_if_idle,
     semantic_order,
     semantic_status,
 )
@@ -41,6 +45,8 @@ from ai_r.semantic import (
 @pytest.fixture(autouse=True)
 def _fresh_semantic_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("AI_R_SEMANTIC_MODEL_DIR", raising=False)
+    monkeypatch.delenv("AI_R_SEMANTIC_THREADS", raising=False)
+    monkeypatch.delenv("AI_R_SEMANTIC_IDLE_SEC", raising=False)
     semantic._reset_state()
     yield
     semantic._reset_state()
@@ -209,16 +215,36 @@ def test_status_reports_missing_dependencies(
 
 def _fake_runtime_modules(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Plant importable fake onnxruntime/tokenizers/numpy in sys.modules."""
+) -> types.ModuleType:
+    """Plant importable fake onnxruntime/tokenizers/numpy in sys.modules.
+
+    Returns the fake ``onnxruntime`` module so a test can inspect the
+    ``InferenceSession.last_options`` spy after loading.
+    """
 
     class _FakeInput:
         def __init__(self, name: str) -> None:
             self.name = name
 
+    class _FakeSessionOptions:
+        def __init__(self) -> None:
+            self.intra_op_num_threads = 0
+            self.inter_op_num_threads = 0
+
     class _FakeSession:
-        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+        # Records the SessionOptions of the LAST construction so a test can
+        # assert the thread cap actually reached onnxruntime.
+        last_options: object | None = None
+
+        def __init__(
+            self,
+            path: str,
+            sess_options: object | None = None,
+            providers: list[str] | None = None,
+        ) -> None:
             self.path = path
+            self.sess_options = sess_options
+            type(self).last_options = sess_options
 
         def get_inputs(self) -> list[_FakeInput]:
             return [
@@ -250,6 +276,7 @@ def _fake_runtime_modules(
 
     fake_ort = types.ModuleType("onnxruntime")
     fake_ort.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_ort.SessionOptions = _FakeSessionOptions  # type: ignore[attr-defined]
 
     fake_tok = types.ModuleType("tokenizers")
 
@@ -267,6 +294,7 @@ def _fake_runtime_modules(
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
     monkeypatch.setitem(sys.modules, "tokenizers", fake_tok)
     monkeypatch.setitem(sys.modules, "numpy", fake_np)
+    return fake_ort
 
 
 def test_status_reports_missing_model_files(
@@ -482,6 +510,177 @@ def test_default_sorts_never_touch_semantic(
     r3 = mcp_query(text="crash", sort="relevance", agent="claude")
     for r in (r1, r2, r3):
         assert "semantic" not in r
+
+
+# ---------------------------------------------------------------------------
+# Resource limits: CPU-thread cap + idle release (long-lived MCP process)
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_model(tmp_path: Path) -> Path:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "model_qint8_avx512_vnni.onnx").write_bytes(b"onnx")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    return model_dir
+
+
+def test_thread_cap_reaches_session_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The cap must actually land in the SessionOptions handed to onnxruntime,
+    # not just be computed and dropped.
+    fake_ort = _fake_runtime_modules(monkeypatch)
+    monkeypatch.setattr(semantic.os, "cpu_count", lambda: 32)
+    monkeypatch.setenv("AI_R_SEMANTIC_THREADS", "3")
+    monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
+
+    assert semantic_status()["available"] is True
+    opts = fake_ort.InferenceSession.last_options
+    assert opts is not None
+    assert opts.intra_op_num_threads == 3
+    assert opts.inter_op_num_threads == 3
+
+
+def test_thread_cap_env_override_default_and_bad_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(semantic.os, "cpu_count", lambda: 16)
+    # Default when the env is unset.
+    monkeypatch.delenv("AI_R_SEMANTIC_THREADS", raising=False)
+    assert _thread_cap() == semantic._DEFAULT_THREADS
+    # Explicit override wins.
+    monkeypatch.setenv("AI_R_SEMANTIC_THREADS", "6")
+    assert _thread_cap() == 6
+    # Blank / garbage / non-positive → default (never a crash).
+    for bad in ("", "   ", "nope", "0", "-4", "3.5"):
+        monkeypatch.setenv("AI_R_SEMANTIC_THREADS", bad)
+        assert _thread_cap() == semantic._DEFAULT_THREADS
+
+
+def test_thread_cap_never_exceeds_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Asking for more threads than cores clamps to the core count; a 1-core
+    # box still gets at least 1.
+    monkeypatch.setattr(semantic.os, "cpu_count", lambda: 2)
+    monkeypatch.setenv("AI_R_SEMANTIC_THREADS", "99")
+    assert _thread_cap() == 2
+    monkeypatch.setattr(semantic.os, "cpu_count", lambda: None)  # unknown
+    assert _thread_cap() == 1
+
+
+def test_idle_predicate_is_pure_and_time_injected() -> None:
+    # Not idle: used 10s ago, threshold 300s.
+    assert _is_idle(now=1010.0, last_used=1000.0, idle_sec=300.0) is False
+    # Idle: exactly at and past the threshold.
+    assert _is_idle(now=1300.0, last_used=1000.0, idle_sec=300.0) is True
+    assert _is_idle(now=1301.0, last_used=1000.0, idle_sec=300.0) is True
+    # Nothing loaded → never idle (nothing to release).
+    assert _is_idle(now=9999.0, last_used=None, idle_sec=1.0) is False
+
+
+def test_idle_env_override_and_bad_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AI_R_SEMANTIC_IDLE_SEC", raising=False)
+    assert semantic._idle_seconds() == semantic._DEFAULT_IDLE_SEC
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "42")
+    assert semantic._idle_seconds() == 42.0
+    for bad in ("", "  ", "soon", "0", "-1"):
+        monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", bad)
+        assert semantic._idle_seconds() == semantic._DEFAULT_IDLE_SEC
+
+
+def test_release_if_idle_keeps_busy_embedder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
+    _install_fake_embedder()
+    semantic._STATE["last_used"] = 1000.0
+    # Only 10s elapsed → busy → not released.
+    assert release_if_idle(now=1010.0) is False
+    assert semantic._STATE["embedder"] is not None
+    assert semantic._STATE["probed"] is True
+
+
+def test_release_if_idle_frees_idle_embedder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
+    _install_fake_embedder()
+    semantic._STATE["last_used"] = 1000.0
+    # 400s elapsed → idle → released back to the un-probed state.
+    assert release_if_idle(now=1400.0) is True
+    assert semantic._STATE["embedder"] is None
+    assert semantic._STATE["probed"] is False
+    assert semantic._STATE["last_used"] is None
+
+
+def test_release_if_idle_noop_when_nothing_loaded() -> None:
+    # An un-probed (or cached-unavailable) state has nothing to free.
+    assert release_if_idle(now=1e9) is False
+    _force_unavailable()
+    assert release_if_idle(now=1e9) is False
+    assert semantic._STATE["probed"] is True  # cached "missing" left intact
+
+
+def test_reload_after_idle_release_through_fake_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After an idle release the next request re-probes and re-loads cleanly."""
+    fake_ort = _fake_runtime_modules(monkeypatch)
+    monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
+
+    # First load.
+    assert semantic_status()["available"] is True
+    first = semantic._STATE["embedder"]
+    assert isinstance(first, _Embedder)
+
+    # Simulate a long quiet stretch, then release.
+    semantic._STATE["last_used"] = 1000.0
+    assert release_if_idle(now=1400.0) is True
+    assert semantic._STATE["embedder"] is None
+
+    # Next access re-probes and rebuilds a fresh embedder — no crash.
+    status = semantic_status()
+    assert status == {"available": True, "model": semantic.MODEL_NAME}
+    second = semantic._STATE["embedder"]
+    assert isinstance(second, _Embedder)
+    assert second is not first
+    assert semantic._STATE["last_used"] is not None
+
+
+def test_get_embedder_releases_idle_on_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale embedder is dropped and rebuilt on the next _get_embedder call."""
+    _fake_runtime_modules(monkeypatch)
+    monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
+
+    embedder, _ = semantic._get_embedder()
+    first = embedder
+    assert first is not None
+
+    # Backdate last_used past the threshold; monotonic() > this so it's idle.
+    semantic._STATE["last_used"] = time.monotonic() - 1000.0
+    embedder2, reason2 = semantic._get_embedder()
+    assert reason2 is None
+    assert embedder2 is not None
+    assert embedder2 is not first  # rebuilt, not the stale handle
+
+
+def test_idle_release_preserves_honest_degradation() -> None:
+    # Honest degradation is untouched by the resource machinery: no deps /
+    # no model → (None, reason), never a crash, and release is a safe no-op.
+    _force_unavailable()
+    order, info = semantic_order("crash", ["a", "b"], [1.0, 2.0])
+    assert order is None
+    assert info["active"] is False
+    assert info["fallback"] == "bm25"
+    assert release_if_idle() is False  # nothing loaded to free
 
 
 # ---------------------------------------------------------------------------

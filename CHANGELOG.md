@@ -56,6 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The token estimate total is the sum of the per-component `component_tokens`
   breakdown; totals may shift slightly versus the previous
   single-concatenation estimate (still estimator-labeled).
+- Semantic re-ranker (`sort="semantic"`) is now resource-bounded for the
+  long-lived MCP process: `onnxruntime` inference threads are capped via
+  `AI_R_SEMANTIC_THREADS` (default `2`, never above the CPU core count) and the
+  loaded ~118 MB model is released after `AI_R_SEMANTIC_IDLE_SEC` idle seconds
+  (default `300`), transparently re-loaded on the next request. Blank / invalid
+  env values fall back to the default — never a crash; the honest BM25
+  degradation path is unchanged.
 
 ## [0.3.0] - 2026-07-05
 

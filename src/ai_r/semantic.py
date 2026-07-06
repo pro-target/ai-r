@@ -53,6 +53,7 @@ No persistent index: texts are embedded at request time, nothing is stored.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -62,6 +63,7 @@ __all__ = [
     "PASSAGE_PREFIX",
     "QUERY_PREFIX",
     "SEMANTIC_WEIGHT",
+    "release_if_idle",
     "semantic_order",
     "semantic_status",
 ]
@@ -101,14 +103,127 @@ _INSTALL_HINT = (
     "which also downloads the model)"
 )
 
+# --- Resource limits, for the long-lived MCP process -----------------------
+#
+# The model is ~118 MB of RAM once loaded and onnxruntime, left alone, grabs
+# every CPU core it can find.  In a background MCP server that co-exists with
+# the user's real work neither is acceptable, so two knobs (both env-tunable,
+# both with modest defaults, both degrading — never crashing — on bad input):
+#
+# * thread cap — how many CPU threads onnxruntime may use per inference;
+# * idle release — free the loaded model after this many seconds without use.
+
+# Env var overriding the onnxruntime CPU thread cap.
+_THREADS_ENV = "AI_R_SEMANTIC_THREADS"
+# Default thread cap.  Deliberately modest (2, not "all cores"): semantic
+# re-ranking is an occasional, interactive request inside a background server,
+# not a throughput job — a couple of threads keep it responsive without
+# starving the rest of the machine or overheating a many-core laptop.  The
+# effective cap is min(default, cpu_count) so a 1-core box still gets 1.
+_DEFAULT_THREADS = 2
+
+# Env var overriding the idle-release threshold, in seconds.
+_IDLE_ENV = "AI_R_SEMANTIC_IDLE_SEC"
+# Default idle threshold: 5 minutes.  Long enough that a burst of semantic
+# searches reuses the same loaded model; short enough that an idle server
+# gives the ~118 MB back reasonably soon.
+_DEFAULT_IDLE_SEC = 300.0
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive-int env var; blank/invalid/≤0 → ``default`` (no crash)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw.strip())
+    except (ValueError, TypeError):
+        return default
+    return value if value > 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a positive-float env var; blank/invalid/≤0 → ``default`` (no crash)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw.strip())
+    except (ValueError, TypeError):
+        return default
+    return value if value > 0.0 else default
+
+
+def _thread_cap() -> int:
+    """CPU-thread cap for onnxruntime: ``AI_R_SEMANTIC_THREADS`` or the default.
+
+    Never exceeds the machine's core count (asking for more threads than
+    cores only adds contention), and is always at least 1.
+    """
+    requested = _positive_int_env(_THREADS_ENV, _DEFAULT_THREADS)
+    cores = os.cpu_count() or 1
+    return max(1, min(requested, cores))
+
+
+def _idle_seconds() -> float:
+    """Idle-release threshold: ``AI_R_SEMANTIC_IDLE_SEC`` or the default."""
+    return _positive_float_env(_IDLE_ENV, _DEFAULT_IDLE_SEC)
+
+
+def _is_idle(now: float, last_used: Optional[float], idle_sec: float) -> bool:
+    """Pure predicate: has the embedder gone unused for ``idle_sec`` seconds?
+
+    Takes ``now`` and ``last_used`` as arguments (does NOT read the clock
+    itself) so tests can feed fake times.  ``last_used is None`` — nothing was
+    ever loaded — is never "idle" (there is nothing to release).
+    """
+    if last_used is None:
+        return False
+    return (now - last_used) >= idle_sec
+
+
 # Lazy one-shot loader state, same pattern as ai_r.tokens: the probe runs
-# once per process; tests reset this dict to force either branch.
-_STATE: dict[str, Any] = {"probed": False, "embedder": None, "reason": None}
+# once per process; tests reset this dict to force either branch.  ``last_used``
+# is the monotonic timestamp of the last embedder access, for idle release.
+_STATE: dict[str, Any] = {
+    "probed": False,
+    "embedder": None,
+    "reason": None,
+    "last_used": None,
+}
 
 
 def _reset_state() -> None:
     """Forget the probe result (tests; also after installing the model)."""
-    _STATE.update({"probed": False, "embedder": None, "reason": None})
+    _STATE.update(
+        {"probed": False, "embedder": None, "reason": None, "last_used": None}
+    )
+
+
+def release_if_idle(now: Optional[float] = None) -> bool:
+    """Free the loaded embedder if it has been idle past the threshold.
+
+    Returns ``True`` iff an embedder was actually released.  Releasing resets
+    the probe to its un-probed state, so the very next request re-loads the
+    model cleanly (a re-probe), exactly as on first use — no crash, no stale
+    handle.  Only a *successfully loaded* embedder is released; a cached
+    "unavailable" outcome is left untouched (nothing to free, and re-probing
+    it would just repeat the same filesystem/import work).
+
+    Mechanism note: this is a *pull* check, not a background timer — we never
+    spawn a reaper thread (that would leak threads and break test
+    hermeticity).  It is called opportunistically at the start of each
+    embedder access (:func:`_get_embedder`) and MAY also be called from the
+    server's own loop.  ``now`` defaults to the real monotonic clock but is
+    injectable for tests.
+    """
+    if _STATE["embedder"] is None:
+        return False
+    current = time.monotonic() if now is None else now
+    if _is_idle(current, _STATE["last_used"], _idle_seconds()):
+        _reset_state()
+        return True
+    return False
 
 
 def model_dir() -> Path:
@@ -237,8 +352,16 @@ def _load_embedder() -> Tuple[Optional[_Embedder], Optional[str]]:
         tokenizer = tokenizers.Tokenizer.from_file(str(tokenizer_file))
         tokenizer.enable_truncation(max_length=_MAX_TOKENS)
         tokenizer.enable_padding()
+        # Cap CPU threads: without SessionOptions onnxruntime grabs every core,
+        # overheating many-core machines and fighting the MCP process for CPU.
+        cap = _thread_cap()
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = cap
+        sess_options.inter_op_num_threads = cap
         session = onnxruntime.InferenceSession(
-            str(model_file), providers=["CPUExecutionProvider"]
+            str(model_file),
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"],
         )
     except Exception as exc:
         return None, f"semantic model failed to load from {directory}: {exc}"
@@ -246,10 +369,19 @@ def _load_embedder() -> Tuple[Optional[_Embedder], Optional[str]]:
 
 
 def _get_embedder() -> Tuple[Optional[_Embedder], Optional[str]]:
-    """Cached probe: load once per process, remember the outcome."""
+    """Cached probe: load once per process, remember the outcome.
+
+    Before probing, an idle embedder from an earlier burst is released
+    (:func:`release_if_idle`) so a long-lived server hands the model's ~118 MB
+    back after a quiet stretch and re-loads it transparently on this call.
+    Every access stamps ``last_used`` so the idle clock tracks real usage.
+    """
+    release_if_idle()
     if not _STATE["probed"]:
         _STATE["probed"] = True
         _STATE["embedder"], _STATE["reason"] = _load_embedder()
+    if _STATE["embedder"] is not None:
+        _STATE["last_used"] = time.monotonic()
     return _STATE["embedder"], _STATE["reason"]
 
 
