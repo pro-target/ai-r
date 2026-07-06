@@ -219,7 +219,7 @@ Una galería de ejemplos reales — uno por capacidad (análisis de errores, com
 
 - Vocabulario de métodos (verbos + presets) — [`docs/methods.md`](./docs/methods.md)
   (SSOT en inglés) · [`docs/methods.ru.md`](./docs/methods.ru.md) (espejo en ruso)
-- Escenarios de aceptación (84 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Escenarios de aceptación (90 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Arquitectura y estratificación — [`docs/architecture.md`](./docs/architecture.md)
 - Operadores de búsqueda — [`docs/search-operators.md`](./docs/search-operators.md)
 - Registro MCP por agente — [`docs/mcp-registration.md`](./docs/mcp-registration.md)
