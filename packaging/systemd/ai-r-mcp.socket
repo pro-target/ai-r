@@ -1,6 +1,6 @@
 [Unit]
 Description=ai-r MCP shared server socket (streamable-http)
-Documentation=https://github.com/dmakarov/ai-r
+Documentation=https://github.com/pro-target/ai-r
 
 [Socket]
 # One shared listener on localhost. Accept=no (default) hands the listening

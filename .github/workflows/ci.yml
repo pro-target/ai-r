@@ -43,11 +43,11 @@ jobs:
 
       - name: Validate install.sh in dry-run mode
         run: |
-          DRY_RUN=1 bash install.sh || true
+          DRY_RUN=1 bash install.sh
 
       - name: Validate uninstall.sh in dry-run mode
         run: |
-          DRY_RUN=1 bash uninstall.sh || true
+          DRY_RUN=1 bash uninstall.sh
 
   lint:
     runs-on: ubuntu-latest

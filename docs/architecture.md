@@ -6,7 +6,7 @@ responsibility and depends only on the layer below it.
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 1: Public API                                          │
-│   • ai-r CLI  (src/ai_r/cli.py)                    │
+│   • ai-r CLI  (src/ai_r/cli/)                      │
 │   • ai-r-mcp  (src/ai_r/mcp_server.py)             │
 │   • Python SDK     (importable: ai_r.parsers)           │
 └──────────────────────────────────────────────────────────────┘
