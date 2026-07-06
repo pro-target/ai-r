@@ -68,6 +68,7 @@ from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import (  # noqa: E402
+    TOKEN_SCAN_LIMIT as _SESSION_STATS_TOKEN_SCAN_LIMIT,
     children_of as _children_of,
     session_stats as _session_stats_core,
 )
@@ -1183,6 +1184,7 @@ def session_stats(
     top: int = 8,
     edit_path: str = "/",
     with_tokens: bool = False,
+    token_scan_limit: int = _SESSION_STATS_TOKEN_SCAN_LIMIT,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped and ranked — the *bird's-eye* audit view.
 
@@ -1226,6 +1228,17 @@ def session_stats(
     session text — so it is outside the redaction surface by construction.
     Default ``False``: byte-identical historical output, no extra reads.
 
+    Scan guard (``token_scan_limit``): because ``with_tokens`` reads every
+    matched session's files at request time, an **unscoped** run over a huge
+    corpus is a multi-hour I/O storm.  When ``with_tokens`` is set with no
+    narrowing filter (``agent``/``since``/``until``) and more than
+    ``token_scan_limit`` sessions match, the call returns
+    ``{"error": "scope_required", ...}`` (naming the count and the limit)
+    INSTEAD of scanning — the check runs on the cheap inventory count before
+    any file is read.  Narrow the scope, or raise ``token_scan_limit`` (``0``
+    disables the cap) to force the full scan.  A permitted-but-large scan runs
+    but carries a ``warning``.
+
     Thin wrapper over :func:`ai_r.session_stats.session_stats` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
@@ -1240,6 +1253,7 @@ def session_stats(
             top=top,
             edit_path=edit_path,
             with_tokens=with_tokens,
+            token_scan_limit=token_scan_limit,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}

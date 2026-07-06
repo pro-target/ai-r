@@ -89,6 +89,38 @@ def children_of(
 GROUP_BY: frozenset[str] = frozenset({"agent", "dir", "date", "kind"})
 
 
+# ---------------------------------------------------------------------------
+# ``with_tokens`` scan guard (fail-loud instead of a silent multi-hour hang)
+# ---------------------------------------------------------------------------
+#
+# ``with_tokens=True`` reads EVERY matched session's own files at request time
+# (``_session_tokens`` → the parser's ``read_token_usage`` / ``read_messages``,
+# each of which globs the whole session tree and parses a full transcript).
+# On a large *unscoped* corpus (observed: 1158+ subagent sessions) that is a
+# per-session I/O storm the caller experiences as an unresponsive "running for
+# hours" call — the tool that counts tokens hanging on counting tokens.
+#
+# The guard is deterministic and fires on the CHEAP inventory count, BEFORE any
+# per-session token read, so it can never reproduce the very hang it prevents:
+#
+# * an *unscoped* request (no ``agent`` / ``since`` / ``until``) whose matched
+#   session count exceeds :data:`TOKEN_SCAN_LIMIT` is REFUSED with a structured,
+#   self-explaining error naming the count, the limit and how to proceed
+#   (narrow the scope, or opt in with a higher / disabled ``token_scan_limit``);
+# * any request (scoped or not) that will read more than
+#   :data:`TOKEN_SCAN_WARN` sessions still runs but attaches a ``warning`` so a
+#   large-but-permitted scan is never silent.
+#
+# ``TOKEN_SCAN_LIMIT`` is a *default*, overridable per call via the
+# ``token_scan_limit`` argument (``0`` disables the cap for a caller that
+# knowingly wants the whole corpus).  The default sits well above ordinary
+# scoped usage (a single day / project rarely exceeds a few hundred sessions)
+# yet far below the thousands-of-sessions zone where the sequential re-glob +
+# full-file-read cost runs away.
+TOKEN_SCAN_LIMIT: int = 400
+TOKEN_SCAN_WARN: int = 200
+
+
 def _session_dir(session: Any) -> str:
     """Best-effort working-directory / project label for a session.
 
@@ -141,6 +173,7 @@ def session_stats(
     top: int = 8,
     edit_path: str = "/",
     with_tokens: bool = False,
+    token_scan_limit: int = TOKEN_SCAN_LIMIT,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped by ``group_by`` and ranked by session count.
 
@@ -174,6 +207,19 @@ def session_stats(
             carried the field; the three counters say how many sessions
             were exact / estimated / unknown).  Default ``False`` keeps
             the historical output byte-identical and pays no read cost.
+        token_scan_limit: Guard against an unbounded ``with_tokens`` scan
+            (each matched session's files are read at request time, so a
+            large *unscoped* corpus is a multi-hour I/O storm).  When
+            ``with_tokens`` is set with NO narrowing filter
+            (``agent``/``since``/``until``) and more than this many sessions
+            match, the call returns a structured refusal (an ``error`` block
+            naming the count and this limit) INSTEAD of scanning — the guard
+            is evaluated on the cheap inventory count before any token read.
+            Default :data:`TOKEN_SCAN_LIMIT`; pass a higher value to raise
+            the ceiling or ``0`` to disable the cap when you knowingly want
+            the whole corpus.  A permitted scan larger than
+            :data:`TOKEN_SCAN_WARN` sessions still runs but attaches a
+            ``warning``.  Ignored entirely when ``with_tokens`` is ``False``.
 
     Returns:
         A dict::
@@ -223,6 +269,15 @@ def session_stats(
         raise ValueError(f"top must be a non-negative integer, got {top!r}")
     if not isinstance(with_tokens, bool):
         raise ValueError(f"with_tokens must be a boolean, got {with_tokens!r}")
+    if (
+        not isinstance(token_scan_limit, int)
+        or isinstance(token_scan_limit, bool)
+        or token_scan_limit < 0
+    ):
+        raise ValueError(
+            f"token_scan_limit must be a non-negative integer, got "
+            f"{token_scan_limit!r}"
+        )
 
     # ``find_file_edits`` is the canonical validator for agent/since/until.
     # Run it first so an invalid bound or agent raises the same ValueError
@@ -269,7 +324,15 @@ def session_stats(
     # ``aggregate`` then does the grouping, ranking and totals — this tool is
     # a thin preset over it (``rank_by="stats"`` reproduces the historical
     # sessions-first rank; ``kind_split=True`` adds the RISK-4 fields).
+    #
+    # Two-phase on purpose: this first pass walks only the CHEAP inventory
+    # (``list_sessions`` metadata + the ISO bound filter) and keeps a handle on
+    # the ``Session`` object.  Per-session token reads (expensive — a full-tree
+    # glob + transcript parse each) are deferred to a SECOND pass below so the
+    # scan guard can veto an oversized ``with_tokens`` run before a single file
+    # is read.
     session_rows: list[dict[str, Any]] = []
+    matched_sessions: list[Session] = []
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         for session in parser.list_sessions():
@@ -293,12 +356,55 @@ def session_stats(
                 "intents": sorted(enrich["intents"]) if enrich is not None else [],
                 "messages": int(getattr(session, "message_count", 0) or 0),
             }
-            if with_tokens:
-                # F3.3: read the session's own files NOW (request-time,
-                # nothing background) — exact where recorded, labeled
-                # estimate otherwise, honest unknown without signal.
-                row["tokens"] = _session_tokens(session)
             session_rows.append(row)
+            matched_sessions.append(session)
+
+    # Second phase: token enrichment, guarded.  Every ``with_tokens`` row's
+    # token block is read here (request-time, nothing background) — but only
+    # after the scan guard has cleared the run.
+    warning: Optional[str] = None
+    if with_tokens:
+        matched = len(matched_sessions)
+        scoped = bool(
+            (agent and str(agent).strip())
+            or since_s is not None
+            or until_s is not None
+        )
+        # Fail-loud refusal: an UNSCOPED scan over more sessions than the
+        # limit is the multi-hour hang.  Return a structured, self-explaining
+        # error BEFORE reading any session file (the guard runs on the cheap
+        # inventory count, so it can never reproduce the hang it prevents).
+        if not scoped and token_scan_limit and matched > token_scan_limit:
+            return {
+                "error": "scope_required",
+                "message": (
+                    f"with_tokens=true would read token usage from {matched} "
+                    f"sessions with no narrowing filter, exceeding "
+                    f"token_scan_limit={token_scan_limit}. Each session is "
+                    f"read from disk at request time, so an unscoped scan of "
+                    f"this size can run for a very long time. Narrow the "
+                    f"scope (agent / since / until) or raise token_scan_limit "
+                    f"(0 disables the cap) to proceed."
+                ),
+                "matched_sessions": matched,
+                "token_scan_limit": token_scan_limit,
+                "scoped": False,
+            }
+        # Permitted but large: run, yet never silently — say how big the scan
+        # was so a slow call is explainable and the caller can scope it next
+        # time.
+        if matched > TOKEN_SCAN_WARN:
+            warning = (
+                f"with_tokens read token usage from {matched} sessions "
+                f"(> {TOKEN_SCAN_WARN}); each is read from disk at request "
+                f"time. Narrow the scope (agent / since / until) for a faster "
+                f"call."
+            )
+        for row, session in zip(session_rows, matched_sessions):
+            # F3.3: read the session's own files NOW (request-time, nothing
+            # background) — exact where recorded, labeled estimate otherwise,
+            # honest unknown without signal.
+            row["tokens"] = _session_tokens(session)
 
     metrics = ["sessions", "edits", "intents", "agents", "messages"]
     if with_tokens:
@@ -331,4 +437,6 @@ def session_stats(
         result["totals"]["tokens"] = rolled["totals"]["tokens"]
     if "note" in rolled:
         result["note"] = rolled["note"]
+    if warning is not None:
+        result["warning"] = warning
     return result

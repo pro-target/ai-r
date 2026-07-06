@@ -14,10 +14,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from ai_r.session_stats import GROUP_BY, group_key, session_stats
+from ai_r.session_stats import (
+    GROUP_BY,
+    TOKEN_SCAN_LIMIT,
+    TOKEN_SCAN_WARN,
+    group_key,
+    session_stats,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +86,24 @@ def _patch_claude(monkeypatch: pytest.MonkeyPatch, tmp_sessions_dir: Path) -> No
         "ai_r.parsers.claude._resolve_base_dir",
         lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
     )
+
+
+def _silence_non_claude_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every non-Claude parser report an empty inventory.
+
+    ``AI_R_HOME`` isolates most parsers onto the fake temp home, but a few
+    (notably OpenCode via its own ``OPENCODE_DB`` discovery) can still reach
+    real host data — which would make an *unscoped* rollup's session count
+    host-dependent.  Stubbing their ``list_sessions`` to ``[]`` pins an
+    unscoped scan to the patched hermetic Claude tree, so these tests stay
+    deterministic on any host (host data absent OR present).
+    """
+    from ai_r.parsers import PARSERS, AgentName
+
+    for agent_name, parser in PARSERS.items():
+        if agent_name is AgentName.CLAUDE:
+            continue
+        monkeypatch.setattr(parser, "list_sessions", lambda *a, **k: [])
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +323,275 @@ def test_session_stats_agent_filter(
     result = session_stats(group_by="agent", agent="claude")
     assert result["totals"]["agents_list"] == ["claude"]
     assert result["totals"]["sessions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# with_tokens scan guard (regression: unscoped with_tokens must NOT hang)
+# ---------------------------------------------------------------------------
+#
+# Root cause reproduced by the *shape* of the call, not by real data: an
+# unscoped ``with_tokens=True`` reads every matched session's files, so a
+# large corpus is a per-session I/O storm the caller sees as a hang.  These
+# tests build many tiny fixture sessions and assert the guard fires on the
+# cheap inventory count BEFORE any token read — proven by spying on the
+# per-session token reader (``_session_tokens``): a refusal must return
+# without ever calling it, so a broken guard fails instantly here instead of
+# hanging in CI.
+
+
+def _run_with_timeout(fn, *, seconds: float = 30.0):  # type: ignore[no-untyped-def]
+    """Run ``fn()`` in a worker thread, failing the test if it does not return.
+
+    Dependency-free stand-in for ``pytest-timeout`` (not installed here): the
+    whole point of the guard is that an unscoped ``with_tokens`` scan must not
+    hang, so a run that overshoots the deadline is a hard failure, never a
+    silently-passing slow test.  Returns ``fn``'s result on success.
+    """
+    import threading
+
+    box: dict[str, Any] = {}
+
+    def _target() -> None:
+        box["result"] = fn()
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():  # pragma: no cover - only on a regression (hang)
+        pytest.fail(
+            f"session_stats did not return within {seconds}s — the "
+            f"with_tokens scan guard regressed into a hang"
+        )
+    if "result" not in box:  # the target raised
+        raise AssertionError("session_stats raised in the worker thread")
+    return box["result"]
+
+
+def _write_many_claude_sessions(
+    tmp_sessions_dir: Path, count: int, *, base_ts: str = "2026-06-14T10:00:00Z"
+) -> None:
+    """Write ``count`` minimal one-turn Claude sessions under one project.
+
+    Deliberately tiny (one user + one assistant record each): the scan guard
+    keys on the *number* of matched sessions, so the corpus only needs to be
+    numerous, not large per file.
+    """
+    proj_dir = tmp_sessions_dir / ".claude" / "projects" / "proj-many"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        uuid = f"many-{i:05d}"
+        records = [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": f"q{i}"},
+                "timestamp": base_ts,
+                "sessionId": uuid,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"a{i}"}],
+                },
+                "timestamp": base_ts,
+                "sessionId": uuid,
+            },
+        ]
+        (proj_dir / f"{uuid}.jsonl").write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _spy_session_tokens(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace ``_session_tokens`` with a call-recording spy.
+
+    Returns a list that receives one session uuid per call, so a test can
+    assert the token reader was (or was NOT) reached.  The spy returns a
+    trivial honest-``unknown`` block so a permitted scan still produces a
+    well-formed result.
+    """
+    calls: list[str] = []
+
+    def _spy(session, **_kw):  # type: ignore[no-untyped-def]
+        calls.append(getattr(session, "uuid", "?"))
+        return {
+            "input": None,
+            "output": None,
+            "reasoning": None,
+            "cache_read": None,
+            "cache_write": None,
+            "total": None,
+            "source": None,
+        }
+
+    monkeypatch.setattr("ai_r.session_stats._session_tokens", _spy)
+    return calls
+
+
+def test_token_scan_limit_validation() -> None:
+    with pytest.raises(ValueError, match="token_scan_limit"):
+        session_stats(token_scan_limit=-1)
+    with pytest.raises(ValueError, match="token_scan_limit"):
+        session_stats(token_scan_limit=True)  # type: ignore[arg-type]
+
+
+def test_with_tokens_unscoped_over_limit_refuses_without_scanning(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A corpus past a small limit; unscoped with_tokens must refuse.  The
+    # 6 fixture sessions alone already exceed limit=5, so the refusal fires
+    # deterministically whether or not this host also carries real sessions
+    # for the OTHER (unpatched) agents — an unscoped scan sees them all,
+    # which is precisely the runaway this guard exists to stop.
+    limit = 5
+    _write_many_claude_sessions(tmp_sessions_dir, limit + 1)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    calls = _spy_session_tokens(monkeypatch)
+
+    # Wall-clock guarded: a regressed guard that fell through to a real scan
+    # would be caught here as a hang (fail), not a silently-slow pass.
+    result = _run_with_timeout(
+        lambda: session_stats(with_tokens=True, token_scan_limit=limit)
+    )
+
+    # Structured, self-explaining refusal — NOT a hang, NOT a bare empty.
+    assert result["error"] == "scope_required"
+    matched = result["matched_sessions"]
+    assert isinstance(matched, int) and matched > limit
+    assert result["token_scan_limit"] == limit
+    assert result["scoped"] is False
+    # The message explains itself: it names the actual count and the limit.
+    assert str(matched) in result["message"]
+    assert str(limit) in result["message"]
+    # The guard fired on the inventory count: no session file was read.
+    assert calls == []
+
+
+def test_with_tokens_scoped_by_agent_scans_over_limit(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same over-limit corpus, but a narrowing agent filter → the scan runs.
+    limit = 5
+    _write_many_claude_sessions(tmp_sessions_dir, limit + 1)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    calls = _spy_session_tokens(monkeypatch)
+
+    result = _run_with_timeout(
+        lambda: session_stats(
+            with_tokens=True, agent="claude", token_scan_limit=limit
+        )
+    )
+
+    assert "error" not in result
+    assert result["totals"]["sessions"] == limit + 1
+    # Scoped run actually read every matched session's tokens.
+    assert len(calls) == limit + 1
+    assert "tokens" in result["totals"]
+
+
+def test_with_tokens_scoped_by_since_no_refusal(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A ``since`` bound alone counts as scope: the unscoped-refusal must NOT
+    # fire even over the limit.  (Left agent-unfiltered on purpose so this
+    # exercises the ``since``-only branch of the scope test; the exact session
+    # count is therefore host-dependent and not asserted — only the invariant
+    # "since ⇒ no scope_required refusal" is, which holds on any host.)
+    limit = 5
+    _write_many_claude_sessions(tmp_sessions_dir, limit + 1)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _spy_session_tokens(monkeypatch)
+
+    result = _run_with_timeout(
+        lambda: session_stats(
+            with_tokens=True, since="2026-01-01", token_scan_limit=limit
+        )
+    )
+
+    assert result.get("error") != "scope_required"
+    assert "tokens" in result["totals"]
+
+
+def test_with_tokens_unscoped_under_limit_scans(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Below the limit, an unscoped with_tokens run proceeds normally.
+    _write_many_claude_sessions(tmp_sessions_dir, 3)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _silence_non_claude_parsers(monkeypatch)
+    calls = _spy_session_tokens(monkeypatch)
+
+    result = session_stats(with_tokens=True, token_scan_limit=10)
+
+    assert "error" not in result
+    assert result["totals"]["sessions"] == 3
+    assert len(calls) == 3
+
+
+def test_with_tokens_limit_zero_disables_cap(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # token_scan_limit=0 is the explicit opt-in to scan the whole corpus.
+    _write_many_claude_sessions(tmp_sessions_dir, 6)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _silence_non_claude_parsers(monkeypatch)
+    calls = _spy_session_tokens(monkeypatch)
+
+    result = _run_with_timeout(
+        lambda: session_stats(with_tokens=True, token_scan_limit=0)
+    )
+
+    assert "error" not in result
+    assert result["totals"]["sessions"] == 6
+    assert len(calls) == 6
+
+
+def test_with_tokens_warns_on_large_permitted_scan(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Scoped (agent) so the run is permitted, but big enough to trip the
+    # soft warning: the result must carry an explanatory ``warning``.
+    count = TOKEN_SCAN_WARN + 2
+    _write_many_claude_sessions(tmp_sessions_dir, count)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _spy_session_tokens(monkeypatch)
+
+    result = session_stats(
+        with_tokens=True, agent="claude", token_scan_limit=0
+    )
+
+    assert "error" not in result
+    assert "warning" in result
+    assert str(count) in result["warning"]
+
+
+def test_with_tokens_no_warning_below_threshold(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_many_claude_sessions(tmp_sessions_dir, 3)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _spy_session_tokens(monkeypatch)
+
+    result = session_stats(with_tokens=True, agent="claude")
+
+    assert "warning" not in result
+
+
+def test_without_tokens_ignores_scan_guard(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The guard is a with_tokens concern only: a plain unscoped rollup over a
+    # large corpus is cheap (no per-session read) and must never be refused.
+    _write_many_claude_sessions(tmp_sessions_dir, TOKEN_SCAN_LIMIT + 5)
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    _silence_non_claude_parsers(monkeypatch)
+    calls = _spy_session_tokens(monkeypatch)
+
+    result = session_stats(group_by="agent")
+
+    assert "error" not in result
+    assert "warning" not in result
+    assert result["totals"]["sessions"] == TOKEN_SCAN_LIMIT + 5
+    # No token reads at all when with_tokens is False.
+    assert calls == []
