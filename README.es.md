@@ -72,7 +72,7 @@ de formato se normalizan dentro de los parsers.
 - **Respuesta pequeña, cuerpo bajo demanda.** Los registros llevan una referencia
   al contenido (hash + longitud); el texto completo de la edición se obtiene por
   separado — la respuesta no se dispara.
-- **Funciona sobre MCP (13 herramientas).** Un agente llama a `ai-r` directamente
+- **Funciona sobre MCP (15 herramientas).** Un agente llama a `ai-r` directamente
   en lenguaje natural; los mismos datos están disponibles desde la terminal (CLI)
   y desde código (SDK de Python).
 - **Un lector, no un guardián.** Extrae entidades; tú (o tu herramienta)
@@ -120,8 +120,11 @@ lectura se porta a cualquier herramienta en minutos. Ver
 
 `ai-r` ofrece el mismo poder de lectura de tres formas:
 
-- **Servidor MCP** (`ai-r-mcp`) — 13 herramientas sobre JSON-RPC por stdio, para
-  que cualquier agente MCP lo llame directamente (recomendado). Registro — ver
+- **Servidor MCP** (`ai-r-mcp`) — 15 herramientas sobre JSON-RPC, para
+  que cualquier agente MCP lo llame directamente (recomendado). Por defecto es
+  **stdio**; opcionalmente un **servidor http compartido** (un único proceso
+  caliente para todos los agentes en lugar de un enjambre de stdio por agente),
+  ver el extra `http` en Inicio rápido. Registro — ver
   [docs/mcp-registration.md](./docs/mcp-registration.md).
 - **CLI** (`ai-r`) — subcomandos para scripts y uso manual (`list` / `read` /
   `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
@@ -167,6 +170,23 @@ El instalador crea un venv, instala el paquete de runtime, parchea las
 configuraciones MCP para **Claude**, **Codex**, **OpenCode**, **Antigravity**
 (donde existen las configuraciones), instala el skill de CLI de **Pi**, y ejecuta
 smoke tests.
+
+Extra opcional — `http`: `AI_R_EXTRAS=http bash install.sh` (o
+`pip install "ai-r[http]"`) añade [uvicorn](https://www.uvicorn.org) y habilita
+un **transporte streamable-http compartido**. Por defecto cada agente lanza su
+propio `ai-r-mcp` sobre stdio — bajo un fan-out multiagente eso son N procesos,
+cada uno con una caché fría, re-escaneando el corpus (la causa medida del
+agotamiento de RAM). Con `AI_R_MCP_TRANSPORT=http` un único **servidor caliente**
+en localhost (por defecto `127.0.0.1:8756`) es compartido por todos los agentes
+en lugar de un enjambre; las unidades de systemd en `packaging/systemd/` añaden
+activación por socket con auto-salida por inactividad — el proceso existe solo
+bajo carga. El bind es solo loopback y con **fallo cerrado (fail-closed)**: un
+`AI_R_MCP_HOST` que no sea localhost se rechaza (los transcripts contienen
+secretos y se sirven sin token) hasta que el operador ponga explícitamente
+`AI_R_MCP_ALLOW_REMOTE=1`. Otros ajustes: `AI_R_MCP_PORT`, `AI_R_MCP_IDLE_SEC`
+(umbral de auto-salida por inactividad), `AI_R_HAYSTACK_CACHE_MAX` (tope de la
+caché de búsqueda). Totalmente opcional: sin él, el modo stdio funciona como
+antes.
 
 ## Límites: un lector, no un guardián
 
@@ -216,7 +236,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ tests, CI requiere ≥80% de cobertura
+- 1100+ tests, CI requiere ≥85% de cobertura
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - Al añadir nuevos agentes, ver [CONTRIBUTING.md](./CONTRIBUTING.md) y
   [docs/parsers.md](./docs/parsers.md)

@@ -63,7 +63,7 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
   请求（`find-file-edits` / `find-tool-calls`）。
 - **回答短小，正文按需取。** 记录携带指向内容的引用（哈希 + 长度）；完整的
   编辑文本单独获取——响应不会膨胀。
-- **通过 MCP 工作（13 个工具）。** 智能体用自然语言直接调用 `ai-r`；同一份
+- **通过 MCP 工作（15 个工具）。** 智能体用自然语言直接调用 `ai-r`；同一份
   数据也可从终端（CLI）和代码（Python SDK）获得。
 - **是读者，不是守卫。** 它提取实体；由你（或你的工具）来构建知识图谱与记忆。
   只读：它绝不运行、也绝不写入智能体的历史。
@@ -102,8 +102,10 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
 
 `ai-r` 以三种方式提供相同的读取能力：
 
-- **MCP 服务器**（`ai-r-mcp`）—— 通过 stdio JSON-RPC 提供 13 个工具，任意 MCP
-  智能体都能直接调用它（推荐）。注册——参见
+- **MCP 服务器**（`ai-r-mcp`）—— 通过 JSON-RPC 提供 15 个工具，任意 MCP
+  智能体都能直接调用它（推荐）。默认使用 **stdio**；也可选用**共享 http 服务器**
+  （一个常驻进程供所有智能体共用，取代按智能体各起一个 stdio 进程的进程群），
+  参见「快速开始」中的 `http` 可选扩展。注册——参见
   [docs/mcp-registration.md](./docs/mcp-registration.md)。
 - **CLI**（`ai-r`）—— 供脚本和手动使用的子命令（`list` / `read` /
   `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
@@ -144,6 +146,19 @@ cd ~/dev/ai-r && bash install.sh
 安装器会创建一个 venv、安装运行时包、为 **Claude**、**Codex**、**OpenCode**、
 **Antigravity** 修补 MCP 配置（在配置存在的地方），安装 **Pi** CLI 技能，
 并运行冒烟测试。
+
+可选扩展 —— `http`：`AI_R_EXTRAS=http bash install.sh`（或
+`pip install "ai-r[http]"`）会加入 [uvicorn](https://www.uvicorn.org)，并启用
+**共享的 streamable-http 传输**。默认情况下每个智能体都会自己启动一个通过 stdio
+的 `ai-r-mcp`——在多智能体扇出时这就是 N 个进程，每个都带着冷缓存、重复扫描语料库
+（实测正是这一点耗尽内存）。设置 `AI_R_MCP_TRANSPORT=http` 后，localhost 上的
+单个**常驻服务器**（默认 `127.0.0.1:8756`）会被所有智能体共用，取代进程群；
+`packaging/systemd/` 里的 systemd 单元还加上了套接字激活与空闲自退出——进程只在
+有负载时才存在。绑定仅限回环地址，且**失败即关闭（fail-closed）**：非 localhost
+的 `AI_R_MCP_HOST` 会被拒绝（转录内容含机密，且不带令牌对外提供），直到运维者显式
+设置 `AI_R_MCP_ALLOW_REMOTE=1`。其他可调项：`AI_R_MCP_PORT`、
+`AI_R_MCP_IDLE_SEC`（空闲自退出阈值）、`AI_R_HAYSTACK_CACHE_MAX`（搜索缓存上限）。
+完全可选：不装它，stdio 模式照旧工作。
 
 ## 边界：是读者，不是守卫
 
@@ -187,7 +202,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ 个测试，CI 要求 ≥80% 覆盖率
+- 1100+ 个测试，CI 要求 ≥85% 覆盖率
 - Conventional Commits（`feat:`、`fix:`、`docs:`……）
 - 加入新智能体时，参见 [CONTRIBUTING.md](./CONTRIBUTING.md) 和
   [docs/parsers.md](./docs/parsers.md)

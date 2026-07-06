@@ -67,7 +67,7 @@ query shape per agent; format differences are normalized inside the parsers.
 - **Small answer, body on demand.** Records carry a reference to the content
   (hash + length); the full edit text is fetched separately — the response
   doesn't balloon.
-- **Works over MCP (13 tools).** An agent calls `ai-r` directly in plain
+- **Works over MCP (15 tools).** An agent calls `ai-r` directly in plain
   language; the same data is available from the terminal (CLI) and from code
   (Python SDK).
 - **A reader, not a guard.** Extracts entities; you (or your tool) build the
@@ -157,8 +157,10 @@ ports to any tool in minutes. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 `ai-r` gives the same reading power three ways:
 
-- **MCP server** (`ai-r-mcp`) — 13 tools over stdio JSON-RPC, so any MCP agent
-  calls it directly (recommended). Registration — see
+- **MCP server** (`ai-r-mcp`) — 15 tools over JSON-RPC, so any MCP agent
+  calls it directly (recommended). Default is **stdio**; optionally a **shared
+  http server** (one warm process for all agents instead of a per-agent stdio
+  swarm), see the `http` extra under Quick start. Registration — see
   [docs/mcp-registration.md](./docs/mcp-registration.md).
 - **CLI** (`ai-r`) — subcommands for scripts and manual use (`list` / `read` /
   `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
@@ -234,6 +236,21 @@ does not grab every core and fight the server for CPU), and
 `AI_R_SEMANTIC_IDLE_SEC` frees the loaded model's ~118 MB of RAM after that
 many idle seconds (default `300`); the next request transparently re-loads it.
 
+Optional extra — `http`: `AI_R_EXTRAS=http bash install.sh` (or
+`pip install "ai-r[http]"`) adds [uvicorn](https://www.uvicorn.org) and enables
+a **shared streamable-http transport**. By default every agent spawns its own
+`ai-r-mcp` over stdio — under multi-agent fan-out that is N processes, each with
+a cold cache, re-scanning the corpus (the measured cause of RAM exhaustion).
+With `AI_R_MCP_TRANSPORT=http` a single **warm server** on localhost (default
+`127.0.0.1:8756`) is shared by every agent instead of a swarm; the systemd units
+in `packaging/systemd/` add socket-activation with idle self-exit — the process
+exists only under load. The bind is loopback-only and **fail-closed**: a
+non-localhost `AI_R_MCP_HOST` is refused (transcripts carry secrets and are
+served without a token) until the operator explicitly sets
+`AI_R_MCP_ALLOW_REMOTE=1`. Other knobs: `AI_R_MCP_PORT`, `AI_R_MCP_IDLE_SEC`
+(idle self-exit threshold), `AI_R_HAYSTACK_CACHE_MAX` (search cache ceiling).
+Fully optional: without it stdio mode works as before.
+
 ## Boundaries: a reader, not a guard
 
 - **Read-only.** It never runs an agent's code and never writes to its history —
@@ -278,7 +295,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ tests, CI requires ≥80% coverage
+- 1100+ tests, CI requires ≥85% coverage
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - On adding new agents, see [CONTRIBUTING.md](./CONTRIBUTING.md) and
   [docs/parsers.md](./docs/parsers.md)
