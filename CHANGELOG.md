@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Contribution gate: LLM e2e scenarios are mandatory for functionality
+  changes.** `CONTRIBUTING.md` and the PR template now require that any
+  change touching the public surface passes BOTH gates: the pytest suite
+  AND an LLM-executed run of the affected acceptance scenarios in
+  `docs/scenarios.md` against a live MCP server (GO / GO-with-caveats on
+  every runnable scenario; `[needs-real-vault]` scenarios without vault
+  data are skipped, not failed; a NO-GO blocks the merge).
+
+### Fixed
+
+- **`docs/scenarios.md` naming drift:** READ-4/READ-5 (and the summary
+  table) referred to `summary.tokens` / `summary.component_tokens` /
+  `summary.subagent_rollup`; the live MCP surface emits these as
+  top-level response fields (`tokens`, `component_tokens`,
+  `subagent_rollup`) — found by the first full scenario run.
 - **Per-component token breakdown (F3.3 follow-up)** on ai-r's existing event
   taxonomy — `ai_r.tokens.component_tokens(messages, agent=…)` splits a
   transcript's estimated token volume across `user_turn` (question/request) /

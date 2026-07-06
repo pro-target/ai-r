@@ -16,10 +16,23 @@ fastest path from idea to merge is:
    pytest --cov=src/ai_r
    ```
    Coverage must stay ≥ 80% (`pyproject.toml` enforces this in CI).
-5. **Conventional Commits.** Allowed prefixes: `feat:`, `fix:`,
+5. **Run the LLM e2e acceptance scenarios** whenever the change adds
+   or modifies functionality (a new MCP tool or parameter, any
+   behaviour change on the public surface). Both gates must pass —
+   the pytest suite AND the scenario run:
+   - update [docs/scenarios.md](./docs/scenarios.md) first — it is the
+     SSOT for the public surface; CI fails when an MCP tool has no
+     scenario (`tests/test_docs_sync.py`);
+   - then have an LLM agent execute the affected scenarios against a
+     **live** MCP server (see *How to run* in `docs/scenarios.md`).
+     Every runnable scenario must resolve **GO** or
+     **GO-with-caveats**; `[needs-real-vault]` scenarios without the
+     required vault data are skipped, not failed. A **NO-GO blocks
+     the merge**.
+6. **Conventional Commits.** Allowed prefixes: `feat:`, `fix:`,
    `docs:`, `test:`, `refactor:`, `chore:`, `ci:`. Example:
    `feat(parsers): add Gemini parser`.
-6. **Open a PR.** The PR template will guide you. CI must be green.
+7. **Open a PR.** The PR template will guide you. CI must be green.
    A maintainer will review within a few days.
 
 ## Local-dev MCP setup
