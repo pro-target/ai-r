@@ -280,6 +280,21 @@ def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
     return sessions
 
 
+def _peek_session_uuid(path: Path) -> Optional[str]:
+    """Read only up to the ``session_meta`` header to identify a file's
+    session, without parsing the whole rollout.  Returns the session id or
+    ``None`` when no valid header is present.  Keeps a by-uuid lookup from
+    reading every candidate file end-to-end (audit: O(N^2) corpus rescan)."""
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+            return payload["id"]
+        return None
+    return None
+
+
 def _find_session_file(
     uuid: str, base_dir: Optional[str]
 ) -> Tuple[Path, Session]:
@@ -287,14 +302,11 @@ def _find_session_file(
         raise ValueError(f"Invalid Codex session uuid: {uuid!r}")
     roots = _resolve_base_dir(base_dir)
     for path in _discover_files(roots):
-        for record in iter_jsonl_records(path):
-            if record.get("type") != "session_meta":
-                continue
-            payload = record.get("payload") or {}
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("id") == uuid:
-                return path, _scan_file(path)  # type: ignore[return-value]
+        if _peek_session_uuid(path) != uuid:
+            continue
+        session = _scan_file(path)
+        if session is not None:
+            return path, session
     raise FileNotFoundError(f"Codex session {uuid!r} not found under {roots}")
 
 

@@ -242,11 +242,25 @@ def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
     return sessions
 
 
+def _peek_session_uuid(path: Path) -> Optional[str]:
+    """Read only up to the ``session`` header to identify a file's session,
+    without parsing the whole transcript.  Returns the session id or ``None``.
+    Keeps a by-uuid lookup from parsing every candidate file end-to-end
+    (audit: O(N^2) corpus rescan)."""
+    for entry in iter_jsonl_records(path):
+        if entry.get("type") == "session":
+            sid = entry.get("id")
+            return sid if isinstance(sid, str) else None
+    return None
+
+
 def _find_session_file(uuid: str, base_dir: Optional[str]) -> Tuple[Path, Session]:
     if not _is_valid_uuid(uuid):
         raise ValueError(f"Invalid Pi session uuid: {uuid!r}")
     root = _resolve_base_dir(base_dir)
     for path in _discover_files(root):
+        if _peek_session_uuid(path) != uuid:
+            continue
         session = _scan_file(path)
         if session is not None and session.uuid == uuid:
             return path, session
