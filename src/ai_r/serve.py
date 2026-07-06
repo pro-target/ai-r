@@ -11,8 +11,9 @@ graphical artifacts) diagnosed from a real session.
 A single long-lived **streamable-http** server, socket-activated by systemd
 (idle-off + respawn-on-demand), collapses the swarm to one warm process shared
 by every agent.  ``stdio`` stays the default transport — http is strictly
-opt-in via ``AI_R_MCP_TRANSPORT=http`` and binds localhost-only, so nothing is
-exposed off-box and existing stdio sessions keep working unchanged.
+opt-in via ``AI_R_MCP_TRANSPORT=http`` and binds localhost-only (a non-loopback
+``AI_R_MCP_HOST`` is refused fail-closed unless ``AI_R_MCP_ALLOW_REMOTE=1``), so
+nothing is exposed off-box and existing stdio sessions keep working unchanged.
 
 This module keeps the *decisions* as pure, unit-testable predicates
 (``resolve_transport`` / ``should_exit_idle`` / ``systemd_listen_sockets``) and
@@ -55,6 +56,34 @@ def resolve_transport(env: Optional[Mapping[str, str]] = None) -> str:
             f"expected one of {VALID_TRANSPORTS}"
         )
     return raw
+
+
+# Hosts that keep the server on-box (loopback only, no off-machine exposure).
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def resolve_host(env: Optional[Mapping[str, str]] = None) -> str:
+    """Return the http bind host, refusing an unguarded off-box bind.
+
+    Session transcripts routinely contain pasted secrets and are served
+    with **no auth token**, so binding anywhere but loopback would expose
+    every local transcript to the network.  A non-local ``AI_R_MCP_HOST``
+    is therefore a hard error (fail-closed) unless the operator sets
+    ``AI_R_MCP_ALLOW_REMOTE=1`` to opt in deliberately — mirroring
+    ``resolve_transport``'s fail-loud style.  Default (unset) is loopback.
+    """
+    env = os.environ if env is None else env
+    host = (env.get("AI_R_MCP_HOST") or DEFAULT_HOST).strip()
+    if host.lower() in LOCAL_HOSTS:
+        return host
+    allow = (env.get("AI_R_MCP_ALLOW_REMOTE") or "").strip().lower()
+    if allow not in ("1", "true", "yes", "on"):
+        raise ValueError(
+            f"refusing to bind ai-r http server to non-local host {host!r}: "
+            "transcripts contain secrets and are served without auth. "
+            "Set AI_R_MCP_ALLOW_REMOTE=1 to override deliberately."
+        )
+    return host
 
 
 def should_exit_idle(
@@ -168,7 +197,7 @@ def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragm
     import uvicorn
 
     env = os.environ if env is None else env
-    host = env.get("AI_R_MCP_HOST") or DEFAULT_HOST
+    host = resolve_host(env)
     port = int(env.get("AI_R_MCP_PORT") or DEFAULT_PORT)
     idle_sec = float(env.get("AI_R_MCP_IDLE_SEC") or DEFAULT_IDLE_SEC)
 

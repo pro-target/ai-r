@@ -191,7 +191,10 @@ records adding an optional shared transport as the fix.
   keeps the listener and respawns the service on the next connection — zero
   resident processes when idle. Idle-exit never fires while a request is in
   flight (active-request counter).
-- **Boundaries.** Bind is localhost-only; `uvicorn` is imported lazily and
+- **Boundaries.** Bind is localhost-only and **fail-closed**: `resolve_host`
+  refuses a non-loopback `AI_R_MCP_HOST` (transcripts carry secrets and are
+  served without auth) unless the operator sets `AI_R_MCP_ALLOW_REMOTE=1` to
+  opt in deliberately. `uvicorn` is imported lazily and
   shipped as the optional `ai-r[http]` extra, so stdio users need nothing new.
   The activity wrapper is raw-ASGI (not Starlette `BaseHTTPMiddleware`) so it
   never buffers the long-lived streaming responses streamable-http relies on.

@@ -12,9 +12,11 @@ from __future__ import annotations
 import pytest
 
 from ai_r.serve import (
+    DEFAULT_HOST,
     DEFAULT_IDLE_SEC,
     DEFAULT_PORT,
     VALID_TRANSPORTS,
+    resolve_host,
     resolve_transport,
     should_exit_idle,
     systemd_listen_sockets,
@@ -49,6 +51,33 @@ def test_transport_unknown_fails_closed() -> None:
 
 def test_valid_transports_are_stdio_and_http() -> None:
     assert VALID_TRANSPORTS == ("stdio", "http")
+
+
+# --- resolve_host ----------------------------------------------------------
+
+def test_host_defaults_to_loopback() -> None:
+    """No env var -> loopback bind, nothing exposed off-box."""
+    assert resolve_host({}) == DEFAULT_HOST
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "LOCALHOST"])
+def test_host_local_values_pass(host: str) -> None:
+    """Loopback aliases are accepted (case-insensitive)."""
+    assert resolve_host({"AI_R_MCP_HOST": host}) == host
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10"])
+def test_host_non_local_fails_closed(host: str) -> None:
+    """A non-local bind is refused unless explicitly allowed."""
+    with pytest.raises(ValueError, match="non-local host"):
+        resolve_host({"AI_R_MCP_HOST": host})
+
+
+@pytest.mark.parametrize("flag", ["1", "true", "YES", "on"])
+def test_host_non_local_opt_in(flag: str) -> None:
+    """AI_R_MCP_ALLOW_REMOTE lets an operator opt into an off-box bind."""
+    env = {"AI_R_MCP_HOST": "0.0.0.0", "AI_R_MCP_ALLOW_REMOTE": flag}
+    assert resolve_host(env) == "0.0.0.0"
 
 
 # --- should_exit_idle ------------------------------------------------------
