@@ -533,7 +533,11 @@ def test_top_level_session_defaults_to_agent_kind(
 
 
 def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
-    """An inline ``isSidechain: True`` record classifies the session."""
+    """An inline ``isSidechain: True`` record classifies the session.
+
+    ``parent_uuid`` is the spawner from ``sessionId`` — NOT the
+    message-level ``parentUuid`` (a message uuid / chain root).
+    """
     base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
     jsonl = base / "inline-sidechain.jsonl"
     records = [
@@ -541,7 +545,19 @@ def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
             "type": "user",
             "message": {"role": "user", "content": "inline task"},
             "timestamp": "2026-06-14T12:00:00Z",
-            "parentUuid": "inline-parent-9",
+            "sessionId": "spawner-sid-9",
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+            },
+            "timestamp": "2026-06-14T12:00:01Z",
+            "sessionId": "spawner-sid-9",
+            "parentUuid": "msg-root-uuid",
             "isSidechain": True,
         },
     ]
@@ -552,7 +568,138 @@ def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
     session = _scan_file(jsonl)
     assert session is not None
     assert session.kind == "subagent"
-    assert session.parent_uuid == "inline-parent-9"
+    # Spawner = sessionId, never the message-level parentUuid.
+    assert session.parent_uuid == "spawner-sid-9"
+
+
+def test_subagent_dir_form_parent_is_spawner_not_message_uuid(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Directory form: ``parent_uuid`` is the folder (spawner), and the
+    message-level ``parentUuid`` (a message uuid) is ignored."""
+    parent_sid = "parent-sid-dir"
+    agent_id = "agent-dir-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / parent_sid
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "subtask"},
+            "timestamp": "2026-06-14T11:00:00Z",
+            "sessionId": parent_sid,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+            "timestamp": "2026-06-14T11:00:05Z",
+            "sessionId": parent_sid,
+            "parentUuid": "some-message-uuid",
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid == parent_sid
+    assert session.parent_uuid != "some-message-uuid"
+
+
+def test_subagent_flat_form_parent_from_session_id(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Flat form ``projects/<slug>/subagents/agent-*.jsonl``: no per-session
+    wrapper folder → path yields None → spawner comes from ``sessionId``.
+
+    Regression test for the A2 defect (previously message-uuid / None).
+    """
+    parent_sid = "parent-sid-flat"
+    agent_id = "agent-flat-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "flat subtask"},
+            "timestamp": "2026-06-14T13:00:00Z",
+            "sessionId": parent_sid,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+            "timestamp": "2026-06-14T13:00:01Z",
+            "sessionId": parent_sid,
+            "parentUuid": "chain-root-msg",
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid == parent_sid
+    assert session.parent_uuid != "chain-root-msg"
+
+
+def test_subagent_self_parent_guard(tmp_sessions_dir: Path) -> None:
+    """When ``sessionId`` equals the file's own uuid (no wrapper folder),
+    the session must NOT become its own parent → ``parent_uuid is None``."""
+    agent_id = "agent-self-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "self task"},
+            "timestamp": "2026-06-14T14:00:00Z",
+            "sessionId": agent_id,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid is None
 
 
 def test_isSidechain_false_stays_agent(tmp_sessions_dir: Path) -> None:

@@ -282,18 +282,21 @@ def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
     ``projects/<slug>/subagents/agent-*.jsonl``.  When the file sits in a
     ``subagents`` directory, the parent uuid is the name of the directory
     holding ``subagents`` (the parent session's own folder).  Returns
-    ``None`` when the path is not a subagent file or the parent folder name
-    is not usable as a uuid (e.g. the project slug itself).
+    ``None`` when the path is not a subagent file or the folder holding
+    ``subagents`` is the project slug itself (flat form, no per-session
+    wrapper) — there the ``sessionId`` scan supplies the spawner instead.
     """
     parent = jsonl_path.parent
     if parent.name != "subagents":
         return None
-    grandparent_name = parent.parent.name
-    # The directory wrapping ``subagents/`` is normally the parent session
-    # uuid folder.  If it is the project slug (no per-session folder), we
-    # have no reliable parent uuid from the path and fall back to ``None``;
-    # the in-file ``parentUuid``/``sessionId`` scan can still supply one.
+    grandparent = parent.parent
+    grandparent_name = grandparent.name
     if not grandparent_name:
+        return None
+    # Flat form: the folder wrapping ``subagents/`` is the ``projects/<slug>``
+    # dir (its own parent is literally ``projects``).  That name is the
+    # project slug, NOT a session uuid — no reliable parent from the path.
+    if grandparent.parent.name == "projects":
         return None
     return grandparent_name
 
@@ -358,12 +361,20 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     * **directory form** — the file lives under a ``subagents/`` folder
       (``.../<parent-uuid>/subagents/agent-*.jsonl``); the parent uuid is
       taken from the folder wrapping ``subagents/``.
-    * **inline form** — any record carries ``isSidechain: true``; the
-      parent uuid is read from that record's ``parentUuid`` field.
+    * **inline / flat form** — any record carries ``isSidechain: true``.
 
     The presence of an ``isSidechain`` *key* is NOT a signal — only the
     value ``True`` marks a sidechain (Claude writes ``isSidechain: false``
     on every normal record).
+
+    The spawner-session uuid (``parent_uuid``) is derived from a *session*
+    signal, never a message signal.  Priority: the ``subagents/`` wrapper
+    folder name (directory form) → else the sidechain records' own
+    ``sessionId`` field (which equals that folder name when present, and is
+    the only spawner signal for the flat form).  Record-level
+    ``parentUuid`` is deliberately NOT used: it is a message uuid (the
+    chain root / previous message), not the spawner session, and using it
+    was the A2 defect (``parent_uuid`` = chain root instead of spawner).
     """
     custom_title: Optional[str] = None
     ai_title: Optional[str] = None
@@ -371,7 +382,7 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     last_timestamp: Optional[datetime] = None
     message_count = 0
     is_sidechain = False
-    inline_parent_uuid: Optional[str] = None
+    record_session_id: Optional[str] = None
     record_cwd: Optional[str] = None
 
     for record in iter_jsonl_records(jsonl_path):
@@ -388,13 +399,15 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
 
         # Inline sidechain detection: value must be True, the mere
         # presence of the key is not enough (it is False everywhere
-        # on normal records).
+        # on normal records).  The spawner-session uuid comes from the
+        # record's ``sessionId`` (a *session* signal), NOT its
+        # ``parentUuid`` (a *message* uuid — chain root / previous msg).
         if record.get("isSidechain") is True:
             is_sidechain = True
-            if inline_parent_uuid is None:
-                raw_parent = record.get("parentUuid")
-                if isinstance(raw_parent, str) and raw_parent.strip():
-                    inline_parent_uuid = raw_parent.strip()
+            if record_session_id is None:
+                raw_sid = record.get("sessionId")
+                if isinstance(raw_sid, str) and raw_sid.strip():
+                    record_session_id = raw_sid.strip()
 
         rec_type = record.get("type")
         if rec_type == "custom-title" and custom_title is None:
@@ -432,12 +445,24 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
             return None
 
     # Resolve subagent classification + parent uuid from BOTH the directory
-    # layout and any inline sidechain marker.  The path-derived parent uuid
-    # wins when present (it is the canonical parent-session folder); the
-    # in-file ``parentUuid`` is the fallback for the inline form.
+    # layout and any inline sidechain marker.  ``parent_uuid`` is the
+    # *spawner session* uuid, derived only from session-level signals:
+    #   1. the ``subagents/`` wrapper folder name (directory form) — the
+    #      canonical parent-session folder, most explicit;
+    #   2. else the sidechain records' ``sessionId`` (spawner session; the
+    #      only signal for the flat form) — but never the file's own uuid,
+    #      guarding against a session becoming its own parent.
+    # Record-level ``parentUuid`` (a message uuid) is intentionally NOT a
+    # source here — that was the A2 defect.
+    own_uuid = jsonl_path.stem
     path_parent_uuid = _parent_uuid_from_subagent_path(jsonl_path)
     is_subagent = path_parent_uuid is not None or is_sidechain
-    parent_uuid = path_parent_uuid or inline_parent_uuid
+    if path_parent_uuid is not None:
+        parent_uuid = path_parent_uuid
+    elif record_session_id is not None and record_session_id != own_uuid:
+        parent_uuid = record_session_id
+    else:
+        parent_uuid = None
 
     # project_slug is the first non-``subagents`` ancestor folder name.
     slug_dir = jsonl_path.parent

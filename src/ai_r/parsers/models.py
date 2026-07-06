@@ -54,9 +54,12 @@ class Session:
             for Antigravity this is the number of records in the
             overview.txt / transcript.jsonl; for Pi this is the number
             of user/assistant message entries.
-        parent_uuid: Parent session uuid for spawned sub-sessions:
-            Claude (inferred from the ``subagents/`` directory layout or
-            the ``parentUuid`` field of an inline sidechain record),
+        parent_uuid: Parent (spawner) session uuid for spawned
+            sub-sessions:
+            Claude — the spawner session, taken from the ``subagents/``
+            wrapper folder name, else the ``sessionId`` of the inline
+            sidechain records (the message-level ``parentUuid`` is a
+            message uuid, not a session, and is NOT used),
             OpenCode (``session.parent_id``), Codex
             (``session_meta.payload.parent_thread_id`` or the nested
             ``source.subagent.thread_spawn.parent_thread_id``), Pi

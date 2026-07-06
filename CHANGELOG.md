@@ -74,6 +74,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   env values fall back to the default — never a crash; the honest BM25
   degradation path is unchanged.
 
+### Fixed
+
+- **Claude subagent `parent_uuid` now resolves to the spawner session, not a
+  chain-root message uuid.** For an inline sidechain (or a flat
+  `subagents/agent-*.jsonl` with no per-session parent folder) the parser took
+  the record-level `parentUuid` — the sidechain's own chain-root message, not a
+  session id. It now derives the spawner from the sidechain records' `sessionId`
+  (the parent conversation), still preferring the wrapping `subagents/<parent>`
+  folder when present and guarding against self-parenting; the message-level
+  `parentUuid` is used only to detect the sidechain, never emitted as
+  `parent_uuid`. Also fixes a latent path bug where a flat subagent file
+  returned the project slug instead of `None`.
+
 ## [0.3.0] - 2026-07-05
 
 ### Added
