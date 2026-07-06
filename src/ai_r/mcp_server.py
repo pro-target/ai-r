@@ -44,7 +44,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, List, Mapping, Optional, Sequence, Union
 
 _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
@@ -135,7 +135,7 @@ _LIST_LIMIT_DEFAULT = 100
 # as slow as cold (1x); with the cap above the corpus it is ~17x faster.
 # Default holds a large corpus; tune with ``AI_R_HAYSTACK_CACHE_MAX``. Each
 # entry is already bounded by ``_HAYSTACK_CHARS_CAP`` so total stays bounded.
-def _resolve_haystack_cache_max(env: Optional[dict] = None) -> int:
+def _resolve_haystack_cache_max(env: Optional[Mapping[str, str]] = None) -> int:
     env = os.environ if env is None else env
     raw = env.get("AI_R_HAYSTACK_CACHE_MAX")
     if raw:
