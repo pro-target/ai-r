@@ -100,6 +100,24 @@ filesystem: path separators (`/`, `\`), whitespace, and `..`
 (Claude) are rejected with `ValueError`. This keeps `read_session`
 scoped to a single session identifier — no path traversal.
 
+## Event core & cross-cutting modules
+
+Above the parsers, a normalized **event core** (`src/ai_r/events/`) folds
+every agent's messages into one agent-neutral `Event` stream
+(`user_turn` / `assistant_turn` / `tool_call` (+ `tool_kind`) / `thinking` /
+`plan_event`). The five event verbs (`query`, `get_body`, `aggregate`,
+`diff`, `detect_current`) and the three presets (`plan`, `incidents`,
+`network`) are thin readers over that stream — `query` is the workhorse;
+a preset wires a fixed chain of base verbs, never a second engine.
+
+Three cross-cutting modules sit beside the core:
+
+| Module | Responsibility |
+|---|---|
+| `redact.py` | Secret redaction on every emitting surface (title, message content, intent, qa) as `[REDACTED_<TYPE>]`, with a `redactions` type→count report. On by default. |
+| `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. |
+| `semantic.py` | Optional relevance re-rank (see ADR below): re-ranks the BM25 top-50 with a local ONNX embedding model. Strictly opt-in, fail-soft to BM25. |
+
 ## Decisions
 
 ### ADR: no access-control layer
@@ -117,3 +135,27 @@ handled by `session.py` multi-candidate detection, not by authorization.
 The separate content-trust concern (what a reader's caller does with
 session text) is covered in [Security](security.md) and is unaffected
 by this decision.
+
+### ADR: semantic re-rank as an optional extra
+
+Earlier design deliberately shipped **no semantic embeddings** — relevance
+was BM25 only, with no `torch` dependency and no persistent index. v0.3.0
+revisits that stance and adds an **opt-in** semantic re-rank; this ADR records
+the reversal and its boundaries.
+
+- **What changed.** `sort="semantic"` (in `query` / `search_sessions`)
+  re-ranks the BM25 **top-50** candidates with a local multilingual embedding
+  model (`multilingual-e5-small`, ONNX via `onnxruntime` — no `torch`). BM25
+  stays the primary retriever; the embedder only reorders a shortlist.
+- **Why.** Cross-lingual recall: a Russian query over English sessions (and the
+  reverse) is exactly where lexical BM25 is weakest. Re-rank buys that without a
+  heavyweight stack.
+- **Boundaries.** Strictly optional (`pip install "ai-r[semantic]"` + a one-time
+  model download). No `torch`, no background daemon, no persistent index.
+  Resource-capped: `AI_R_SEMANTIC_THREADS` (default 2) and idle model release
+  (`AI_R_SEMANTIC_IDLE_SEC`, default 300 s, ~118 MB freed).
+- **Fail-soft.** Missing package/model → `{active: false, reason, fallback:
+  "bm25"}`; it degrades to plain BM25 order, never crashes.
+- **Zero-LLM invariant preserved.** The embedder computes vector similarities;
+  it generates no text and makes no model/network API call. The "no generative
+  model in the read path" invariant holds — this is retrieval math, not an LLM.
