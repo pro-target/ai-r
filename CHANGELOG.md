@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test guardrail: `pyproject.toml` `[tool.pytest.ini_options] pythonpath = ["src"]`
   so `pytest` / `make test-hermetic` always resolve `ai_r` from the working
   tree, never a stale installed wheel.
+- **Session recency on `list_sessions`** — each session summary now carries
+  `last_activity` (explicit ISO of the last-activity instant, the same as
+  `date`, which is kept for backward compatibility), `age_sec` (whole seconds
+  since, clamped at `0` on writer/reader clock skew) and `activity`
+  (`"fresh"`/`"stale"` against the `AI_R_STALL_SEC` threshold, default `600`s;
+  blank/invalid → default). Pure classifier `ai_r.activity.session_activity`
+  (wall-clock `now` injected). Honest contract (F1.1): this is
+  record-recency only, **not** a process-liveness claim — deciding "running
+  but silent" vs "crashed" is a consumer-side OS correlation ai-r deliberately
+  does not fabricate.
 
 ### Changed
 

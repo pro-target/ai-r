@@ -42,6 +42,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Union
 
@@ -80,6 +81,7 @@ from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # n
 from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
 from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
 from ai_r.resume import resume_command  # noqa: E402
+from ai_r.activity import session_activity, stall_seconds  # noqa: E402
 from ai_r.redact import (  # noqa: E402
     merge_redaction_counts as _merge_redactions,
     redact_value as _redact_value,
@@ -193,7 +195,11 @@ mcp = FastMCP(
 )
 
 
-def _session_summary(session: Session) -> dict[str, Any]:
+def _session_summary(
+    session: Session,
+    now: Optional[datetime] = None,
+    stale_sec: Optional[float] = None,
+) -> dict[str, Any]:
     """Project a :class:`Session` to a JSON-safe summary dict.
 
     ``project_dir`` / ``launch_surface`` are top-level fields (next to
@@ -204,12 +210,28 @@ def _session_summary(session: Session) -> dict[str, Any]:
     command exists (Antigravity, subagent sessions, reference-only
     Desktop sessions) — text only, never executed (SSOT
     :mod:`ai_r.resume`).
+
+    When ``now`` is supplied (``list_sessions`` samples the wall clock once
+    per call and passes it in), the A3 recency fields are attached:
+
+    * ``last_activity`` — the last-activity timestamp as an explicit ISO
+      string (same instant as ``date``, kept alongside it for a clearly
+      named field; ``date`` is retained for backward compatibility);
+    * ``age_sec`` — whole seconds since ``last_activity``;
+    * ``activity`` — ``"fresh"`` / ``"stale"`` (recency of the last written
+      record only — NOT a claim about process liveness; see
+      :mod:`ai_r.activity`).
+
+    ``stale_sec`` defaults to :func:`ai_r.activity.stall_seconds` when a
+    ``now`` is given but no explicit threshold.  Without ``now`` the summary
+    is byte-identical to the historical shape (no recency fields).
     """
+    date_iso = _iso(session.date)
     result: dict[str, Any] = {
         "uuid": session.uuid,
         "agent": session.agent.value,
         "title": session.title,
-        "date": _iso(session.date),
+        "date": date_iso,
         "message_count": session.message_count,
         "kind": session.kind,
         "parent_uuid": session.parent_uuid,
@@ -217,6 +239,12 @@ def _session_summary(session: Session) -> dict[str, Any]:
         "launch_surface": session.launch_surface,
         "resume_command": resume_command(session),
     }
+    if now is not None:
+        threshold = stall_seconds() if stale_sec is None else stale_sec
+        recency = session_activity(session.date, now, threshold)
+        result["last_activity"] = date_iso
+        result["age_sec"] = recency["age_sec"]
+        result["activity"] = recency["activity"]
     if session.extra:
         result["extra"] = session.extra
     return result
@@ -687,6 +715,25 @@ def list_sessions(
       ``"antigravity-ide"`` | ``"antigravity-cli"``; OpenCode/Pi: no
       signal).
 
+    Each summary also carries the A3 recency signal, measured against a
+    single wall-clock ``now`` sampled once for the whole call:
+
+    * ``last_activity`` — the last-activity timestamp as an explicit ISO
+      string (same instant as ``date``; ``date`` is kept for backward
+      compatibility);
+    * ``age_sec`` — whole seconds since ``last_activity`` (clamped at ``0``
+      when a future timestamp implies writer/reader clock skew);
+    * ``activity`` — ``"fresh"`` if ``age_sec`` is at or under the
+      ``AI_R_STALL_SEC`` threshold (default ``600`` s = 10 min),
+      ``"stale"`` if past it.
+
+    Honest contract (F1.1): ``activity`` describes only the **recency of the
+    last written record**.  It is **not** a claim about process liveness — a
+    session file cannot show whether its producer is still running.
+    "Running but silent" vs. "crashed" is a consumer-side inference
+    (correlate ``activity == "stale"`` with an OS pid-alive check); ai-r does
+    not fabricate it.
+
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
             ``pi``. When omitted, every supported agent is queried.
@@ -749,6 +796,12 @@ def list_sessions(
     # Per-agent list_sessions() results, reused by the empty-result
     # diagnostics below so an empty inventory never pays for a second scan.
     scanned_sessions: dict[str, Any] = {}
+    # Sample the wall clock and the fresh/stale threshold ONCE per call so
+    # every session's A3 recency (``age_sec`` / ``activity``) is measured
+    # against a single, consistent "now" (the pure classifier lives in
+    # :mod:`ai_r.activity` and never reads the clock itself).
+    now = datetime.now(timezone.utc)
+    stale_sec = stall_seconds()
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         agent_sessions = parser.list_sessions()
@@ -762,7 +815,7 @@ def list_sessions(
                 session.project_dir, project_dir
             ):
                 continue
-            summaries.append(_session_summary(session))
+            summaries.append(_session_summary(session, now=now, stale_sec=stale_sec))
 
     # Global newest-first sort: parsers sort per-agent, but across agents we
     # merge into one timeline so offset/limit pages show the freshest sessions.

@@ -118,6 +118,18 @@ Every session summary (`list_sessions` / `read_session` / `search_sessions` cand
 
 **`project_dir` filter** on `list_sessions` and `query`: keeps only sessions whose `project_dir` equals the given path **or is a descendant of it** — path-boundary aware (`/a/b` matches `/a/b` and `/a/b/sub`, never the sibling `/a/bc`), trailing slashes ignored, no other normalisation (`~`/`..`/symlinks are compared as recorded). Chosen over exact-only because "sessions of this project" must include sessions started in a subdirectory of the project root. Sessions with `project_dir=null` never match (absence is not a wildcard). Applied at the *session* level before any message is read (like `noise`), composes with the other filters by AND, ignored on the `relative_to` walk, and an empty/blank filter value fails loud (`invalid_argument`). Semantics SSOT: `src/ai_r/parsers/_common.py::project_dir_matches`.
 
+## Session recency (`last_activity` + `age_sec` + `activity`)
+
+Every `list_sessions` summary carries an explicit **recency** signal, for a supervising poller that wants to know how long ago a session last recorded activity (e.g. to spot one that may have stalled). Three fields, all measured against a single wall-clock `now` sampled once per call:
+
+- **`last_activity`** — the last-activity timestamp as an explicit ISO string (the same instant as `date`, which is retained unchanged for backward compatibility). "Last activity" means an in-file timestamp where the format records one, else file mtime / DB `time_updated` (same source as `date`).
+- **`age_sec`** — whole seconds since `last_activity`. Clamped at `0` from below: a `last_activity` in the future (writer/reader clock skew) yields `0`, never a negative age.
+- **`activity`** — `"fresh"` when `age_sec` is at or under the threshold, `"stale"` when strictly past it.
+
+**Threshold** — env `AI_R_STALL_SEC`, default `600.0` (10 minutes). Blank / unparseable / `<= 0` values fall back to the default without crashing.
+
+**Honest contract (F1.1):** `activity` describes only the **recency of the last written record** — it is **not** a claim about process liveness. A session file cannot show whether its producing process is still alive; ai-r therefore never asserts "running" or "hung". Deciding "running but silent" vs. "crashed" is a **consumer-side** inference: correlate `activity == "stale"` with an OS signal (is the pid still alive?). ai-r deliberately does not fabricate that. Classifier SSOT (pure, `now` injected): `src/ai_r/activity.py::session_activity`.
+
 ## Resume command (`resume_command`)
 
 Every session summary carries `resume_command` (F2.2, next to `project_dir`/`launch_surface`): the exact shell one-liner that reopens the conversation in its agent's CLI, or `null` when no real command exists — **absence is honest, never fabricated; the field is text only, ai-r never executes it**. Commands are verified against the installed CLIs' own `--help`, not invented:

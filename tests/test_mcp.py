@@ -567,6 +567,124 @@ def test_list_sessions_limit_zero_is_uncapped(
     assert result["truncated"] is False
 
 
+# --- A3 session recency (last_activity / age_sec / activity) ---------------
+
+
+def test_list_sessions_carries_recency_fields(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each summary gains ``last_activity`` / ``age_sec`` / ``activity``, and
+    the recency verdict is self-consistent with ``age_sec`` + threshold.
+
+    ``date`` is retained (backward compatibility) and equals ``last_activity``.
+    ``now`` is the real clock here, so we assert the *invariants* (types,
+    consistency), not a fixed age — the pure classifier is tested exactly
+    in :mod:`tests.test_activity`.
+    """
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="recency-1",
+        user_text="recent work",
+        title="recency session",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    # A generous threshold so a just-written fixture reads fresh regardless of
+    # the fixture's embedded timestamp vs. the test-run clock.
+    monkeypatch.setenv("AI_R_STALL_SEC", "999999999")
+
+    result = list_sessions(agent="claude")
+    session = result["sessions"][0]
+    # New fields present.
+    assert "last_activity" in session
+    assert "age_sec" in session
+    assert "activity" in session
+    # Backward compat: ``date`` still present and equals ``last_activity``.
+    assert session["date"] == session["last_activity"]
+    # Types + consistency.
+    assert isinstance(session["age_sec"], int)
+    assert session["age_sec"] >= 0
+    assert session["activity"] in ("fresh", "stale")
+    assert session["activity"] == "fresh"
+    # Consistency of verdict with the (huge) threshold.
+    assert (session["age_sec"] > 999999999) == (session["activity"] == "stale")
+
+
+def test_list_sessions_stale_when_threshold_tiny(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A near-zero threshold flips an older fixture session to ``stale``.
+
+    The fixture's last-activity timestamp is well in the past, so with a 0.001s
+    threshold any real ``now`` puts its age past the bar → ``stale``.
+    """
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="stale-1",
+        user_text="old work",
+        title="stale session",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    monkeypatch.setenv("AI_R_STALL_SEC", "0.001")
+
+    result = list_sessions(agent="claude")
+    session = result["sessions"][0]
+    assert session["activity"] == "stale"
+    assert session["age_sec"] > 0
+
+
+def test_session_summary_without_now_omits_recency_fields() -> None:
+    """Called without ``now`` the summary keeps its historical shape.
+
+    Non-list surfaces (``read_session`` candidates, etc.) build summaries
+    without a sampled clock; they must not sprout recency keys.
+    """
+    from ai_r.parsers.models import AgentName, Session
+
+    sess = Session(
+        uuid="no-now-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        path="/tmp/x.jsonl",
+        message_count=1,
+    )
+    summary = _session_summary(sess)
+    assert "activity" not in summary
+    assert "age_sec" not in summary
+    assert "last_activity" not in summary
+    # ``date`` is still there.
+    assert summary["date"].startswith("2026-01-01")
+
+
+def test_session_summary_with_fixed_now_is_deterministic() -> None:
+    """With an injected ``now`` + threshold the summary's recency is exact."""
+    from ai_r.parsers.models import AgentName, Session
+
+    date = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, 12, 5, 0, tzinfo=timezone.utc)  # 300s later
+    sess = Session(
+        uuid="fixed-now-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=date,
+        path="/tmp/x.jsonl",
+        message_count=1,
+    )
+    summary = _session_summary(sess, now=now, stale_sec=600.0)
+    assert summary["age_sec"] == 300
+    assert summary["activity"] == "fresh"
+    assert summary["last_activity"] == summary["date"]
+
+    summary_stale = _session_summary(sess, now=now, stale_sec=60.0)
+    assert summary_stale["activity"] == "stale"
+
+
 def test_list_sessions_surfaces_subagent_kind_and_parent(
     fake_claude_subagent: Path,
     tmp_sessions_dir: Path,
