@@ -7,6 +7,8 @@ argparse setup to the matching module in :mod:`ai_r.cli.commands`.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from typing import Optional, Sequence
 
@@ -60,13 +62,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI entry point.
+
+    Error contract: the CLI never leaks a Python traceback to a consumer
+    script.  Expected failures (bad arguments, missing sessions, …) are
+    handled inside each subcommand (``ai-r: <message>`` on stderr +
+    non-zero exit).  Anything *unexpected* that escapes a handler is
+    caught HERE and emitted as a single structured JSON line on stderr
+    (``{"error": "internal_error", "type": ..., "message": ...}``) with
+    exit code 1 — so a consumer script sees a parseable error and a
+    non-zero status instead of a stack dump.  Set ``AI_R_DEBUG=1`` to
+    re-raise and see the full traceback while debugging.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)
     if func is None:
         parser.print_help(sys.stderr)
         return 1
-    return func(args)
+    try:
+        return func(args)
+    except KeyboardInterrupt:
+        print("ai-r: interrupted", file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # Downstream pipe (e.g. ``| head``) closed early — not our error.
+        # 128+SIGPIPE, the conventional shell status for a broken pipe.
+        return 141
+    except Exception as exc:  # noqa: BLE001 — last-resort traceback guard
+        if os.environ.get("AI_R_DEBUG"):
+            raise
+        payload = {
+            "error": "internal_error",
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "hint": "set AI_R_DEBUG=1 to see the full traceback",
+        }
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

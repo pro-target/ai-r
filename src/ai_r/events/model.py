@@ -23,6 +23,8 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import to_utc_aware
 from ai_r.parsers import PARSERS, Message, iso, target_agents
+from ai_r.parsers._common import project_dir_matches
+from ai_r.parsers._noise import noise_allows, validate_noise
 
 from ai_r.events._common import (
     Event,
@@ -30,6 +32,7 @@ from ai_r.events._common import (
     _mk_event,
     _path_from_payload,
     classify_tool,
+    resolve_tool,
 )
 
 
@@ -109,6 +112,11 @@ class _PlanSignal:
     status: Optional[str] = None
     message_index: int = -1
     task_key: str = ""
+    # The originating tool_use id (when the transcript records one) — lets
+    # the plan-response layer (F3.4) correlate a user's approval/rejection
+    # tool_result back to the exact plan revision it answered.  ``None`` for
+    # file-based signals and for transcripts that predate call ids.
+    tool_use_id: Optional[str] = None
 
 
 def _title_from_markdown_body(body: str) -> Optional[str]:
@@ -135,6 +143,8 @@ def _plan_signal_from_tool(
     if not isinstance(name, str) or not name:
         return None
     payload = _coerce_tool_input(tool.get("input", ""))
+    raw_tuid = tool.get("tool_use_id")
+    tool_use_id = raw_tuid if isinstance(raw_tuid, str) and raw_tuid else None
 
     if agent == "claude":
         if name == "ExitPlanMode":
@@ -149,6 +159,7 @@ def _plan_signal_from_tool(
                 agent_signal="claude:ExitPlanMode",
                 body=body or None,
                 message_index=message_index,
+                tool_use_id=tool_use_id,
             )
         if name in ("Write", "write", "write_file", "create_file"):
             fpath = _path_from_payload(payload)
@@ -165,6 +176,7 @@ def _plan_signal_from_tool(
                     path=fpath,
                     body=body or None,
                     message_index=message_index,
+                    tool_use_id=tool_use_id,
                 )
         return None
 
@@ -200,6 +212,7 @@ def _plan_signal_from_tool(
                 steps=steps or None,
                 status=status,
                 message_index=message_index,
+                tool_use_id=tool_use_id,
             )
         return None
 
@@ -315,6 +328,304 @@ def _plan_signals_for_session(
     return signals
 
 
+# --- plan responses (F3.4, INTERNAL agent-specific normalization) ----------
+# When an agent has an interactive plan-approval flow, the user's verdict on
+# a proposed plan revision comes back as a tool_result answering the plan
+# tool_use.  Today only Claude has that flow (``ExitPlanMode``); Codex
+# ``update_plan`` is fire-and-forget and Antigravity's plan is a file — no
+# response signal exists there, so those agents honestly yield nothing.
+#
+# The recognised Claude response formats (verified against real vaults):
+#
+# 1. rejection with selections — "The user doesn't want to proceed … the
+#    user said:" followed by one or more "On selected text:" blocks, each a
+#    ``> ``-quoted excerpt of the RENDERED plan plus the user's comment;
+# 2. stay-in-plan-mode — "User chose to stay in plan mode …\nComments on
+#    the plan:" followed by ``[Re: "<quote>"] <comment>`` entries;
+# 3. free-text rejection — "… the user said:" with no selection (the whole
+#    tail is one comment, quote = None);
+# 4. approval — "User has approved your plan …", optionally carrying the
+#    AUTHORITATIVE final text under "## Approved Plan (edited by user):"
+#    (the plan file on disk can diverge from what the user approved).
+#
+# Technical failures ("Tool permission request failed…", stream errors) and
+# bare no-text rejections (the user pressed reject without a word) are
+# filtered out — they carry no user signal.
+
+_TECH_FAILURE_PREFIX = "Tool permission request failed"
+_APPROVED_PREFIX = "User has approved"
+_APPROVED_EDITED_MARKER = "## Approved Plan (edited by user):"
+_STAY_PREFIX = "User chose to stay in plan mode"
+_STAY_COMMENTS_MARKER = "Comments on the plan:"
+_REJECT_PREFIX = "The user doesn't want to proceed"
+_USER_SAID_MARKER = "the user said:"
+_SELECTED_MARKER = "On selected text:"
+_RE_PAIR_RE = re.compile(r'\[Re: "(.*?)"\]', re.S)
+
+
+@dataclass(frozen=True)
+class _PlanResponse:
+    """One user response to a plan revision (internal, pre-normalization).
+
+    ``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode`` | ``approved``.
+    ``pairs`` are the extracted (quote, comment) tuples — quote is ``None``
+    for a free-text comment that selected nothing.  ``edited_body`` is the
+    authoritative user-edited plan text carried by an approval, when present.
+    ``raw`` keeps the full tool_result content for on-demand ``get_body``.
+    """
+
+    tool_use_id: str
+    verdict: str
+    raw: str
+    pairs: Tuple[Tuple[Optional[str], str], ...] = ()
+    edited_body: Optional[str] = None
+    message_index: int = -1
+    ts: Optional[str] = None
+
+
+def _parse_selected_pairs(
+    text: str,
+) -> List[Tuple[Optional[str], str]]:
+    """Split an "On selected text:" rejection tail into (quote, comment) pairs.
+
+    Free text before the first block becomes a ``(None, comment)`` pair.
+    Within a block, leading ``> ``-prefixed lines are the quote (markup the
+    UI rendered, stripped of the quote prefix); the rest is the comment.
+    """
+    pairs: List[Tuple[Optional[str], str]] = []
+    chunks = text.split(_SELECTED_MARKER)
+    preamble = chunks[0].strip()
+    if preamble:
+        pairs.append((None, preamble))
+    for chunk in chunks[1:]:
+        quote_lines: List[str] = []
+        comment_lines: List[str] = []
+        in_quote = True
+        for line in chunk.lstrip("\n").splitlines():
+            if in_quote and line.startswith(">"):
+                quote_lines.append(
+                    line[2:] if line.startswith("> ") else line[1:]
+                )
+            else:
+                in_quote = False
+                comment_lines.append(line)
+        quote = "\n".join(quote_lines).strip()
+        comment = "\n".join(comment_lines).strip()
+        if quote or comment:
+            pairs.append((quote or None, comment))
+    return pairs
+
+
+def _parse_re_pairs(text: str) -> List[Tuple[Optional[str], str]]:
+    """Split a stay-in-plan-mode comments tail into (quote, comment) pairs.
+
+    The format is ``[Re: "<quote>"] <comment>`` per entry; a comment runs
+    until the next ``[Re:`` marker (multi-line comments are common).  Free
+    text before the first marker becomes a ``(None, comment)`` pair.
+    """
+    pairs: List[Tuple[Optional[str], str]] = []
+    matches = list(_RE_PAIR_RE.finditer(text))
+    preamble = (text[: matches[0].start()] if matches else text).strip()
+    if preamble:
+        pairs.append((None, preamble))
+    for k, m in enumerate(matches):
+        end = matches[k + 1].start() if k + 1 < len(matches) else len(text)
+        quote = m.group(1).strip()
+        comment = text[m.end():end].strip()
+        if quote or comment:
+            pairs.append((quote or None, comment))
+    return pairs
+
+
+def _classify_plan_response(
+    content: str,
+) -> Optional[Tuple[str, Tuple[Tuple[Optional[str], str], ...], Optional[str]]]:
+    """Classify one plan tool_result into ``(verdict, pairs, edited_body)``.
+
+    Returns ``None`` for technical failures, bare no-text rejections and any
+    unrecognised format — filtered, never guessed.
+    """
+    text = content or ""
+    if not text.strip() or text.startswith(_TECH_FAILURE_PREFIX):
+        return None
+    if text.startswith(_APPROVED_PREFIX):
+        edited: Optional[str] = None
+        if _APPROVED_EDITED_MARKER in text:
+            edited = text.split(_APPROVED_EDITED_MARKER, 1)[1].lstrip("\n")
+        return ("approved", (), edited or None)
+    if text.startswith(_STAY_PREFIX):
+        if _STAY_COMMENTS_MARKER in text:
+            tail = text.split(_STAY_COMMENTS_MARKER, 1)[1]
+        else:
+            tail = "\n".join(text.splitlines()[1:])
+        pairs = tuple(_parse_re_pairs(tail))
+        return ("stay_in_plan_mode", pairs, None) if pairs else None
+    if text.startswith(_REJECT_PREFIX) or _SELECTED_MARKER in text:
+        if _USER_SAID_MARKER in text:
+            tail = text.split(_USER_SAID_MARKER, 1)[1]
+        elif _SELECTED_MARKER in text:
+            tail = text[text.index(_SELECTED_MARKER):]
+        else:
+            return None  # bare rejection — no user words, no signal
+        pairs = tuple(_parse_selected_pairs(tail))
+        return ("rejected", pairs, None) if pairs else None
+    return None
+
+
+def _plan_responses_for_session(
+    messages: Sequence[Any],
+    *,
+    agent: str,
+) -> List[_PlanResponse]:
+    """Return the ordered user responses to plan revisions in one session.
+
+    Only agents with an interactive plan-approval flow produce responses —
+    today that is Claude.  Every other agent returns an empty list (honest
+    absence, never fabricated).  Order is message order; the list index is
+    the stable ``pf<N>`` ordinal that ``get_body`` resolves.
+
+    The correlated call ids come from the plan-signal SSOT
+    (:func:`_plan_signals_for_session`), so BOTH Claude plan signals are
+    covered: an ``ExitPlanMode`` call and a ``Write plans/*.md`` call (v2 —
+    a rejected plan-file Write with user words is plan feedback too; its
+    result uses the same permission-denial format).  A successful Write's
+    "File created…" result matches no recognised format and is filtered.
+    """
+    if agent != "claude":
+        return []
+    plan_call_ids = {
+        sig.tool_use_id
+        for sig in _plan_signals_for_session(
+            messages, agent=agent, session_path=""
+        )
+        if sig.tool_use_id
+    }
+    if not plan_call_ids:
+        return []
+    responses: List[_PlanResponse] = []
+    for idx, msg in enumerate(messages):
+        msg_ts = to_utc_aware(getattr(msg, "timestamp", None))
+        ts_iso = iso(msg_ts) if msg_ts is not None else None
+        for tr in getattr(msg, "tool_result", ()) or ():
+            if not isinstance(tr, dict):
+                continue
+            tid = tr.get("tool_use_id")
+            if not (isinstance(tid, str) and tid in plan_call_ids):
+                continue
+            raw = tr.get("content")
+            raw = raw if isinstance(raw, str) else str(raw or "")
+            classified = _classify_plan_response(raw)
+            if classified is None:
+                continue
+            verdict, pairs, edited = classified
+            responses.append(_PlanResponse(
+                tool_use_id=tid,
+                verdict=verdict,
+                raw=raw,
+                pairs=pairs,
+                edited_body=edited,
+                message_index=idx,
+                ts=ts_iso,
+            ))
+    return responses
+
+
+# --- quote → plan-section anchoring (F3.4 v2) ------------------------------
+# The user selects quotes from the RENDERED plan (the UI strips markdown
+# markup before display), so anchoring a quote back to a section of the raw
+# markdown source must compare both sides through the same markup-stripping
+# normalization (audited on real vaults: with stripping the section match is
+# ~99%).  A quote that matches no section — or more than one — gets an honest
+# ``None`` anchor, never a nearest guess.
+
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# Leading rendered-away line prefixes: heading hashes, blockquote markers,
+# bullet/numbered list markers (possibly nested, hence the ``+``).
+_MD_LINE_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+))+"
+)
+_MD_CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+")
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def _normalize_rendered_text(text: str) -> str:
+    """Normalize markdown source and rendered selections to one comparand.
+
+    Strips the markup a terminal render removes (heading hashes, list and
+    blockquote markers, checkboxes, emphasis asterisks, backticks, link
+    targets) and collapses ALL whitespace to single spaces, so a quote
+    selected from the rendered plan matches its markdown source.  Applied
+    symmetrically to both sides, so a literal ``*``/`` ` `` inside code is
+    dropped from quote and section alike and still matches.
+    """
+    lines: List[str] = []
+    for line in text.splitlines():
+        s = _MD_LINE_PREFIX_RE.sub("", line.strip())
+        s = _MD_CHECKBOX_RE.sub("", s)
+        lines.append(s)
+    joined = "\n".join(lines)
+    joined = _MD_LINK_RE.sub(r"\1", joined)
+    joined = joined.replace("`", "").replace("*", "")
+    return _WS_RE.sub(" ", joined).strip()
+
+
+def _plan_body_sections(body: str) -> List[Tuple[Optional[str], str]]:
+    """Split a markdown plan body into ``(heading, section_text)`` chunks.
+
+    Flat split on heading lines (any level); the heading line itself belongs
+    to its section, so a quote of the heading anchors there.  Text before
+    the first heading forms a headingless ``(None, …)`` preamble.  Fenced
+    code blocks are opaque — a ``# comment`` inside a fence never starts a
+    section.
+    """
+    sections: List[Tuple[Optional[str], str]] = []
+    heading: Optional[str] = None
+    buf: List[str] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            buf.append(line)
+            continue
+        match = None if in_fence else _HEADING_LINE_RE.match(line)
+        if match:
+            if buf or heading is not None:
+                sections.append((heading, "\n".join(buf)))
+            heading = match.group(2).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    sections.append((heading, "\n".join(buf)))
+    return sections
+
+
+def _anchor_quote_to_section(
+    quote: Optional[str], body: Optional[str]
+) -> Optional[str]:
+    """Anchor a rendered plan quote to ONE section heading of the source.
+
+    Returns the heading text of the single section whose normalized text
+    contains the normalized quote.  Honest ``None`` when the quote is empty,
+    the body is unknown, the quote matches NO section (a miss stays a miss —
+    never the nearest guess) or matches MORE than one (ambiguity is not
+    resolved by picking one).
+    """
+    if not quote or not isinstance(body, str) or not body:
+        return None
+    needle = _normalize_rendered_text(quote)
+    if not needle:
+        return None
+    hits = [
+        heading
+        for heading, section_text in _plan_body_sections(body)
+        if needle in _normalize_rendered_text(section_text)
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
 def _messages_to_events(
     messages: Sequence[Any],
     *,
@@ -410,10 +721,21 @@ def _messages_to_events(
                 sub = classify_tool(name)
                 tool_ts = to_utc_aware(tool.get("timestamp"))
                 tool_iso = iso(tool_ts) if tool_ts is not None else ts_iso
+                payload = _coerce_tool_input(tool.get("input", ""))
                 refs: List[dict] = [{"tool": name}]
-                fpath = _path_from_payload(_coerce_tool_input(tool.get("input", "")))
+                fpath = _path_from_payload(payload)
                 if fpath:
                     refs.append({"file": fpath})
+                # F3.1: classify the call (wrapper-aware) and surface the
+                # real name under a Skill/Task/MCP wrapper.  ``tool_kind``
+                # is always present; ``tool_resolved`` only when the input
+                # actually carries the real name (honest — never guessed).
+                # The event ``type`` keeps the classify_tool subtype for
+                # backward-compat (a Task call stays ``tool_call(other)``).
+                kind, resolved = resolve_tool(name, payload)
+                refs.append({"tool_kind": kind})
+                if resolved:
+                    refs.append({"tool_resolved": resolved})
                 # Surface the call's outcome when a correlated result exists:
                 # ``{"is_error": True|False}``.  Absent when no matching
                 # result id was seen (outcome unknown / agent has no signal).
@@ -454,29 +776,111 @@ def _messages_to_events(
     return events
 
 
+def normalize_session_filter(
+    session: Optional[Any],
+) -> Optional[frozenset]:
+    """Normalize a ``session`` facet value into a uuid set, or ``None``.
+
+    F3.2: the ``session`` facet accepts a single uuid string OR a list of
+    uuid strings (an explicit session batch — e.g. the ids picked from a
+    ``search_sessions`` result).  Returns ``None`` for "no filter", else a
+    ``frozenset`` of uuids to keep.
+
+    Fail-loud, never a silent surprise:
+
+    * an empty list raises :class:`ValueError` — ``[]`` is ambiguous
+      ("no filter" vs "match nothing"), the caller must omit the facet
+      to scan everything;
+    * a non-string item (or a blank/empty string item) raises
+      :class:`ValueError`;
+    * any other type (int/dict/...) raises :class:`ValueError`.
+
+    A bare string is passed through as a one-element set unchanged —
+    including the (pre-existing) degenerate ``""``, which keeps the
+    historical "matches nothing" behaviour for backward compatibility.
+    """
+    if session is None:
+        return None
+    if isinstance(session, str):
+        return frozenset((session,))
+    if isinstance(session, (list, tuple, set, frozenset)):
+        items = list(session)
+        if not items:
+            raise ValueError(
+                "session list must not be empty — omit the session "
+                "facet to scan all sessions"
+            )
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "session list items must be non-empty session-uuid "
+                    f"strings, got {item!r}"
+                )
+        return frozenset(items)
+    raise ValueError(
+        "session must be a session-uuid string or a list of them, "
+        f"got {session!r}"
+    )
+
+
 def iter_events(
     agent: Optional[str] = None,
     *,
-    session: Optional[str] = None,
+    session: Optional[Any] = None,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    scanned_sessions_out: Optional[dict[str, Any]] = None,
 ) -> Iterable[Event]:
     """Yield the normalized Event stream across sessions, cross-agent.
 
     Args:
         agent: Optional agent filter (``claude``/``codex``/...); ``None``
             = every agent.
-        session: Optional session-uuid filter; restrict the scan to a
-            single session (cheap fast-path for ``relative_to`` walks).
+        session: Optional session-uuid filter — a single uuid string or a
+            list of uuid strings (F3.2); restrict the scan to those
+            sessions (cheap fast-path for ``relative_to`` walks and
+            explicit session batches).  Validation SSOT:
+            :func:`normalize_session_filter` (fail-loud on an empty list
+            or non-string items).
+        noise: Session-level noise filter (see
+            :mod:`ai_r.parsers._noise`): ``"include"`` (default, no
+            filtering), ``"exclude"`` (drop subagent sessions), ``"only"``
+            (keep only subagent sessions).  Applied *before* reading
+            messages, so excluded sessions cost nothing.
+        project_dir: Session-level project filter — keep only sessions
+            whose ``Session.project_dir`` equals this path or is a
+            descendant of it (path-boundary aware, see
+            :func:`ai_r.parsers._common.project_dir_matches`); sessions
+            without a ``project_dir`` signal never match.  Like ``noise``,
+            applied *before* any message is read.
+        scanned_sessions_out: Optional out-parameter — a dict the caller
+            owns, filled with ``{agent_label: list_sessions() result}`` as
+            each agent is scanned.  Lets the caller reuse the enumeration
+            (e.g. for empty-result diagnostics) instead of paying for a
+            second full corpus walk.  Complete only once the generator is
+            exhausted.
 
     Yields:
         :class:`Event` records in per-session, chronological (parse)
         order.  Sessions that fail to read are skipped (an audit tool
         prefers a partial view to a crash), mirroring ``find_file_edits``.
     """
+    validate_noise(noise)
+    wanted_sessions = normalize_session_filter(session)
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
-        for sess in parser.list_sessions():
-            if session is not None and sess.uuid != session:
+        sessions = parser.list_sessions()
+        if scanned_sessions_out is not None:
+            scanned_sessions_out[agent_lc] = sessions
+        for sess in sessions:
+            if wanted_sessions is not None and sess.uuid not in wanted_sessions:
+                continue
+            if not noise_allows(sess, noise):
+                continue
+            if project_dir is not None and not project_dir_matches(
+                getattr(sess, "project_dir", None), project_dir
+            ):
                 continue
             try:
                 messages = parser.read_messages(sess.uuid)
@@ -494,4 +898,4 @@ def iter_events(
 
 # ``Message`` is re-exported so downstream modules that build the enrichment
 # message cache can import the parser type from here alongside the stream.
-__all__ = ["Event", "Message", "iter_events"]
+__all__ = ["Event", "Message", "iter_events", "normalize_session_filter"]

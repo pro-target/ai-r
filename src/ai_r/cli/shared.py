@@ -154,6 +154,46 @@ def _format_table(rows: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_token_table(block: Optional[dict[str, Any]]) -> str:
+    """Render a :func:`ai_r.tokens.component_tokens` block as a fixed table.
+
+    Columns ``COMPONENT | TOKENS | SOURCE``.  Rows: the scalar components
+    (``user_turn`` / ``assistant_turn`` / ``thinking`` / ``plan``), then one
+    ``tool_call:<kind>`` row per kind (sorted), then a ``total`` row.  The
+    ``SOURCE`` column echoes ``estimate (<estimator>)``.  A ``None`` block
+    (empty transcript, nothing to measure) renders ``no token data``.
+    """
+    if not isinstance(block, dict):
+        return "no token data"
+    source = block.get("source") or "?"
+    estimator = block.get("estimator")
+    src_label = f"{source} ({estimator})" if estimator else str(source)
+
+    rows: List[Tuple[str, int, str]] = []
+    for field in ("user_turn", "assistant_turn", "thinking", "plan"):
+        val = block.get(field)
+        if isinstance(val, int) and not isinstance(val, bool):
+            rows.append((field, val, src_label))
+    tool_call = block.get("tool_call")
+    if isinstance(tool_call, dict):
+        for kind in sorted(tool_call):
+            val = tool_call[kind]
+            if isinstance(val, int) and not isinstance(val, bool):
+                rows.append((f"tool_call:{kind}", val, src_label))
+    total = block.get("total")
+    rows.append(("total", int(total) if isinstance(total, int) else 0, src_label))
+
+    comp_w = max([len("COMPONENT")] + [len(r[0]) for r in rows])
+    tok_w = max([len("TOKENS")] + [len(str(r[1])) for r in rows])
+    header = (
+        f"{'COMPONENT':<{comp_w}}  {'TOKENS':>{tok_w}}  {'SOURCE'}"
+    )
+    lines: List[str] = [header, "-" * len(header)]
+    for name, count, src in rows:
+        lines.append(f"{name:<{comp_w}}  {count:>{tok_w}d}  {src}")
+    return "\n".join(lines)
+
+
 def _format_session_detail(
     session: Session, messages: Optional[List[dict[str, Any]]] = None
 ) -> str:

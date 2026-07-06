@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_r.events import get_body, iter_events, plan, query
+from ai_r.events import get_body, iter_events, plan, plan_feedback, query
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +223,292 @@ def test_get_body_shallow_returns_final_without_draft_bodies(
     # Both draft ids were dropped (none of their bodies surfaced).
     dropped = set(shallow["dropped_drafts"])
     assert {d["id"] for d in drafts} == dropped
+
+
+# ---------------------------------------------------------------------------
+# F3.4 v1 — final plan body inline + «quote → comment» feedback pairs
+# ---------------------------------------------------------------------------
+
+
+def test_plan_inlines_final_body_by_default(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft)
+    finals = [p for p in plans if p["kind"] == "final"]
+    drafts = [p for p in plans if p["kind"] == "draft"]
+    assert len(finals) == 1
+    # The final's full text is inlined; source is the plan signal (no
+    # approval carried an edited body in this fixture).
+    assert "Final plan." in finals[0]["body"]
+    assert finals[0]["body_source"] == "plan_signal"
+    # Drafts stay references — no body key ever.
+    assert all("body" not in d for d in drafts)
+
+
+def test_plan_bodies_none_restores_reference_only_shape(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft, bodies="none")
+    assert all("body" not in p and "body_source" not in p for p in plans)
+
+
+def test_plan_bodies_invalid_raises(fake_claude_plan_redraft: str) -> None:
+    with pytest.raises(ValueError):
+        plan(session=fake_claude_plan_redraft, bodies="all")
+
+
+def test_plan_final_body_prefers_approval_edited_text(
+    fake_claude_plan_feedback: str,
+) -> None:
+    # The approval tool_result carried "## Approved Plan (edited by user):"
+    # — the AUTHORITATIVE text; it must override the ExitPlanMode input body.
+    finals = plan(session=fake_claude_plan_feedback, kind="final")
+    assert len(finals) == 1
+    assert "EDITED final body by user." in finals[0]["body"]
+    assert "Draft three body." not in finals[0]["body"]
+    assert finals[0]["body_source"] == "approval_edited_by_user"
+
+
+def test_plan_codex_final_body_is_honest_null(
+    fake_codex_plan_session: str,
+) -> None:
+    # Codex update_plan carries steps, never a text body → honest None.
+    final = plan(session=fake_codex_plan_session, kind="final")[0]
+    assert final["body"] is None
+    assert final["body_source"] is None
+    assert final["steps"]  # steps still enriched
+
+
+def test_plan_feedback_extracts_all_pairs_chronologically(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # pf0 (rejected): free-text preamble + 2 selections; pf1 (stay): 2 [Re:]
+    # pairs.  The tu-plan-0 technical failure and the tu-plan-3 approval
+    # contribute no pairs.
+    assert [(p["quote"], p["verdict"]) for p in pairs] == [
+        (None, "rejected"),
+        ("Draft one body.", "rejected"),
+        ("Feature Plan", "rejected"),
+        ("Draft two body.", "stay_in_plan_mode"),
+        ("rollout", "stay_in_plan_mode"),
+    ]
+    assert pairs[0]["comment"] == "Overall too vague."
+    assert pairs[2]["comment"] == "Rename the feature."
+    # Multi-line comment survives verbatim.
+    assert pairs[4]["comment"] == (
+        "Which rollout?\nMore thoughts on a second line."
+    )
+    # Every pair carries ts + agent.
+    assert all(p["agent"] == "claude" and p["ts"] for p in pairs)
+
+
+def test_plan_feedback_binds_pairs_to_the_answered_revision(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    plans = plan(session=fake_claude_plan_feedback, bodies="none")
+    # Plan events are ordered tu-plan-0..3; the rejection answered the
+    # SECOND revision, the stay-in-plan-mode the THIRD.
+    ids = [p["id"] for p in plans]
+    assert {p["plan_id"] for p in pairs if p["verdict"] == "rejected"} == {
+        ids[1]
+    }
+    assert {
+        p["plan_id"] for p in pairs if p["verdict"] == "stay_in_plan_mode"
+    } == {ids[2]}
+
+
+def test_plan_feedback_refs_resolve_to_raw_response(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # Filtered responses shift the ordinals: the technical failure is NOT
+    # pf0 — the rejection is.
+    rejected_ref = pairs[0]["ref"]
+    assert rejected_ref == f"{fake_claude_plan_feedback}:pf0"
+    body = get_body(rejected_ref, redact=False)
+    assert body["type"] == "plan_feedback"
+    assert body["verdict"] == "rejected"
+    # The RAW response is returned whole — boilerplate included.
+    assert body["text"].startswith("The user doesn't want to proceed")
+    assert "On selected text:" in body["text"]
+    assert body["plan_id"] == pairs[0]["plan_id"]
+    assert [p["quote"] for p in body["pairs"]] == [
+        None, "Draft one body.", "Feature Plan",
+    ]
+
+
+def test_get_body_feedback_ref_redacts_secrets(
+    fake_claude_plan_feedback: str,
+) -> None:
+    ref = f"{fake_claude_plan_feedback}:pf0"
+    body = get_body(ref)  # redact=True default
+    assert "abc12345secret" not in body["text"]
+    assert "[REDACTED_GENERIC_SECRET]" in body["text"]
+    assert body["redactions"]["GENERIC_SECRET"] >= 1
+
+
+def test_get_body_feedback_ref_out_of_range_is_not_found(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = get_body(f"{fake_claude_plan_feedback}:pf99")
+    assert res["error"] == "not_found"
+
+
+def test_get_body_feedback_ref_unknown_session_is_not_found() -> None:
+    assert get_body("no-such-session:pf0")["error"] == "not_found"
+
+
+def test_plan_feedback_empty_for_agents_without_signal(
+    fake_codex_plan_session: str,
+    fake_antigravity_plan_brain: str,
+) -> None:
+    # Codex update_plan is fire-and-forget; Antigravity's plan is a file —
+    # no approval flow, no feedback signal → honest empty, not fabricated.
+    assert plan_feedback(session=fake_codex_plan_session) == []
+    assert plan_feedback(session=fake_antigravity_plan_brain) == []
+
+
+def test_plan_feedback_empty_without_responses(
+    fake_claude_plan_redraft: str,
+) -> None:
+    # A claude session whose ExitPlanMode calls got no recorded verdicts.
+    assert plan_feedback(session=fake_claude_plan_redraft) == []
+
+
+# ---------------------------------------------------------------------------
+# F3.4 v2 — draft numbering v1…vN + quote→section anchoring + rounds
+# ---------------------------------------------------------------------------
+
+
+def test_plan_atoms_carry_chronological_versions(
+    fake_claude_plan_redraft: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_redraft, bodies="none")
+    # One task, 4 revisions → v1..v4 in (ts, seq) order; the final is vN.
+    assert [p["version"] for p in plans] == [1, 2, 3, 4]
+    final = [p for p in plans if p["kind"] == "final"][0]
+    assert final["version"] == 4
+    assert all(p["version"] < 4 for p in plans if p["kind"] == "draft")
+
+
+def test_plan_versions_restart_per_task(
+    fake_claude_plan_multitask: str,
+) -> None:
+    plans = plan(session=fake_claude_plan_multitask)
+    # Two single-revision tasks → each task numbers from v1.
+    versions = {p["task_id"]: p["version"] for p in plans}
+    assert versions == {"plans/task-a.md": 1, "plans/task-b.md": 1}
+
+
+def test_feedback_pairs_carry_plan_version(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # The rejection answered revision 2 (tu-plan-1), the stay-in-plan-mode
+    # answered revision 3 (tu-plan-2) — versions ride on every pair.
+    assert {
+        p["plan_version"] for p in pairs if p["verdict"] == "rejected"
+    } == {2}
+    assert {
+        p["plan_version"] for p in pairs
+        if p["verdict"] == "stay_in_plan_mode"
+    } == {3}
+
+
+def test_feedback_quote_anchors_through_render_markup(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # Rendered quote (bold/backticks stripped by the UI) anchors to the
+    # section whose SOURCE carries the markup.
+    assert by_comment["Why canary?"]["section"] == "Rollout Strategy"
+    # A bullet-list quote (marker rendered away) anchors too.
+    assert by_comment["Too slow."]["section"] == "Rollout Strategy"
+
+
+def test_feedback_quote_anchor_ambiguous_is_null(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # The phrase lives in BOTH "Testing" and "Cleanup" — ambiguity is an
+    # honest null, not a first-match guess.
+    assert by_comment["Which one?"]["section"] is None
+
+
+def test_feedback_quote_anchor_miss_is_null(
+    fake_claude_plan_sections: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_sections)
+    by_comment = {p["comment"]: p for p in pairs}
+    # A quote absent from the plan body → null anchor, never the nearest.
+    assert by_comment["Anchor me if you can."]["section"] is None
+
+
+def test_feedback_free_text_pair_has_null_anchor(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    free_text = [p for p in pairs if p["quote"] is None]
+    assert free_text
+    assert all(p["section"] is None for p in free_text)
+
+
+def test_feedback_heading_quote_anchors_to_its_section(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    by_quote = {p["quote"]: p for p in pairs}
+    # Quoting the heading itself anchors to that section (the heading line
+    # belongs to its section).
+    assert by_quote["Feature Plan"]["section"] == "Feature Plan"
+    assert by_quote["Draft one body."]["section"] == "Feature Plan"
+    # "rollout" is not in revision 3's body → honest miss.
+    assert by_quote["rollout"]["section"] is None
+
+
+def test_feedback_pairs_grouped_by_rounds(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback)
+    # Round 1 = the rejection (3 pairs), round 2 = stay-in-plan-mode (2).
+    assert [p["round"] for p in pairs] == [1, 1, 1, 2, 2]
+
+
+def test_feedback_rounds_last_keeps_final_round_only(
+    fake_claude_plan_feedback: str,
+) -> None:
+    pairs = plan_feedback(session=fake_claude_plan_feedback, rounds="last")
+    assert len(pairs) == 2
+    assert all(p["round"] == 2 for p in pairs)
+    assert all(p["verdict"] == "stay_in_plan_mode" for p in pairs)
+
+
+def test_feedback_rounds_invalid_raises(
+    fake_claude_plan_feedback: str,
+) -> None:
+    with pytest.raises(ValueError):
+        plan_feedback(session=fake_claude_plan_feedback, rounds="first")
+
+
+def test_rejected_write_plan_correlates_to_its_revision(
+    fake_claude_plan_write_rejected: str,
+) -> None:
+    # v1 boundary fix: plan call-ids come from the plan-signal SSOT, so a
+    # rejected ``Write plans/*.md`` correlates like an ExitPlanMode verdict.
+    pairs = plan_feedback(session=fake_claude_plan_write_rejected)
+    assert len(pairs) == 1
+    p = pairs[0]
+    assert p["verdict"] == "rejected"
+    assert p["quote"] is None  # free-text rejection, no selection UI
+    assert p["comment"] == "Don't write plan files, refine the plan first."
+    plans = plan(session=fake_claude_plan_write_rejected, bodies="none")
+    assert p["plan_id"] == plans[0]["id"]
+    assert p["plan_version"] == 1
+    assert p["round"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -115,16 +115,43 @@ def _diff_rows(uuid: str, agent: str = "claude") -> List[dict[str, Any]]:
     return rows
 
 
+def _project_diff(d: dict[str, Any]) -> dict[str, Any]:
+    """Symmetric comparison projection for a diff-shaped result.
+
+    Applied to BOTH sides — projecting only the verb side made the parity
+    assertion fail the moment the real vault gained a session with
+    secret-shaped strings in its edits (F2.1 ``redactions`` appeared on
+    the legacy side only).
+
+    The ``redactions`` *counts* are deliberately NOT compared: each path
+    counts replacements over its own emitted shape, and the ``diff`` verb
+    additionally emits per-file ``hunks`` (the same secret is masked
+    there too, inflating its count), while the legacy ``session_diff``
+    shape has no file-level ``hunks``.  Equal masked content with
+    different counts is correct behaviour, not a parity break.  What IS
+    shape-independent — and therefore compared — is the *set of redaction
+    types* that fired.
+    """
+    files = [
+        {"file": f["file"], "edits": f["edits"], "diff": f["diff"]}
+        for f in d["files"]
+    ]
+    return {
+        "files": files,
+        "count": d["count"],
+        "caveats": d["caveats"],
+        "redaction_types": sorted(d.get("redactions", {})),
+    }
+
+
 def _diff_preset(uuid: str, agent: str = "claude") -> dict[str, Any]:
-    d = diff(_diff_rows(uuid, agent))
-    files = [{"file": f["file"], "edits": f["edits"], "diff": f["diff"]} for f in d["files"]]
-    return {"files": files, "count": d["count"], "caveats": d["caveats"]}
+    return _project_diff(diff(_diff_rows(uuid, agent)))
 
 
 def test_session_diff_equals_diff_verb_hermetic(tmp_path: Path) -> None:
     uuid = "sd-parity-1"
     _write_two_intent_edits(uuid, "/repo/src/mod.py")
-    legacy = session_diff(uuid, "claude")
+    legacy = _project_diff(session_diff(uuid, "claude"))
     viaverb = _diff_preset(uuid, "claude")
     assert legacy == viaverb  # byte-identical, incl. intents/diff/edits/order
 
@@ -277,7 +304,7 @@ def test_session_diff_equals_diff_verb_on_real_data(frozen_claude_home: Path) ->
         legacy = session_diff(s.uuid, "claude")
         if legacy["count"] == 0:
             continue
-        assert _diff_preset(s.uuid, "claude") == legacy, s.uuid
+        assert _diff_preset(s.uuid, "claude") == _project_diff(legacy), s.uuid
         checked += 1
         if checked >= 3:
             break

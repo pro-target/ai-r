@@ -8,16 +8,17 @@ re-imports the name it needs so module-level references and test
 monkeypatches (e.g. ``codex._is_valid_uuid``) keep working unchanged.
 
 Only behaviourally identical helpers live here.  Parser-specific
-variants (e.g. Pi's tz-pinning ``_parse_iso_timestamp`` or Claude's
-``_normalise_title`` that does not coerce whitespace-only input to
-``"Untitled"``) intentionally stay in their own modules.
+variants (e.g. Pi's ``_parse_iso_timestamp`` that also accepts non-str
+input, or Claude's ``_normalise_title`` that does not coerce
+whitespace-only input to ``"Untitled"``) intentionally stay in their
+own modules.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -101,9 +102,16 @@ def iter_jsonl_records(
                         over_long = False
                         continue
                     yield from _parse_jsonl_line_str(raw, max_line_bytes)
-                # Guard the still-incomplete fragment: if it alone already
-                # blew the cap, mark it so we drop the rest of the line.
-                if not over_long and len(pending) > max_line_bytes:
+                # Bound the still-incomplete fragment. In ``over_long`` state we
+                # are discarding everything up to the next newline, so the tail
+                # accumulated so far can be dropped now — otherwise a
+                # newline-free (or long-tailed) file would let ``pending``
+                # regrow chunk-by-chunk all the way to ``max_total_bytes``
+                # (~1 GiB), defeating the per-line cap. Otherwise, if the
+                # fragment alone already blew the cap, start dropping its line.
+                if over_long:
+                    pending = ""
+                elif len(pending) > max_line_bytes:
                     over_long = True
                     pending = ""
             # Flush any final line without a trailing newline.
@@ -285,18 +293,26 @@ def _qa_entry(question: str, options: Tuple[str, ...], answer: str) -> dict:
 
 
 def _parse_iso_timestamp(raw: str) -> Optional[datetime]:
-    """Parse an ISO 8601 timestamp, tolerating a trailing ``Z``.
+    """Parse an ISO 8601 timestamp, always returning a tz-aware datetime.
 
     Returns ``None`` for empty input, non-strings, and unparseable
-    values.  Only the first 23 characters are considered, which keeps
-    fractional seconds while ignoring any trailing offset noise.
+    values.  The full string is parsed first (so ``Z``/explicit offsets
+    are honoured); a 23-character truncation is the fallback for values
+    with trailing noise.  Naive results are pinned to UTC — a naive
+    datetime would mix with tz-aware ones (e.g. Desktop-overlay epoch
+    dates) and break ``sessions.sort(key=s.date)`` with a ``TypeError``.
     """
     if not raw or not isinstance(raw, str):
         return None
-    try:
-        return datetime.fromisoformat(raw[:23].replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
+    for candidate in (raw, raw[:23]):
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 def _is_valid_uuid(uuid: str) -> bool:
@@ -322,3 +338,29 @@ def _normalise_title(raw: str) -> str:
     """
     cleaned = raw.replace("\n", " ").replace("\r", " ").strip()
     return cleaned[:_TITLE_MAX_LEN] or "Untitled"
+
+
+def project_dir_matches(candidate: Optional[str], wanted: str) -> bool:
+    """Whether a session's ``project_dir`` matches a ``project_dir`` filter.
+
+    Semantics (documented in ``docs/methods.md``): the filter matches a
+    session whose ``project_dir`` is the SAME directory or a
+    **descendant** of it (path-boundary aware — ``/home/u/dev/ai``
+    never matches a ``/home/u/dev/ai-r`` session).  Rationale: "sessions
+    of this project" must include sessions started in a subdirectory of
+    the project root, while a plain prefix test would leak sibling
+    directories that merely share a name prefix.
+
+    A session without a ``project_dir`` signal (``None``/empty) never
+    matches — absence of a signal is not a wildcard.  Trailing slashes
+    on either side are ignored; no other normalisation (``~``, ``..``,
+    symlinks) is applied — both sides are compared as recorded.
+    """
+    if not candidate:
+        return False
+    base = wanted.rstrip("/") or "/"
+    cand = candidate.rstrip("/") or "/"
+    if cand == base:
+        return True
+    prefix = "/" if base == "/" else base + "/"
+    return cand.startswith(prefix)

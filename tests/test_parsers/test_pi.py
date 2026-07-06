@@ -176,3 +176,105 @@ def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
 def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
     with pytest.raises(ValueError):
         pi.read_messages("../escape", base_dir=str(tmp_sessions_dir / ".pi" / "agent" / "sessions"))
+
+
+# ---------------------------------------------------------------------------
+# Thinking blocks + per-message token usage (F3.3 breakdown groundwork)
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_block_fills_thinking_not_text(
+    fake_pi_session: Path, tmp_sessions_dir: Path
+) -> None:
+    """The assistant ``thinking`` block (previously skipped) surfaces via
+    ``Message.thinking``; ``text`` semantics unchanged."""
+    base = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    msgs = pi.read_messages("test-pi-1", base_dir=base)
+    assistant = msgs[1]
+    assert assistant.role == "assistant"
+    assert assistant.text == "Done."       # unchanged
+    assert assistant.thinking == "hidden"  # no longer dropped
+    assert msgs[0].thinking == ""
+
+
+def _write_pi_session(
+    tmp_sessions_dir: Path, uuid: str, records: list[dict]
+) -> str:
+    jsonl = (
+        tmp_sessions_dir / ".pi" / "agent" / "sessions" / "--tmp-work--"
+        / f"2026-06-14T12-00-00-000Z_{uuid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+
+
+def test_per_message_tokens_from_usage(tmp_sessions_dir: Path) -> None:
+    """Assistant ``usage`` blocks normalize onto ``Message.tokens``;
+    user messages and usage-less assistants stay None (honest absence)."""
+    base = _write_pi_session(
+        tmp_sessions_dir,
+        "pi-usage-1",
+        [
+            {"type": "session", "version": 3, "id": "pi-usage-1",
+             "timestamp": "2026-06-14T12:00:00.000Z", "cwd": "/tmp/work"},
+            {"type": "message", "id": "u-1", "parentId": None,
+             "timestamp": "2026-06-14T12:00:02.000Z",
+             "message": {"role": "user",
+                         "content": [{"type": "text", "text": "hi"}]}},
+            {"type": "message", "id": "a-1", "parentId": "u-1",
+             "timestamp": "2026-06-14T12:00:04.000Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "yo"}],
+                         "usage": {"input": 100, "output": 7,
+                                   "cacheRead": 20, "cacheWrite": 3,
+                                   "totalTokens": 130}}},
+            {"type": "message", "id": "a-2", "parentId": "a-1",
+             "timestamp": "2026-06-14T12:00:06.000Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "done"}]}},
+        ],
+    )
+    msgs = pi.read_messages("pi-usage-1", base_dir=base)
+    assert len(msgs) == 3
+    assert msgs[0].tokens is None            # user: format writes no usage
+    assert msgs[1].tokens == {
+        "input": 100, "output": 7, "reasoning": None,
+        "cache_read": 20, "cache_write": 3, "total": 130,
+    }
+    assert msgs[2].tokens is None            # usage-less assistant
+
+
+def test_per_message_tokens_total_tokens_fallback(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Per-field counters absent → ``total`` falls back to ``totalTokens``
+    (mirrors ``read_token_usage``); an all-zero block stays None."""
+    base = _write_pi_session(
+        tmp_sessions_dir,
+        "pi-usage-2",
+        [
+            {"type": "session", "version": 3, "id": "pi-usage-2",
+             "timestamp": "2026-06-14T12:00:00.000Z", "cwd": "/tmp/work"},
+            {"type": "message", "id": "a-1", "parentId": None,
+             "timestamp": "2026-06-14T12:00:04.000Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "yo"}],
+                         "usage": {"totalTokens": 42}}},
+            {"type": "message", "id": "a-2", "parentId": "a-1",
+             "timestamp": "2026-06-14T12:00:06.000Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "zero"}],
+                         "usage": {"input": 0, "output": 0,
+                                   "cacheRead": 0, "cacheWrite": 0,
+                                   "totalTokens": 0}}},
+        ],
+    )
+    msgs = pi.read_messages("pi-usage-2", base_dir=base)
+    assert msgs[0].tokens == {
+        "input": 0, "output": 0, "reasoning": None,
+        "cache_read": 0, "cache_write": 0, "total": 42,
+    }
+    assert msgs[1].tokens is None  # zero placeholder → honest absence

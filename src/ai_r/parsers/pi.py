@@ -46,6 +46,14 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     return Path("~/.pi/agent/sessions").expanduser()
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate source root(s) for Pi sessions (may not exist).
+
+    Used by :mod:`ai_r.diagnostics` to explain empty results.
+    """
+    return [str(_resolve_base_dir(base_dir))]
+
+
 def _parse_iso_timestamp(raw: object) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp, always returning a tz-aware datetime.
 
@@ -191,6 +199,8 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     if cwd:
         extra["cwd"] = cwd
     if parent_session:
+        # Kept in ``extra`` for backward compatibility; the first-class
+        # fields below are the canonical surface.
         extra["parent_session"] = parent_session
 
     return Session(
@@ -200,6 +210,12 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         date=timestamp,
         path=str(jsonl_path),
         message_count=message_count,
+        parent_uuid=parent_session,
+        kind="subagent" if parent_session else "agent",
+        # The session-header ``cwd`` is the project directory.  Pi has no
+        # launch-surface signal (header carries only type/version/id/
+        # timestamp/cwd) → launch_surface stays None, never fabricated.
+        project_dir=cwd,
         extra=extra,
     )
 
@@ -226,11 +242,25 @@ def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
     return sessions
 
 
+def _peek_session_uuid(path: Path) -> Optional[str]:
+    """Read only up to the ``session`` header to identify a file's session,
+    without parsing the whole transcript.  Returns the session id or ``None``.
+    Keeps a by-uuid lookup from parsing every candidate file end-to-end
+    (audit: O(N^2) corpus rescan)."""
+    for entry in iter_jsonl_records(path):
+        if entry.get("type") == "session":
+            sid = entry.get("id")
+            return sid if isinstance(sid, str) else None
+    return None
+
+
 def _find_session_file(uuid: str, base_dir: Optional[str]) -> Tuple[Path, Session]:
     if not _is_valid_uuid(uuid):
         raise ValueError(f"Invalid Pi session uuid: {uuid!r}")
     root = _resolve_base_dir(base_dir)
     for path in _discover_files(root):
+        if _peek_session_uuid(path) != uuid:
+            continue
         session = _scan_file(path)
         if session is not None and session.uuid == uuid:
             return path, session
@@ -241,6 +271,62 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
     _, session = _find_session_file(uuid, base_dir)
     return session
 
+
+
+# ``message.usage`` key → normalized token-usage field (F3.3).
+_USAGE_FIELD_MAP = (
+    ("input", "input"),
+    ("output", "output"),
+    ("cache_read", "cacheRead"),
+    ("cache_write", "cacheWrite"),
+)
+
+
+def _usage_counters(usage: object) -> Optional[dict]:
+    """Extract raw counters from a Pi ``message.usage`` block.
+
+    Returns ``{"input", "output", "cache_read", "cache_write",
+    "total_tokens"}`` with non-int counters defaulting to ``0``
+    (``total_tokens`` is the block's own ``totalTokens``, kept separate
+    because the fallback rules differ between the session sum and the
+    per-message view), or ``None`` when ``usage`` is not a dict.  Shared
+    by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message :func:`_message_tokens` so extraction can never drift.
+    """
+    if not isinstance(usage, dict):
+        return None
+    counters: dict = {}
+    for field, usage_key in _USAGE_FIELD_MAP:
+        val = usage.get(usage_key)
+        counters[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    tt = usage.get("totalTokens")
+    counters["total_tokens"] = (
+        tt if isinstance(tt, int) and not isinstance(tt, bool) else 0
+    )
+    return counters
+
+
+def _message_tokens(usage: object) -> Optional[dict]:
+    """Normalize one message's ``usage`` into the F3.3 token block.
+
+    ``total`` is the sum of the four counters, falling back to the
+    block's ``totalTokens`` when the per-field counters are absent
+    (mirrors :func:`read_token_usage`); Pi records no reasoning
+    breakdown → ``reasoning`` is ``None``.  Returns ``None`` when there
+    is no ``usage`` dict or the total is zero — absence is honest.
+    """
+    counters = _usage_counters(usage)
+    if counters is None:
+        return None
+    total_tokens = counters.pop("total_tokens")
+    total = sum(counters.values())
+    if total <= 0:
+        total = total_tokens
+    if total <= 0:
+        return None
+    return {**counters, "reasoning": None, "total": total}
 
 
 # NOTE (interactive question→answer pairs): the Pi session format has NO
@@ -256,11 +342,14 @@ def _pi_extract_message(
     Returns ``None`` for roles we do not surface (``toolResult`` records
     with no usable content are still emitted as ``tool`` messages so the
     audit trail is complete).  ``toolCall`` blocks become ``tool_use``
-    entries; ``thinking`` blocks are skipped from ``text``.
+    entries; ``thinking`` blocks surface via :attr:`Message.thinking`
+    (kept out of ``text``); assistant messages with a ``usage`` block
+    carry it normalized on :attr:`Message.tokens`.
     """
     role = message.get("role")
     content = message.get("content", "")
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     if isinstance(content, str):
         text_chunks.append(content)
@@ -284,13 +373,27 @@ def _pi_extract_message(
                     except (TypeError, ValueError):
                         input_str = str(args)
                 tool_use.append({"name": name, "input": input_str})
-            # ``thinking`` blocks are intentionally skipped here.
+            elif part_type == "thinking":
+                # Marked reasoning: the plaintext lives in the ``thinking``
+                # key (``text`` accepted for forward-compatibility, same
+                # tolerance as ``_extract_text``).
+                thought = part.get("thinking") or part.get("text")
+                if isinstance(thought, str) and thought:
+                    thinking_chunks.append(thought)
     if role in ("user", "assistant"):
         return Message(
             role=role,
             text="\n".join(text_chunks),
             tool_use=tuple(tool_use),
             timestamp=timestamp,
+            thinking="\n".join(thinking_chunks),
+            # Pi writes ``usage`` on assistant messages only — mirror the
+            # session-level reader and never attach user-side blocks.
+            tokens=(
+                _message_tokens(message.get("usage"))
+                if role == "assistant"
+                else None
+            ),
         )
     if role == "toolResult":
         result_text = "\n".join(text_chunks)
@@ -343,6 +446,60 @@ def read_messages(
     """
     session = read_session(uuid, base_dir)
     return _extract_messages_from_jsonl(Path(session.path))
+
+
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Pi records a per-assistant-message ``usage`` block inside the
+    ``message`` payload: ``{"input", "output", "cacheRead", "cacheWrite",
+    "totalTokens", ...}``.  Counts are summed across the session's
+    assistant messages.
+
+    Normalized fields (format-native semantics): ``input`` / ``output``
+    map 1:1, ``cacheRead`` → ``cache_read``, ``cacheWrite`` →
+    ``cache_write``; Pi has no reasoning breakdown → ``reasoning`` is
+    ``None``.  ``total`` is the sum of the four counters (fallback: the
+    summed ``totalTokens`` when the per-field counters are absent).
+    Returns ``None`` when no message carries a ``usage`` block or the
+    total is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    path, _ = _find_session_file(uuid, base_dir)
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    total_tokens = 0
+    found = False
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "message":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        counters = _usage_counters(message.get("usage"))
+        if counters is None:
+            continue
+        for field in totals:
+            totals[field] += counters[field]
+        total_tokens += counters["total_tokens"]
+        found = True
+    total = sum(totals.values())
+    if total <= 0:
+        total = total_tokens
+    if not found or total <= 0:
+        return None
+    return {
+        "input": totals["input"],
+        "output": totals["output"],
+        "reasoning": None,
+        "cache_read": totals["cache_read"],
+        "cache_write": totals["cache_write"],
+        "total": total,
+    }
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

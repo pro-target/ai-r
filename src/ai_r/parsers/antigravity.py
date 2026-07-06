@@ -99,6 +99,27 @@ def _resolve_brain_roots(
     return [r for r in roots if r.is_dir()]
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate brain root(s) for Antigravity sessions (may not exist).
+
+    Unlike :func:`_resolve_brain_roots` (which filters to existing dirs so
+    the scanner never walks a missing tree), this returns the *candidate*
+    locations unfiltered — :mod:`ai_r.diagnostics` needs the paths that
+    were looked at even when none of them exist.
+    """
+    if base_dir:
+        return [str(Path(base_dir).expanduser())]
+    env_home = os.environ.get("AI_R_HOME")
+    if env_home:
+        root = Path(env_home).expanduser() / ".gemini"
+    else:
+        root = Path("~/.gemini").expanduser()
+    return [
+        str(root / "antigravity-cli" / "brain"),
+        str(root / "antigravity" / "brain"),
+    ]
+
+
 def _extract_title_from_overview(overview_path: Path) -> tuple[str, int, Optional[str]]:
     """Return ``(title, message_count, latest_timestamp_iso)`` from overview.txt."""
     title = ""
@@ -138,8 +159,38 @@ def _extract_title_from_markdown(brain: Path) -> str:
     return ""
 
 
+def _launch_surface_for_brain(brain: Path) -> Optional[str]:
+    """Launch surface from WHICH brain root holds the session.
+
+    Antigravity keeps two separate stores — ``antigravity/brain`` (the
+    IDE app) and ``antigravity-cli/brain`` (the CLI) — so the root name
+    is a real, data-backed launch-surface signal.  Returns
+    ``"antigravity-ide"`` / ``"antigravity-cli"`` accordingly, or
+    ``None`` when the layout does not match (e.g. an explicit
+    ``base_dir`` pointing at an arbitrary fixture directory) — the
+    signal is derived, never fabricated.
+    """
+    parent = brain.parent
+    if parent.name != "brain":
+        return None
+    root_name = parent.parent.name
+    if root_name == "antigravity-cli":
+        return "antigravity-cli"
+    if root_name == "antigravity":
+        return "antigravity-ide"
+    return None
+
+
 def _scan_brain(brain: Path) -> Optional[Session]:
-    """Build a :class:`Session` from one brain directory."""
+    """Build a :class:`Session` from one brain directory.
+
+    ``project_dir`` is always ``None``: the parsed Antigravity surface
+    (overview.txt / transcript*.jsonl) carries NO structured cwd/
+    directory field (verified on real data — record keys are
+    step_index/source/type/status/created_at/content/tool_calls/...),
+    and guessing a directory out of message text would fabricate a
+    signal.  Recheck if the format grows one.
+    """
     if not brain.is_dir():
         return None
 
@@ -200,6 +251,7 @@ def _scan_brain(brain: Path) -> Optional[Session]:
         date=timestamp,
         path=str(brain),
         message_count=count,
+        launch_surface=_launch_surface_for_brain(brain),
     )
 
 
@@ -383,6 +435,25 @@ def read_messages(
     """
     session = read_session(uuid, base_dir)
     return _extract_messages_from_brain(Path(session.path))
+
+
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Always ``None`` — the Antigravity brain format records no token usage.
+
+    Present for cross-parser uniformity (F3.3): the brain directory
+    (overview.txt / transcript.jsonl / markdown artifacts) carries no
+    usage counters anywhere, so there is nothing exact to report — the
+    tokens layer (:mod:`ai_r.tokens`) degrades to a labeled transcript
+    estimate instead.  Absence is honest, never fabricated.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    _find_brain(uuid, base_dir)  # validate the id / existence contract
+    return None
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

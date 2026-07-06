@@ -18,6 +18,9 @@ Schema (relevant columns only)::
         id              TEXT PRIMARY KEY,
         parent_id       TEXT,
         title           TEXT,
+        directory       TEXT,       -- project dir (newer schemas only;
+                                    -- surfaced as Session.project_dir,
+                                    -- legacy DBs degrade to None)
         time_created    INTEGER,    -- ms epoch
         time_updated    INTEGER,    -- ms epoch
         ... (other fields ignored)
@@ -68,6 +71,7 @@ output.
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import glob
 import hashlib
 import json
@@ -298,6 +302,27 @@ def _resolve_db_paths(
     return deduped
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate OpenCode DB path(s) — existing ones, else the defaults.
+
+    :func:`_resolve_db_paths` only returns DB files that exist; when none
+    do, :mod:`ai_r.diagnostics` still needs the locations that were
+    *looked at*, so fall back to the candidate paths (env override,
+    ``base_dir``, native default) unfiltered.
+    """
+    existing = _resolve_db_paths(base_dir)
+    if existing:
+        return list(existing)
+    fallbacks: List[str] = []
+    env_override = os.environ.get("OPENCODE_DB")
+    if env_override:
+        fallbacks.append(_expand(env_override))
+    if base_dir:
+        fallbacks.append(os.path.join(base_dir, "opencode.db"))
+    fallbacks.append(_expand(_DEFAULT_DB))
+    return fallbacks
+
+
 def _open_db(db_path: str) -> Optional[sqlite3.Connection]:
     """Open an OpenCode DB read-only, retrying on lock, falling back to copy."""
     _maybe_sweep_temp_copies()
@@ -359,6 +384,13 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         row["time_updated"],
         row["parent_id"],
     )
+    # ``session.directory`` is the project directory the session ran in.
+    # Old OpenCode schemas predate the column — the legacy-SELECT fallback
+    # (see _execute_session_select) yields rows without it → None, never
+    # fabricated.
+    directory = row["directory"] if "directory" in row.keys() else None
+    if not (isinstance(directory, str) and directory.strip()):
+        directory = None
     date = _epoch_ms_to_datetime(time_updated or time_created or 0)
     clean_title = (title or "").strip() or "Untitled"
     return Session(
@@ -369,6 +401,13 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         path=db_path,
         message_count=0,  # filled by the caller with a per-row count
         parent_uuid=parent_id,
+        # A row with a parent is a spawned sub-session: keep ``kind``
+        # consistent with ``parent_uuid`` so kind-based filters see it.
+        kind="subagent" if parent_id else "agent",
+        project_dir=directory,
+        # OpenCode's schema carries no launch-surface signal (the
+        # ``agent`` column is the *mode* — plan/build — not a surface).
+        launch_surface=None,
         extra={
             "time_created": time_created,
             "time_updated": time_updated,
@@ -376,17 +415,45 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
     )
 
 
+_SESSION_COLUMNS = "id, title, time_created, time_updated, parent_id"
+# ``directory`` (the session's project dir) appeared in newer OpenCode
+# schemas; the legacy variants below keep old DBs readable (a missing
+# column would otherwise abort the whole per-DB scan).
 _SELECT_SESSION = (
-    "SELECT id, title, time_created, time_updated, parent_id "
-    "FROM session "
-    "WHERE id = ?"
+    f"SELECT {_SESSION_COLUMNS}, directory FROM session WHERE id = ?"
+)
+_SELECT_SESSION_LEGACY = (
+    f"SELECT {_SESSION_COLUMNS} FROM session WHERE id = ?"
 )
 _SELECT_ALL_SESSIONS = (
-    "SELECT id, title, time_created, time_updated, parent_id "
-    "FROM session "
+    f"SELECT {_SESSION_COLUMNS}, directory FROM session "
     "ORDER BY time_updated DESC"
 )
+_SELECT_ALL_SESSIONS_LEGACY = (
+    f"SELECT {_SESSION_COLUMNS} FROM session ORDER BY time_updated DESC"
+)
 _SELECT_MESSAGE_COUNT = "SELECT COUNT(*) FROM message WHERE session_id = ?"
+
+
+def _execute_session_select(
+    cursor: sqlite3.Cursor,
+    sql: str,
+    legacy_sql: str,
+    params: tuple = (),
+) -> sqlite3.Cursor:
+    """Execute a session SELECT, degrading to the legacy column set.
+
+    Newer OpenCode schemas carry ``session.directory``; on an old DB the
+    extended SELECT raises ``OperationalError: no such column`` — retry
+    with the legacy statement so old installations keep enumerating
+    (their sessions then surface with ``project_dir=None``).
+    """
+    try:
+        return cursor.execute(sql, params)
+    except sqlite3.OperationalError as exc:
+        if "no such column" not in str(exc):
+            raise
+        return cursor.execute(legacy_sql, params)
 
 
 def list_sessions(
@@ -410,7 +477,13 @@ def list_sessions(
             # Materialise the SELECT first: nesting ``execute`` on the
             # same cursor would invalidate the iteration when we look
             # up the per-session message count below.
-            rows = list(list_cursor.execute(_SELECT_ALL_SESSIONS))
+            rows = list(
+                _execute_session_select(
+                    list_cursor,
+                    _SELECT_ALL_SESSIONS,
+                    _SELECT_ALL_SESSIONS_LEGACY,
+                )
+            )
             for row in rows:
                 sid = row["id"]
                 if sid in seen_ids:
@@ -420,15 +493,11 @@ def list_sessions(
                     _SELECT_MESSAGE_COUNT, (sid,)
                 ).fetchone()[0]
                 session = _row_to_session(row, db_path)
-                session = Session(
-                    uuid=session.uuid,
-                    agent=session.agent,
-                    title=session.title,
-                    date=session.date,
-                    path=session.path,
-                    message_count=int(count),
-                    parent_uuid=session.parent_uuid,
-                    extra=session.extra,
+                # dataclasses.replace keeps every other field (incl. kind /
+                # parent_uuid) — a field-by-field rebuild silently dropped
+                # ``kind`` when it was added.
+                session = dataclasses.replace(
+                    session, message_count=int(count)
                 )
                 sessions.append(session)
         except sqlite3.Error:
@@ -455,23 +524,17 @@ def _read_session_by_uuid(
             conn.row_factory = sqlite3.Row
             session_cursor = conn.cursor()
             count_cursor = conn.cursor()
-            row = session_cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
+            row = _execute_session_select(
+                session_cursor, _SELECT_SESSION, _SELECT_SESSION_LEGACY, (uuid,)
+            ).fetchone()
             if row is None:
                 continue
             count = count_cursor.execute(
                 _SELECT_MESSAGE_COUNT, (uuid,)
             ).fetchone()[0]
             session = _row_to_session(row, db_path)
-            return Session(
-                uuid=session.uuid,
-                agent=session.agent,
-                title=session.title,
-                date=session.date,
-                path=session.path,
-                message_count=int(count),
-                parent_uuid=session.parent_uuid,
-                extra=session.extra,
-            )
+            # See list_sessions: replace() preserves kind / parent_uuid.
+            return dataclasses.replace(session, message_count=int(count))
         except sqlite3.Error:
             continue
     raise FileNotFoundError(f"OpenCode session {uuid!r} not found")
@@ -585,6 +648,40 @@ def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _normalize_tokens(tokens: object) -> Optional[dict]:
+    """Normalize a ``message.data.tokens`` block into the F3.3 token dict.
+
+    OpenCode's shape is ``{"input", "output", "reasoning",
+    "cache": {"read", "write"}}``; non-int counters default to ``0``.
+    Returns ``{"input", "output", "reasoning", "cache_read",
+    "cache_write", "total"}``, or ``None`` when ``tokens`` is not a dict
+    or every counter is zero (the placeholder block of an incomplete
+    message) — absence is honest, a fabricated exact-zero is not.
+    Shared by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message ``Message.tokens`` attachment in :func:`_build_message`
+    so the two can never drift.
+    """
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache")
+    cache = cache if isinstance(cache, dict) else {}
+    block: dict = {}
+    for field, val in (
+        ("input", tokens.get("input")),
+        ("output", tokens.get("output")),
+        ("reasoning", tokens.get("reasoning")),
+        ("cache_read", cache.get("read")),
+        ("cache_write", cache.get("write")),
+    ):
+        block[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    total = sum(block.values())
+    if total <= 0:
+        return None
+    return {**block, "total": total}
+
+
 def _build_message(
     message_data: Optional[dict],
     parts: List[_PartTuple],
@@ -592,10 +689,15 @@ def _build_message(
 ) -> Optional[Message]:
     """Assemble a :class:`Message` from metadata + ordered ``(part, ptime)`` tuples.
 
-    * ``text``      = concatenation of ``text`` parts + ``reasoning``
-                      parts (reasoning inlined unmarked; kept in-order
-                      so the dialogue reads naturally — matches how the
-                      Codex/Claude parsers fold thinking into text).
+    * ``text``      = concatenation of ``text`` parts only.
+    * ``thinking``  = concatenation of ``reasoning`` parts (kept OUT of
+                      ``text`` so narrative and model reasoning are never
+                      conflated nor double-counted by token estimates —
+                      matches how the Claude/Codex/Pi parsers surface
+                      marked reasoning via :attr:`Message.thinking`).
+    * ``tokens``    = the ``message.data.tokens`` block normalized via
+                      :func:`_normalize_tokens` (``None`` when absent or
+                      an all-zero placeholder).
     * ``tool_use``  = one entry per ``tool`` part
                       (``{name: tool, input: state.input, timestamp: ...}``).
                       The per-entry ``timestamp`` is the originating
@@ -620,6 +722,7 @@ def _build_message(
         return None
 
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     qa: List[dict] = []
@@ -646,7 +749,7 @@ def _build_message(
         if ptype in ("text", "reasoning"):
             t = part.get("text", "")
             if isinstance(t, str) and t:
-                text_chunks.append(t)
+                (thinking_chunks if ptype == "reasoning" else text_chunks).append(t)
         elif ptype == "tool":
             name = part.get("tool") or part.get("toolName") or part.get("name") or ""
             state_raw = part.get("state")
@@ -691,6 +794,15 @@ def _build_message(
             )
         # step-start / step-finish / unknown → skip
 
+    # Per-message exact usage: OpenCode keeps a ``tokens`` block inside
+    # ``message.data``; an all-zero placeholder (incomplete message)
+    # normalizes to None — absence is honest.
+    tokens = (
+        _normalize_tokens(message_data.get("tokens"))
+        if message_data is not None
+        else None
+    )
+
     return Message(
         role=role,
         text="\n".join(text_chunks),
@@ -698,6 +810,8 @@ def _build_message(
         tool_result=tuple(tool_result),
         timestamp=timestamp,
         qa=tuple(qa),
+        thinking="\n".join(thinking_chunks),
+        tokens=tokens,
     )
 
 
@@ -801,6 +915,68 @@ def read_messages(
     return _extract_messages_from_db(session.path, session.uuid)
 
 
+def read_token_usage(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    override: Optional[str] = None,
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    OpenCode stores a per-assistant-message ``tokens`` block in the
+    ``message.data`` JSON: ``{"input", "output", "reasoning",
+    "cache": {"read", "write"}}``.  Counts are summed across the session's
+    messages.
+
+    Normalized fields map 1:1 (``cache.read`` → ``cache_read``,
+    ``cache.write`` → ``cache_write``); ``total`` is the sum of all five.
+    Returns ``None`` when no message carries a ``tokens`` block (older
+    schemas) or every counter is zero (placeholder blocks of incomplete
+    messages) — absence is honest, a fabricated exact-zero is not.
+
+    Raises:
+        FileNotFoundError: no DB contains a session with this id.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir, override)
+    totals = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+    }
+    found = False
+    try:
+        cm = _pooled_conn(session.path)
+        with cm as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                "SELECT data FROM message WHERE session_id = ?",
+                (session.uuid,),
+            ).fetchall()
+    except _PoolOpenError:
+        return None
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        data = _json_or_none(row[0])
+        if not isinstance(data, dict):
+            continue
+        # All-zero placeholders normalize to None and are skipped — that
+        # matches the previous inline behavior (they contributed nothing
+        # to the totals and a zero-only session still returns None).
+        block = _normalize_tokens(data.get("tokens"))
+        if block is None:
+            continue
+        for field in totals:
+            totals[field] += block[field]
+        found = True
+    total = sum(totals.values())
+    if not found or total <= 0:
+        return None
+    return {**totals, "total": total}
+
+
 def search(
     query: str,
     base_dir: Optional[str] = None,
@@ -830,7 +1006,9 @@ def session_exists(
         try:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            row = cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
+            row = _execute_session_select(
+                cursor, _SELECT_SESSION, _SELECT_SESSION_LEGACY, (uuid,)
+            ).fetchone()
         except sqlite3.Error:
             continue
         if row is not None:

@@ -29,6 +29,7 @@ pytest_plugins: list[str] = []
 _HOST_FIXTURES = frozenset(
     {
         "real_claude_dir",
+        "real_claude_desktop_dir",
         "real_codex_dir",
         "real_opencode_db",
         "real_pi_dir",
@@ -220,6 +221,168 @@ def fake_codex_session(tmp_sessions_dir: Path) -> Path:
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "Done."}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_codex_subagent(tmp_sessions_dir: Path) -> Path:
+    """A Codex *subagent* rollout: ``session_meta.payload.thread_source ==
+    "subagent"`` plus a flat ``parent_thread_id`` and the nested
+    ``source.subagent.thread_spawn`` blob (mirrors real rollouts)."""
+    uuid = "test-codex-sub-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T11-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T11:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "cwd": "/tmp/work",
+                    "timestamp": "2026-06-14T11:00:00Z",
+                    "thread_source": "subagent",
+                    "parent_thread_id": "test-codex-1",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "test-codex-1",
+                                "depth": 1,
+                                "agent_nickname": "Galileo",
+                                "agent_role": "explorer",
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Explore the repo"}],
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Explored."}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_codex_subagent_nested_only(tmp_sessions_dir: Path) -> Path:
+    """A Codex subagent rollout WITHOUT the flat ``parent_thread_id`` —
+    the parent lives only in ``source.subagent.thread_spawn`` (fallback
+    branch of the parser)."""
+    uuid = "test-codex-sub-2"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T12-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "cwd": "/tmp/work",
+                    "timestamp": "2026-06-14T12:00:00Z",
+                    "thread_source": "subagent",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "test-codex-1",
+                                "depth": 1,
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-06-14T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Nested spawn"}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_pi_subagent(tmp_sessions_dir: Path) -> Path:
+    """A Pi session whose header carries ``parentSession`` (spawned child)."""
+    uuid = "test-pi-sub-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-work--"
+        / f"2026-06-14T11-00-00-000Z_{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "session",
+                "version": 3,
+                "id": uuid,
+                "timestamp": "2026-06-14T11:00:00.000Z",
+                "cwd": "/tmp/work",
+                "parentSession": "test-pi-1",
+            },
+            {
+                "type": "message",
+                "id": "user-1",
+                "parentId": None,
+                "timestamp": "2026-06-14T11:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Child task"}],
+                    "timestamp": 1_718_363_602_000,
+                },
+            },
+            {
+                "type": "message",
+                "id": "assistant-1",
+                "parentId": "user-1",
+                "timestamp": "2026-06-14T11:00:04.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Child done."}],
+                    "timestamp": 1_718_363_604_000,
                 },
             },
         ],
@@ -551,6 +714,264 @@ def fake_claude_plan_write(tmp_sessions_dir: Path) -> str:
     return session_id
 
 
+def _claude_exit_plan_with_id(plan_text: str, tool_use_id: str, ts: str) -> dict:
+    """A Claude assistant record: one ``ExitPlanMode`` tool_use with a call id."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": "ExitPlanMode",
+                    "input": {"plan": plan_text},
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+def _claude_tool_result(tool_use_id: str, content: str, ts: str) -> dict:
+    """A Claude user record carrying one ``tool_result`` block."""
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }
+            ],
+        },
+        "timestamp": ts,
+    }
+
+
+@pytest.fixture
+def fake_claude_plan_feedback(tmp_sessions_dir: Path) -> str:
+    """Claude plan-iteration session with the four real response formats (F3.4).
+
+    Four ``ExitPlanMode`` revisions of ONE task ("Feature Plan"):
+
+    * tu-plan-0 — technical failure result (permission stream) → filtered;
+    * tu-plan-1 — rejection with a free-text preamble + two
+      "On selected text:" quote→comment pairs (one comment carries a
+      redactable secret);
+    * tu-plan-2 — stay-in-plan-mode with two ``[Re: "…"]`` pairs (the second
+      comment is multi-line);
+    * tu-plan-3 — approval carrying the AUTHORITATIVE user-edited plan text
+      ("## Approved Plan (edited by user):"), which must override the
+      signal body of the final revision.
+    """
+    session_id = "plan-feedback-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    reject_boiler = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+    )
+    rejected = (
+        reject_boiler
+        + "Overall too vague.\n"
+        + "On selected text:\n"
+        + "> Draft one body.\n"
+        + "Use token=abc12345secret here.\n"
+        + "\n"
+        + "On selected text:\n"
+        + "> Feature Plan\n"
+        + "> \n"
+        + "Rename the feature.\n"
+    )
+    stay = (
+        "User chose to stay in plan mode and continue planning\n"
+        "\n"
+        "Comments on the plan:\n"
+        '[Re: "Draft two body."] Split into two phases.\n'
+        '[Re: "rollout"] Which rollout?\n'
+        "More thoughts on a second line.\n"
+    )
+    approved = (
+        "User has approved your plan. You can now start coding. "
+        "Start with updating your todo list if applicable\n"
+        "\n"
+        "Your plan has been saved to: /home/u/.claude/plans/feature.md\n"
+        "You can refer back to it if needed during implementation.\n"
+        "\n"
+        "## Approved Plan (edited by user):\n"
+        "# Feature Plan\n"
+        "\n"
+        "EDITED final body by user.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan the feature"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft zero body.", "tu-plan-0",
+                "2026-06-14T10:00:05Z"),
+            _claude_tool_result(
+                "tu-plan-0",
+                "Tool permission request failed: Error: Stream closed",
+                "2026-06-14T10:00:06Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft one body.", "tu-plan-1",
+                "2026-06-14T10:00:10Z"),
+            _claude_tool_result("tu-plan-1", rejected,
+                                "2026-06-14T10:00:11Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft two body.", "tu-plan-2",
+                "2026-06-14T10:00:20Z"),
+            _claude_tool_result("tu-plan-2", stay, "2026-06-14T10:00:21Z"),
+            _claude_exit_plan_with_id(
+                "# Feature Plan\n\nDraft three body.", "tu-plan-3",
+                "2026-06-14T10:00:30Z"),
+            _claude_tool_result("tu-plan-3", approved,
+                                "2026-06-14T10:00:31Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_plan_sections(tmp_sessions_dir: Path) -> str:
+    """Claude plan iteration for the F3.4 v2 quote→section anchoring cases.
+
+    One ``ExitPlanMode`` revision whose body has markdown markup and three
+    sections (two of which share a phrase), answered by a rejection whose
+    quotes are the RENDERED text (markup stripped by the UI):
+
+    * a bold/backtick sentence quote → anchors to "Rollout Strategy";
+    * a bullet-list quote → anchors to "Rollout Strategy";
+    * a phrase present in BOTH "Testing" and "Cleanup" → ambiguous → null;
+    * a quote absent from the plan → miss → null (never a nearest guess).
+    """
+    session_id = "plan-sections-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    plan_body = (
+        "# Release Plan\n"
+        "\n"
+        "Intro line.\n"
+        "\n"
+        "## Rollout Strategy\n"
+        "\n"
+        "We will use **canary deploys** with `feature_flag` gating.\n"
+        "- staged rollout to 5% first\n"
+        "\n"
+        "## Testing\n"
+        "\n"
+        "Run the suite and check *coverage* numbers.\n"
+        "Shared phrase target.\n"
+        "\n"
+        "## Cleanup\n"
+        "\n"
+        "Shared phrase target.\n"
+    )
+    rejected = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+        "On selected text:\n"
+        "> We will use canary deploys with feature_flag gating.\n"
+        "Why canary?\n"
+        "\n"
+        "On selected text:\n"
+        "> staged rollout to 5% first\n"
+        "Too slow.\n"
+        "\n"
+        "On selected text:\n"
+        "> Shared phrase target.\n"
+        "Which one?\n"
+        "\n"
+        "On selected text:\n"
+        "> missing from the plan entirely\n"
+        "Anchor me if you can.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan the release"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _claude_exit_plan_with_id(plan_body, "tu-sec-0",
+                                      "2026-06-14T10:00:05Z"),
+            _claude_tool_result("tu-sec-0", rejected,
+                                "2026-06-14T10:00:06Z"),
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_plan_write_rejected(tmp_sessions_dir: Path) -> str:
+    """Claude session where a plan-file ``Write`` (not ExitPlanMode) is rejected.
+
+    The v1 boundary fix (F3.4 v2): plan call-ids come from the plan-signal
+    SSOT, so a rejected ``Write plans/*.md`` with user words correlates to
+    its plan revision too.
+    """
+    session_id = "plan-write-reject-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    rejected = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected (eg. if it was a file edit, the "
+        "new_string was NOT written to the file). To tell you how to "
+        "proceed, the user said:\n"
+        "Don't write plan files, refine the plan first.\n"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan feature Y"},
+                "timestamp": "2026-06-14T11:00:00Z",
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-wr-0",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/repo/plans/feature-y.md",
+                                "content": "# Feature Y Plan\n\nWrite draft.",
+                            },
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T11:00:05Z",
+            },
+            _claude_tool_result("tu-wr-0", rejected,
+                                "2026-06-14T11:00:06Z"),
+        ],
+    )
+    return session_id
+
+
 @pytest.fixture
 def fake_codex_plan_session(tmp_sessions_dir: Path) -> str:
     """Codex rollout with several ``update_plan`` calls → last one is final."""
@@ -808,9 +1229,10 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
           ``step-start`` → ``reasoning`` → ``text`` → ``tool`` (call+result
           combined, status=completed) → ``tool`` (error, no output) →
           ``file`` → ``patch`` → ``step-finish``.
-    Covers: text, reasoning inlined, tool-call, tool-result, tool-error
-    (no output), metadata-only file/patch parts, step-* boundary markers
-    skipped, multi-part ordering.
+    Covers: text, reasoning (surfaced as ``Message.thinking``, not
+    inlined into text), tool-call, tool-result, tool-error (no output),
+    metadata-only file/patch parts, step-* boundary markers skipped,
+    multi-part ordering.
     """
     db_path = tmp_sessions_dir / "opencode_tools.db"
     conn = sqlite3.connect(str(db_path))
@@ -1164,6 +1586,9 @@ def fake_antigravity_brain_with_transcript(tmp_sessions_dir: Path) -> Path:
 
 
 _REAL_CLAUDE_DIR = Path("~/.claude/projects").expanduser()
+_REAL_CLAUDE_DESKTOP_DIR = Path(
+    "~/.config/Claude/claude-code-sessions"
+).expanduser()
 _REAL_CODEX_DIR = Path("~/.codex/sessions").expanduser()
 _REAL_OPENCODE_DB = Path("~/.local/share/opencode/opencode.db")
 _REAL_PI_DIR = Path("~/.pi/agent/sessions").expanduser()
@@ -1187,6 +1612,14 @@ def real_claude_dir() -> Path:
     if not _REAL_CLAUDE_DIR.is_dir():
         pytest.skip("no real Claude sessions on this host")
     return _REAL_CLAUDE_DIR
+
+
+@pytest.fixture(scope="session")
+def real_claude_desktop_dir() -> Path:
+    """The real Claude *Desktop* metadata root (F1.3), skip when absent."""
+    if not _REAL_CLAUDE_DESKTOP_DIR.is_dir():
+        pytest.skip("no real Claude Desktop session store on this host")
+    return _REAL_CLAUDE_DESKTOP_DIR
 
 
 @pytest.fixture

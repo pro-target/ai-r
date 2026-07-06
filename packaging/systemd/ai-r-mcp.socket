@@ -1,0 +1,13 @@
+[Unit]
+Description=ai-r MCP shared server socket (streamable-http)
+Documentation=https://github.com/pro-target/ai-r
+
+[Socket]
+# One shared listener on localhost. Accept=no (default) hands the listening
+# socket to a single service instance that serves every agent connection,
+# instead of spawning one ai-r-mcp per connection. This is the whole point:
+# one warm process, not a per-agent stdio swarm.
+ListenStream=127.0.0.1:8756
+
+[Install]
+WantedBy=sockets.target

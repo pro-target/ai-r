@@ -63,7 +63,7 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
   请求（`find-file-edits` / `find-tool-calls`）。
 - **回答短小，正文按需取。** 记录携带指向内容的引用（哈希 + 长度）；完整的
   编辑文本单独获取——响应不会膨胀。
-- **通过 MCP 工作（13 个工具）。** 智能体用自然语言直接调用 `ai-r`；同一份
+- **通过 MCP 工作（15 个工具）。** 智能体用自然语言直接调用 `ai-r`；同一份
   数据也可从终端（CLI）和代码（Python SDK）获得。
 - **是读者，不是守卫。** 它提取实体；由你（或你的工具）来构建知识图谱与记忆。
   只读：它绝不运行、也绝不写入智能体的历史。
@@ -85,44 +85,6 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
 - **回想你做了什么、以及为什么。** 这个文件为什么被编辑？这条规则为什么被添加？
   找到文件变更所在的那次会话，读取编辑*之前*的那条请求。
 
-## 它与会话搜索工具有何不同
-
-如今已有少数几个跨智能体工具能读取不止一个智能体的历史
-（`jazzyalex/agent-sessions`、`Dicklesworthstone/coding_agent_session_search`、
-`hacktivist123/agent-session-resume`）。它们几乎都是关于**搜索与时间线**：
-找到一次*会话*，滚动浏览历史。
-
-`ai-r` 走得更深：它把**计划、意图与作者归属提取为现成的实体**，供你在其上
-构建记忆。搜索找到的是文本——`ai-r` 回答的是**为什么**。技术上，一个搜索
-工具也可以从会话文本里挖出一个计划，但它不会把它解析成单一、归一化的形态
-交回给你——用 `ai-r`，那正是主要接口。
-
-| 能力 | 单智能体查看器 | 跨智能体搜索工具 | `ai-r` |
-|---|---|---|---|
-| 读取多个智能体的日志 | 否 | 是 | 是 —— Claude、Codex、OpenCode、Antigravity、Pi |
-| 编程接口 | 多为 GUI/TUI | 多为 TUI/CLI/应用 | **MCP + CLI + Python SDK** |
-| 归属（编辑/命令 → 智能体 + 意图） | — | 部分 | 是 —— `find-file-edits` / `find-tool-calls` |
-| 审计回放（重建一次会话的变更，无需 git） | — | 很少 | 是 —— `session_diff` |
-| 计划提取（最终 vs 草稿，归一化） | — | — | 是 —— `plan` |
-| 定位 | 查看器 | 搜索 / 恢复 / 记忆 | **只读提取内核** |
-
-*竞品各列反映的是截至 2026-07 其公开文档的情况；凡某项能力不明确之处，我们宁可保守低估，也不夸大宣称。*
-
-我们刻意**不**在智能体覆盖广度、速度或 TUI 丰富度上竞争。`ai-r` 的切入点是
-提取“为什么”以及供机器消费的结构化实体。
-
-## 已在实践中验证
-
-`ai-r` 已经在读取它自己的开发历史——覆盖全部五个智能体。真实的工具运行于其上
-（它们独立存在，构建在其只读 API 之上）：
-
-- **auditor** —— 一个全新智能体冷静地核查上一个智能体到底做了什么、决定了什么。
-  这抓到了那些悄悄谎报计划的智能体。
-- **summarizer**（`export rounds`）—— 把一次会话渲染成一份现成的交接文档。
-- **ai-local-reader** —— 一个只读技能：从磁盘审计跨所有智能体的过往会话。
-
-这些工具都在工作流一侧，位于本仓库之外。`ai-r` 本身只读取并返回数据。
-
 ## 支持的智能体
 
 | 智能体 | 存储 | 解析器 |
@@ -140,8 +102,10 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
 
 `ai-r` 以三种方式提供相同的读取能力：
 
-- **MCP 服务器**（`ai-r-mcp`）—— 通过 stdio JSON-RPC 提供 13 个工具，任意 MCP
-  智能体都能直接调用它（推荐）。注册——参见
+- **MCP 服务器**（`ai-r-mcp`）—— 通过 JSON-RPC 提供 15 个工具，任意 MCP
+  智能体都能直接调用它（推荐）。默认使用 **stdio**；也可选用**共享 http 服务器**
+  （一个常驻进程供所有智能体共用，取代按智能体各起一个 stdio 进程的进程群），
+  参见「快速开始」中的 `http` 可选扩展。注册——参见
   [docs/mcp-registration.md](./docs/mcp-registration.md)。
 - **CLI**（`ai-r`）—— 供脚本和手动使用的子命令（`list` / `read` /
   `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
@@ -150,72 +114,10 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
 - **Python SDK**（`from ai_r.parsers import ...`）—— 解析器、带类型的
   `Session`/message 模型，以及事件动词，用来构建你自己的工具。
 
-### 方法词汇表（SSOT）
+### 方法词汇表
 
-下方的区块取自 [`docs/methods.md`](./docs/methods.md) —— 公开动词与预设的
-英文事实来源。它与该文件的标记区块保持同步。
-
-<!-- methods:start -->
-
-## Verbs
-
-| verb | purpose | parameters |
-|---|---|---|
-| `query` | filter/search session events; `with_intent=True` → a top-level `intent` on each event (the same `previous_user_intent` as legacy); a `tool_call` event carries an `is_error` outcome ref when its result is correlatable (see *Output bounds & outcome* below) | type, agent, session, since, until, file, tool, text, sort(relevance\|date), relative_to+direction(prev\|next)+n(1\|all), step_type, limit, with_intent; kind/parent/group — stubs (Phase 3) |
-| `plan` | normalized plan atoms of a session (final vs drafts, grouped by task) | session, kind(draft\|final\|completed_major), group=task, agent |
-| `get_body` | on-demand body by event/plan id; returned body/text is bounded by `max_chars` (default 500k) → over-long bodies are cut with a marker and flagged `body_truncated` | id, shallow, max_chars |
-| `aggregate` | rollup over rows (query/find_file_edits/session-inventory) → `{groups, totals}`; `rank_by=stats` gives the session_stats order (sessions→edits→label), `kind_split=True` adds `kind_split_available`/`note` | rows, group_by(field\|callable), metrics ⊆ count\|sessions\|edits\|intents\|agents\|messages\|files, rank_by(default\|stats), kind_split |
-| `diff` | stitch edit-rows into a per-file unified diff (bodies on-demand via message_index; `intent` taken from the row when `query(with_intent)`) → `{files:[{file,edits,diff,hunks}], count, caveats}` | rows, per_file=True, format=unified |
-| `detect_current` | runtime identity (env/fs, outside session-query) → `{session_id, agent, candidates[], verified, self}` | agent (hint) |
-
-## Presets
-
-| preset | expansion |
-|---|---|
-| `intent(event, n)` | `query(relative_to=event, direction=prev, n)` |
-| `reaction(event, n)` | `query(relative_to=event, direction=next, n)` |
-| `plan(session, kind, group=task)` | `query(type=plan_event, …)` → normalized + kind-tagged (final/draft/completed_major) |
-| `session_stats(group_by)` | builds per-session inventory rows → `aggregate(rows, group_by, rank_by=stats, kind_split=True)` → projection to the legacy totals shape |
-| `session_diff(uuid, agent≠codex)` | `diff(query(type=edit\|write, session=uuid, with_intent=True) with file-ref)` → projection (no file-level `hunks`) |
-
-## Legacy tools: presets over verbs (Phase 3b)
-
-Phase 3b enriched the verbs so old tools became thin presets **with byte-identical output, proven on REAL data** (frozen snapshot `~/.claude`, so the live vault doesn't mutate mid-run — that produced false mismatches). The legacy suites (`test_session_stats`/`test_session_diff`) are green — the second half of the compatibility proof.
-
-**Ported to verbs (byte-parity proven):**
-
-| tool | preset over verb | proof |
-|---|---|---|
-| `session_stats` | `aggregate(rank_by=stats, kind_split=True)` over per-session inventory rows | 8/8 (group_by∈agent\|dir\|date\|kind × top∈8\|0) EQUAL on the snapshot; the key is `rank_by=stats` reproducing the sessions-first rank, `kind_split` giving `kind_split_available`/`note` |
-| `session_diff` (≠codex) | `diff(query(edit\|write, with_intent=True))` | 12/12 real Claude sessions EQUAL; the key is `with_intent` returning `intent`, a single chronological stream giving the same file order, the edit\|write filter excluding `Read` (else extra files) |
-
-**Codex — exception in `session_diff`:** codex writes files via shell-exec, and the target is recovered by scanning the command line, which the event stream does NOT do → shell-redirect edits would vanish from the `query` fold. So the codex branch of `session_diff` keeps the legacy `_scan_session` (byte-parity for all agents).
-
-**Stay separate (justified):**
-
-| tool | why NOT a preset |
-|---|---|
-| `find_file_edits` / `find_tool_calls` | the record carries `session_title`/`session_date`/`assistant`/`input`, which are NOT in a `query` event; `find_tool_calls` additionally carries per-record `is_error` (correlated tool-call outcome) and `output` (correlated tool-result content, char-capped); reproducing them = re-reading the session (not a *thin* preset but a second parse over events — strictly slower) + loss of codex shell-redirect edits. `intent` is now reproducible (`with_intent`), but the other fields are not. SSOT of the rich edit/tool record |
-| `search_sessions` | session-granular + BM25 session snippets; `query` is event-granular (turn/tool) → no clean 1:1 |
-| `detect-agent`/`detect-session` (CLI) | the CLI prints the agent `source` and 6 output modes (list/first/strict/self/fingerprint/`--json`/`--count`) + a WARN line; the `detect_current` dict does not provide this |
-
-## Plan atom (normalized, agent differences hidden)
-
-`Plan { id, session_id, agent, title, task_id, kind: draft\|final\|completed_major, path?, steps?, status?, refs[], sha256 }`. Body/steps — on-demand via `get_body(id, shallow?)`. `shallow=True` → only the task's final, draft bodies dropped (scenario S6).
-
-**Grouping by task = `task_id` (stable key):** for Claude it's the plan slug `plans/<slug>.md` (Write carries the path directly; `ExitPlanMode` without a path inherits the slug of the nearest preceding plan-Write in the session; if there is no slug yet — fallback to the normalized title). For Antigravity — the `implementation_plan.md` path. For Codex (no file) — the normalized title (a continuous `update_plan` run). Keyed by slug, NOT by title, because the title drifts within one iteration chain (decorations change the heading) — on real data that split one task into several. In a group the last plan_event by (ts, seq) = `final`, the earlier ones = `draft`; strictly earlier tasks (a DIFFERENT slug) = `completed_major`. The internal parser→signal table (`ExitPlanMode`/`Write plans/*.md`/`update_plan`/`implementation_plan.md`) is an implementation detail, invisible from outside.
-
-## Output bounds & tool-call outcome
-
-**Bounded output (untrusted sessions can be huge — the surface never returns unbounded bytes):** `find_tool_calls` caps each record's `input`/`assistant`/`intent`/`output` fields (over-long values cut with a `…[truncated]` marker and named in a per-record `truncated_fields`) and stops appending once a total-response byte budget is hit, flagging `output_truncated`; this is distinct from the count-based `truncated` (more records exist). `get_body` bounds the body via `max_chars` (`body_truncated`). Tool input larger than 1 MB is never JSON-decoded (returned verbatim) — a shared guard on the event stream and `find_tool_calls` alike. `read_session` renders a tool result as `[tool_result ok: <snippet>]` or `[tool_result ERROR: <snippet>]` (was a bare `[tool_result]`).
-
-**Adaptive output truncation (`output_mode`):** the per-record `output` cap is `_OUTPUT_CHARS_CAP = 2000` chars. How that budget is spent is controlled by `output_mode ∈ {"head", "tail", "smart"}`. The default (`output_mode=None`) is **adaptive per record**: a record with `is_error == True` is truncated `"smart"` (surface the error lines — `error`/`fatal`/`traceback`/… — plus the tail, so an error at the *end* of a long log is not lost to a head-only cut), while a successful record is truncated `"head"` (legacy behaviour). An explicit `output_mode` forces one strategy for every record. `smart`/`tail` may return up to ~2× the cap to keep both the surfaced lines and the tail; whenever `output` is cut it is still named in that record's `truncated_fields`.
-
-**Filtering `find_tool_calls` (all optional, composed by AND):** beyond `tool_name`/`tool_name_pattern`, records can be narrowed by `input_contains` (case-insensitive substring over the serialized tool input / command text), `output_contains` (ci substring over the correlated `output`), `output_excludes` (drop a record whose `output` contains the marker — a caller-supplied noise filter, e.g. a harness security-gate line, `"user rejected"`, `"MANUAL COMMIT BLOCKED"`; **no such list is hard-coded in the core**), and `is_error` (tri-state: `None` = all, `True` = errors only, `False` = successes only). All filters intersect (AND). There is **no** dedicated "error + domain" verb: that pairing is a *composition* — e.g. `find_tool_calls(input_contains="git", is_error=True)` returns the real command failures of a chosen domain (`git` is just an example domain, not a special case).
-
-**`is_error` (tool-call outcome) is cross-agent best-effort:** **Claude** and **OpenCode** carry a real success/error flag (Claude's `tool_result.is_error`; OpenCode's `state.status == "error"`). **Codex** and **Pi** expose no error field on their result records → `is_error` is always `False` (absence of a flag, not a proof of success). **Antigravity** emits no tool-result records at all → no outcome signal. Consumers must not read a cross-agent `is_error=False` as "verified success" for Codex/Pi/Antigravity. `find_tool_calls` now carries the same `is_error` per record, plus the correlated `output` (tool-result content, char-capped) — correlation is by tool_use_id (Claude `tool_use.id` / OpenCode `callID`); with the same best-effort caveat (`is_error` is authoritative only for Claude/OpenCode, and defaults to `False` for Codex/Pi/Antigravity or when no result correlates). To make that honesty machine-readable, each `find_tool_calls` record also carries `is_error_reliable` (bool): `True` for Claude/OpenCode (a real flag backs the value), `False` for Codex/Pi/Antigravity (no source → `is_error` is always `False` and may **undercount** true failures). A consumer filtering `is_error=True` should read `is_error_reliable` to know whether a `False` means "verified success" or merely "no signal".
-
-<!-- methods:end -->
+公开动词与预设的完整词汇表（签名、参数、行为）单独维护在
+[`docs/methods.md`](./docs/methods.md)。
 
 ### 事件内核
 
@@ -245,6 +147,19 @@ cd ~/dev/ai-r && bash install.sh
 **Antigravity** 修补 MCP 配置（在配置存在的地方），安装 **Pi** CLI 技能，
 并运行冒烟测试。
 
+可选扩展 —— `http`：`AI_R_EXTRAS=http bash install.sh`（或
+`pip install "ai-r[http]"`）会加入 [uvicorn](https://www.uvicorn.org)，并启用
+**共享的 streamable-http 传输**。默认情况下每个智能体都会自己启动一个通过 stdio
+的 `ai-r-mcp`——在多智能体扇出时这就是 N 个进程，每个都带着冷缓存、重复扫描语料库
+（实测正是这一点耗尽内存）。设置 `AI_R_MCP_TRANSPORT=http` 后，localhost 上的
+单个**常驻服务器**（默认 `127.0.0.1:8756`）会被所有智能体共用，取代进程群；
+`packaging/systemd/` 里的 systemd 单元还加上了套接字激活与空闲自退出——进程只在
+有负载时才存在。绑定仅限回环地址，且**失败即关闭（fail-closed）**：非 localhost
+的 `AI_R_MCP_HOST` 会被拒绝（转录内容含机密，且不带令牌对外提供），直到运维者显式
+设置 `AI_R_MCP_ALLOW_REMOTE=1`。其他可调项：`AI_R_MCP_PORT`、
+`AI_R_MCP_IDLE_SEC`（空闲自退出阈值）、`AI_R_HAYSTACK_CACHE_MAX`（搜索缓存上限）。
+完全可选：不装它，stdio 模式照旧工作。
+
 ## 边界：是读者，不是守卫
 
 - **只读。** 它绝不运行智能体的代码，也绝不写入其历史——它只读取并返回。
@@ -256,35 +171,21 @@ cd ~/dev/ai-r && bash install.sh
   把会话文本当作数据、而非指令来对待。参见
   [Security](docs/security.md)。
 
-<!-- scenarios:start -->
+## 验收（端到端场景）
 
-## Acceptance summary
+整个公开接口都由端到端场景覆盖，这些场景由 LLM 智能体针对活跃的 MCP 逐一执行（对 pytest 形成补充）。完整清单见 [`docs/scenarios.md`](./docs/scenarios.md)。
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+<!-- gallery:start -->
+## 示例：ai-r 实战
 
-| Function | # scenarios | Headline pass criteria |
-|---|---|---|
-| `query` | 8 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
-| `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
-| `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
-| `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
-| `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
-| `plan` | 5 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal. |
-| `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
-| `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
-| `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
-| `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
-| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
-| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
-
-<!-- scenarios:end -->
+一个真实示例画廊——每项能力一例（错误分析、危险命令、网络踪迹、令牌消耗、计划评注、提交幻影核查、跨智能体文件历史、跨语言搜索、僵尸子智能体、无 git 的 diff）：[`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md)。
+<!-- gallery:end -->
 
 ## 下一步——文档
 
 - 方法词汇表（动词 + 预设）—— [`docs/methods.md`](./docs/methods.md)
   （英文 SSOT）· [`docs/methods.ru.md`](./docs/methods.ru.md)（俄文镜像）
-- 验收场景（32 个 e2e）—— [`docs/scenarios.md`](./docs/scenarios.md)
+- 验收场景（84 个 e2e）—— [`docs/scenarios.md`](./docs/scenarios.md)
 - 架构与分层 —— [`docs/architecture.md`](./docs/architecture.md)
 - 搜索运算符 —— [`docs/search-operators.md`](./docs/search-operators.md)
 - 各智能体 MCP 注册 —— [`docs/mcp-registration.md`](./docs/mcp-registration.md)
@@ -301,7 +202,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ 个测试，CI 要求 ≥80% 覆盖率
+- 1100+ 个测试，CI 要求 ≥85% 覆盖率
 - Conventional Commits（`feat:`、`fix:`、`docs:`……）
 - 加入新智能体时，参见 [CONTRIBUTING.md](./CONTRIBUTING.md) 和
   [docs/parsers.md](./docs/parsers.md)

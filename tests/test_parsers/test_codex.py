@@ -443,3 +443,77 @@ def test_event_msg_dedup_with_response_item(tmp_sessions_dir: Path) -> None:
     user_msgs = [m for m in msgs if m.role == "user"]
     assert len(user_msgs) == 1
     assert user_msgs[0].text == long_prompt
+
+
+# ---------------------------------------------------------------------------
+# Reasoning response items → Message.thinking
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_summary_becomes_thinking(tmp_path: Path) -> None:
+    """A ``reasoning`` item's plaintext ``summary[].text`` surfaces as an
+    assistant message with ``thinking`` set (text stays empty); Codex has
+    no per-message usage → ``tokens`` stays None on every record."""
+    rollout = tmp_path / "rollout-reasoning.jsonl"
+    rollout.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "timestamp": "2026-06-14T13:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "plan step one"},
+                            {"type": "summary_text", "text": "then step two"},
+                        ],
+                        "encrypted_content": "gAAAAAB-opaque",
+                    },
+                },
+                {
+                    "timestamp": "2026-06-14T13:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "done"}],
+                    },
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    msgs = codex._extract_messages_from_rollout(rollout)
+    assert len(msgs) == 2
+    reasoning = msgs[0]
+    assert reasoning.role == "assistant"
+    assert reasoning.text == ""
+    assert reasoning.thinking == "plan step one\nthen step two"
+    assert "gAAAAAB" not in reasoning.thinking  # ciphertext never surfaces
+    assert msgs[1].thinking == ""
+    assert all(m.tokens is None for m in msgs)  # cumulative-only format
+
+
+def test_reasoning_without_summary_is_skipped(tmp_path: Path) -> None:
+    """Encrypted-only reasoning items (``summary: []`` — the common real
+    shape) yield NO message: absence of plaintext is honest, and blank
+    assistant messages would pollute the dialogue."""
+    rollout = tmp_path / "rollout-encrypted.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-14T13:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB-opaque",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert codex._extract_messages_from_rollout(rollout) == []

@@ -38,23 +38,87 @@ deterministic, read-only, pure-stdlib (no new dependencies).
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
-from ai_r.parsers import PARSERS, iso, target_agents
+from ai_r.parsers import PARSERS, Session, iso, target_agents
+from ai_r.tokens import session_tokens as _session_tokens
 
 __all__ = [
     "GROUP_BY",
+    "children_of",
     "group_key",
     "session_stats",
 ]
+
+
+def children_of(
+    parent_uuid: str, *, agent: Optional[str] = None
+) -> List[Session]:
+    """Return the spawned subagent sessions whose parent is ``parent_uuid``.
+
+    Scans the session inventory of every in-scope agent (``target_agents``
+    resolves the optional ``agent`` filter) and keeps the sessions whose
+    :attr:`ai_r.parsers.Session.parent_uuid` equals ``parent_uuid``.  Reuses
+    the same ``list_sessions`` spine the rollups consume — no re-parse of
+    transcripts, purely inventory metadata.
+
+    Note: Antigravity never records a ``parent_uuid``, so a parent under that
+    agent (or any childless parent) yields an empty list — an honest "no
+    children found", not an error.
+    """
+    if not parent_uuid or not str(parent_uuid).strip():
+        return []
+    out: List[Session] = []
+    for agent_name in target_agents(agent):
+        parser = PARSERS[agent_name]
+        try:
+            sessions = parser.list_sessions()
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        for session in sessions:
+            if session.parent_uuid == parent_uuid:
+                out.append(session)
+    return out
 
 
 # The dimensions a caller may roll up by.  Kept as an explicit, validated
 # set so an unknown ``group_by`` fails fast with a clear message instead of
 # silently bucketing everything under ``None``.
 GROUP_BY: frozenset[str] = frozenset({"agent", "dir", "date", "kind"})
+
+
+# ---------------------------------------------------------------------------
+# ``with_tokens`` scan guard (fail-loud instead of a silent multi-hour hang)
+# ---------------------------------------------------------------------------
+#
+# ``with_tokens=True`` reads EVERY matched session's own files at request time
+# (``_session_tokens`` → the parser's ``read_token_usage`` / ``read_messages``,
+# each of which globs the whole session tree and parses a full transcript).
+# On a large *unscoped* corpus (observed: 1158+ subagent sessions) that is a
+# per-session I/O storm the caller experiences as an unresponsive "running for
+# hours" call — the tool that counts tokens hanging on counting tokens.
+#
+# The guard is deterministic and fires on the CHEAP inventory count, BEFORE any
+# per-session token read, so it can never reproduce the very hang it prevents:
+#
+# * an *unscoped* request (no ``agent`` / ``since`` / ``until``) whose matched
+#   session count exceeds :data:`TOKEN_SCAN_LIMIT` is REFUSED with a structured,
+#   self-explaining error naming the count, the limit and how to proceed
+#   (narrow the scope, or opt in with a higher / disabled ``token_scan_limit``);
+# * any request (scoped or not) that will read more than
+#   :data:`TOKEN_SCAN_WARN` sessions still runs but attaches a ``warning`` so a
+#   large-but-permitted scan is never silent.
+#
+# ``TOKEN_SCAN_LIMIT`` is a *default*, overridable per call via the
+# ``token_scan_limit`` argument (``0`` disables the cap for a caller that
+# knowingly wants the whole corpus).  The default sits well above ordinary
+# scoped usage (a single day / project rarely exceeds a few hundred sessions)
+# yet far below the thousands-of-sessions zone where the sequential re-glob +
+# full-file-read cost runs away.
+TOKEN_SCAN_LIMIT: int = 400
+TOKEN_SCAN_WARN: int = 200
 
 
 def _session_dir(session: Any) -> str:
@@ -108,6 +172,8 @@ def session_stats(
     group_by: str = "agent",
     top: int = 8,
     edit_path: str = "/",
+    with_tokens: bool = False,
+    token_scan_limit: int = TOKEN_SCAN_LIMIT,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped by ``group_by`` and ranked by session count.
 
@@ -131,6 +197,29 @@ def session_stats(
         edit_path: Substring matched against edited file paths when counting
             edits (forwarded to :func:`find_file_edits`, which requires a
             non-empty path).  Defaults to ``"/"`` (matches absolute paths).
+        with_tokens: When ``True``, every matched session's token usage is
+            read **at request time** (F3.3, SSOT :mod:`ai_r.tokens` —
+            exact where the format records usage, a labeled estimate
+            otherwise, honest ``unknown`` without any signal) and each
+            group / ``totals`` carries a folded ``tokens`` block
+            (``{input, output, reasoning, cache_read, cache_write, total,
+            exact, estimated, unknown}`` — sums are ``None`` when no row
+            carried the field; the three counters say how many sessions
+            were exact / estimated / unknown).  Default ``False`` keeps
+            the historical output byte-identical and pays no read cost.
+        token_scan_limit: Guard against an unbounded ``with_tokens`` scan
+            (each matched session's files are read at request time, so a
+            large *unscoped* corpus is a multi-hour I/O storm).  When
+            ``with_tokens`` is set with NO narrowing filter
+            (``agent``/``since``/``until``) and more than this many sessions
+            match, the call returns a structured refusal (an ``error`` block
+            naming the count and this limit) INSTEAD of scanning — the guard
+            is evaluated on the cheap inventory count before any token read.
+            Default :data:`TOKEN_SCAN_LIMIT`; pass a higher value to raise
+            the ceiling or ``0`` to disable the cap when you knowingly want
+            the whole corpus.  A permitted scan larger than
+            :data:`TOKEN_SCAN_WARN` sessions still runs but attaches a
+            ``warning``.  Ignored entirely when ``with_tokens`` is ``False``.
 
     Returns:
         A dict::
@@ -178,6 +267,17 @@ def session_stats(
         )
     if not isinstance(top, int) or isinstance(top, bool) or top < 0:
         raise ValueError(f"top must be a non-negative integer, got {top!r}")
+    if not isinstance(with_tokens, bool):
+        raise ValueError(f"with_tokens must be a boolean, got {with_tokens!r}")
+    if (
+        not isinstance(token_scan_limit, int)
+        or isinstance(token_scan_limit, bool)
+        or token_scan_limit < 0
+    ):
+        raise ValueError(
+            f"token_scan_limit must be a non-negative integer, got "
+            f"{token_scan_limit!r}"
+        )
 
     # ``find_file_edits`` is the canonical validator for agent/since/until.
     # Run it first so an invalid bound or agent raises the same ValueError
@@ -189,6 +289,11 @@ def session_stats(
         since=since,
         until=until,
         limit=0,
+        # Internal call — only *counts* are derived from the records (no
+        # text is emitted), and redaction could merge two distinct raw
+        # intents under one masked string (an intents-count drift): keep
+        # the fold on raw data.
+        redact=False,
     )
 
     # Edit enrichment, keyed by session uuid: edit count + distinct intents.
@@ -219,7 +324,15 @@ def session_stats(
     # ``aggregate`` then does the grouping, ranking and totals — this tool is
     # a thin preset over it (``rank_by="stats"`` reproduces the historical
     # sessions-first rank; ``kind_split=True`` adds the RISK-4 fields).
+    #
+    # Two-phase on purpose: this first pass walks only the CHEAP inventory
+    # (``list_sessions`` metadata + the ISO bound filter) and keeps a handle on
+    # the ``Session`` object.  Per-session token reads (expensive — a full-tree
+    # glob + transcript parse each) are deferred to a SECOND pass below so the
+    # scan guard can veto an oversized ``with_tokens`` run before a single file
+    # is read.
     session_rows: list[dict[str, Any]] = []
+    matched_sessions: list[Session] = []
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         for session in parser.list_sessions():
@@ -233,7 +346,7 @@ def session_stats(
                 continue
 
             enrich = edits_by_session.get(session.uuid)
-            session_rows.append({
+            row: dict[str, Any] = {
                 "session_uuid": session.uuid,
                 "agent": group_key(session, "agent"),
                 "dir": group_key(session, "dir"),
@@ -242,12 +355,64 @@ def session_stats(
                 "edits": enrich["edits"] if enrich is not None else 0,
                 "intents": sorted(enrich["intents"]) if enrich is not None else [],
                 "messages": int(getattr(session, "message_count", 0) or 0),
-            })
+            }
+            session_rows.append(row)
+            matched_sessions.append(session)
 
+    # Second phase: token enrichment, guarded.  Every ``with_tokens`` row's
+    # token block is read here (request-time, nothing background) — but only
+    # after the scan guard has cleared the run.
+    warning: Optional[str] = None
+    if with_tokens:
+        matched = len(matched_sessions)
+        scoped = bool(
+            (agent and str(agent).strip())
+            or since_s is not None
+            or until_s is not None
+        )
+        # Fail-loud refusal: an UNSCOPED scan over more sessions than the
+        # limit is the multi-hour hang.  Return a structured, self-explaining
+        # error BEFORE reading any session file (the guard runs on the cheap
+        # inventory count, so it can never reproduce the hang it prevents).
+        if not scoped and token_scan_limit and matched > token_scan_limit:
+            return {
+                "error": "scope_required",
+                "message": (
+                    f"with_tokens=true would read token usage from {matched} "
+                    f"sessions with no narrowing filter, exceeding "
+                    f"token_scan_limit={token_scan_limit}. Each session is "
+                    f"read from disk at request time, so an unscoped scan of "
+                    f"this size can run for a very long time. Narrow the "
+                    f"scope (agent / since / until) or raise token_scan_limit "
+                    f"(0 disables the cap) to proceed."
+                ),
+                "matched_sessions": matched,
+                "token_scan_limit": token_scan_limit,
+                "scoped": False,
+            }
+        # Permitted but large: run, yet never silently — say how big the scan
+        # was so a slow call is explainable and the caller can scope it next
+        # time.
+        if matched > TOKEN_SCAN_WARN:
+            warning = (
+                f"with_tokens read token usage from {matched} sessions "
+                f"(> {TOKEN_SCAN_WARN}); each is read from disk at request "
+                f"time. Narrow the scope (agent / since / until) for a faster "
+                f"call."
+            )
+        for row, session in zip(session_rows, matched_sessions):
+            # F3.3: read the session's own files NOW (request-time, nothing
+            # background) — exact where recorded, labeled estimate otherwise,
+            # honest unknown without signal.
+            row["tokens"] = _session_tokens(session)
+
+    metrics = ["sessions", "edits", "intents", "agents", "messages"]
+    if with_tokens:
+        metrics.append("tokens")
     rolled = _aggregate(
         session_rows,
         group_by=group_by,
-        metrics=["sessions", "edits", "intents", "agents", "messages"],
+        metrics=metrics,
         rank_by="stats",
         kind_split=True,
     )
@@ -268,6 +433,10 @@ def session_stats(
         },
         "kind_split_available": rolled["kind_split_available"],
     }
+    if with_tokens:
+        result["totals"]["tokens"] = rolled["totals"]["tokens"]
     if "note" in rolled:
         result["note"] = rolled["note"]
+    if warning is not None:
+        result["warning"] = warning
     return result

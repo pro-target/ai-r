@@ -567,6 +567,124 @@ def test_list_sessions_limit_zero_is_uncapped(
     assert result["truncated"] is False
 
 
+# --- A3 session recency (last_activity / age_sec / activity) ---------------
+
+
+def test_list_sessions_carries_recency_fields(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each summary gains ``last_activity`` / ``age_sec`` / ``activity``, and
+    the recency verdict is self-consistent with ``age_sec`` + threshold.
+
+    ``date`` is retained (backward compatibility) and equals ``last_activity``.
+    ``now`` is the real clock here, so we assert the *invariants* (types,
+    consistency), not a fixed age — the pure classifier is tested exactly
+    in :mod:`tests.test_activity`.
+    """
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="recency-1",
+        user_text="recent work",
+        title="recency session",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    # A generous threshold so a just-written fixture reads fresh regardless of
+    # the fixture's embedded timestamp vs. the test-run clock.
+    monkeypatch.setenv("AI_R_STALL_SEC", "999999999")
+
+    result = list_sessions(agent="claude")
+    session = result["sessions"][0]
+    # New fields present.
+    assert "last_activity" in session
+    assert "age_sec" in session
+    assert "activity" in session
+    # Backward compat: ``date`` still present and equals ``last_activity``.
+    assert session["date"] == session["last_activity"]
+    # Types + consistency.
+    assert isinstance(session["age_sec"], int)
+    assert session["age_sec"] >= 0
+    assert session["activity"] in ("fresh", "stale")
+    assert session["activity"] == "fresh"
+    # Consistency of verdict with the (huge) threshold.
+    assert (session["age_sec"] > 999999999) == (session["activity"] == "stale")
+
+
+def test_list_sessions_stale_when_threshold_tiny(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A near-zero threshold flips an older fixture session to ``stale``.
+
+    The fixture's last-activity timestamp is well in the past, so with a 0.001s
+    threshold any real ``now`` puts its age past the bar → ``stale``.
+    """
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="stale-1",
+        user_text="old work",
+        title="stale session",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    monkeypatch.setenv("AI_R_STALL_SEC", "0.001")
+
+    result = list_sessions(agent="claude")
+    session = result["sessions"][0]
+    assert session["activity"] == "stale"
+    assert session["age_sec"] > 0
+
+
+def test_session_summary_without_now_omits_recency_fields() -> None:
+    """Called without ``now`` the summary keeps its historical shape.
+
+    Non-list surfaces (``read_session`` candidates, etc.) build summaries
+    without a sampled clock; they must not sprout recency keys.
+    """
+    from ai_r.parsers.models import AgentName, Session
+
+    sess = Session(
+        uuid="no-now-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        path="/tmp/x.jsonl",
+        message_count=1,
+    )
+    summary = _session_summary(sess)
+    assert "activity" not in summary
+    assert "age_sec" not in summary
+    assert "last_activity" not in summary
+    # ``date`` is still there.
+    assert summary["date"].startswith("2026-01-01")
+
+
+def test_session_summary_with_fixed_now_is_deterministic() -> None:
+    """With an injected ``now`` + threshold the summary's recency is exact."""
+    from ai_r.parsers.models import AgentName, Session
+
+    date = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, 12, 5, 0, tzinfo=timezone.utc)  # 300s later
+    sess = Session(
+        uuid="fixed-now-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=date,
+        path="/tmp/x.jsonl",
+        message_count=1,
+    )
+    summary = _session_summary(sess, now=now, stale_sec=600.0)
+    assert summary["age_sec"] == 300
+    assert summary["activity"] == "fresh"
+    assert summary["last_activity"] == summary["date"]
+
+    summary_stale = _session_summary(sess, now=now, stale_sec=60.0)
+    assert summary_stale["activity"] == "stale"
+
+
 def test_list_sessions_surfaces_subagent_kind_and_parent(
     fake_claude_subagent: Path,
     tmp_sessions_dir: Path,
@@ -1760,7 +1878,11 @@ def test_find_file_edits_no_match_returns_empty(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     result = find_file_edits(path="/definitely/not/a/real/path/zzz")
+    diagnostics = result.pop("diagnostics")
     assert result == {"records": [], "count": 0, "truncated": False}
+    # A zero-match result must explain itself (F1.1).
+    assert diagnostics["filters"]["path"] == "/definitely/not/a/real/path/zzz"
+    assert diagnostics["hints"]
 
 
 def test_find_file_edits_claude_match(
@@ -2538,6 +2660,169 @@ def test_query_over_mcp_client(fake_claude_session_with_tools: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# query session-list facet (F3.2): one call, union of several sessions
+# ---------------------------------------------------------------------------
+
+
+def test_query_session_list_direct(
+    fake_claude_session: Path, fake_claude_session_with_tools: Path
+) -> None:
+    # Two distinct sessions in the fake vault: "test-claude-1" and
+    # "claude-tools-1".  A list unions them in ONE call.
+    res = query(
+        type="user_turn",
+        agent="claude",
+        session=["test-claude-1", "claude-tools-1"],
+    )
+    assert res["count"] == 2
+    assert {e["session_id"] for e in res["events"]} == {
+        "test-claude-1", "claude-tools-1"
+    }
+    # The scalar form is unchanged (backward compat).
+    single = query(type="user_turn", agent="claude", session="test-claude-1")
+    assert single["count"] == 1
+    assert single["events"][0]["session_id"] == "test-claude-1"
+
+
+def test_query_session_empty_list_returns_error_dict() -> None:
+    res = query(session=[])
+    assert res["error"] == "invalid_argument"
+    assert "session list" in res["message"]
+
+
+def test_query_session_list_empty_result_diagnostics_echo_list(
+    fake_claude_session: Path,
+) -> None:
+    # Unknown uuids → honest empty result; the diagnostics echo the LIST
+    # value so the caller sees exactly which filter produced the zero.
+    res = query(session=["no-such-1", "no-such-2"], agent="claude")
+    assert res["count"] == 0
+    assert res["diagnostics"]["filters"]["session"] == [
+        "no-such-1", "no-such-2"
+    ]
+
+
+def test_query_session_list_over_mcp_client(
+    fake_claude_session: Path, fake_claude_session_with_tools: Path
+) -> None:
+    # The JSON-array form must survive the real MCP transport (schema
+    # accepts string OR array of strings).
+    out = _run(
+        _call(
+            "query",
+            {
+                "type": "user_turn",
+                "agent": "claude",
+                "session": ["test-claude-1", "claude-tools-1"],
+            },
+        )
+    )
+    payload = json.loads(out[0])
+    assert payload["count"] == 2
+    assert {e["session_id"] for e in payload["events"]} == {
+        "test-claude-1", "claude-tools-1"
+    }
+
+
+# ---------------------------------------------------------------------------
+# query reference-by-default (QRY-1): text preview at the MCP boundary
+# ---------------------------------------------------------------------------
+
+
+def _patch_claude_base(tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+
+def test_query_long_text_cut_to_preview_and_get_body_full(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long body surfaces as a ~160-char preview + flag; get_body returns it whole."""
+    long_text = "slovo " * 900  # ~5.4 KB, no secrets
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-long-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-long-1")
+    assert res["count"] == 1
+    ev = res["events"][0]
+    assert ev["text_truncated"] is True
+    assert ev["text"].endswith("…")
+    assert ev["text"] == long_text[:160] + "…"
+    assert len(ev["text"]) == 161
+    # id/refs untouched → get_body resolves the FULL body.
+    body = get_body(ev["id"])
+    assert body.get("error") is None
+    full = body.get("text") or body.get("body") or ""
+    assert full.rstrip() == long_text.rstrip()
+    assert len(full) > 5000
+
+
+def test_query_short_text_not_flagged(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short body is emitted verbatim: no cut, no ``text_truncated`` key."""
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-short-1", user_text="short and sweet"
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-short-1")
+    ev = res["events"][0]
+    assert ev["text"] == "short and sweet"
+    assert "text_truncated" not in ev
+
+
+def test_query_preview_cut_runs_after_redaction(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret at the HEAD of a long body is masked in the preview.
+
+    Redaction happens in the core (emission-time), the preview cut at the
+    MCP boundary — so the preview must contain the placeholder, never a
+    prefix of the raw secret.
+    """
+    secret = "ghp_" + "a1b2c3d4e5" * 4  # GITHUB_TOKEN pattern (40 tail chars)
+    long_text = "token " + secret + " tail " + "x" * 500
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-redact-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-redact-1")
+    ev = res["events"][0]
+    assert ev["text_truncated"] is True
+    assert "[REDACTED_GITHUB_TOKEN]" in ev["text"]
+    assert secret not in ev["text"]
+    assert res["redactions"].get("GITHUB_TOKEN", 0) >= 1
+
+
+def test_query_preview_over_mcp_client(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preview contract holds over the real MCP transport too."""
+    long_text = "payload " * 400
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-mcp-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    out = _run(
+        _call(
+            "query",
+            {"type": "user_turn", "agent": "claude", "session": "preview-mcp-1"},
+        )
+    )
+    payload = json.loads(out[0])
+    ev = payload["events"][0]
+    assert ev["text_truncated"] is True
+    assert len(ev["text"]) == 161 and ev["text"].endswith("…")
+
+
+# ---------------------------------------------------------------------------
 # plan + get_body (Phase-2 verbs): registration + behaviour
 # ---------------------------------------------------------------------------
 
@@ -2599,3 +2884,103 @@ def test_plan_over_mcp_client(fake_codex_plan_session: str) -> None:
     payload = json.loads(out[0])
     assert payload["count"] == 3
     assert payload["plans"][-1]["kind"] == "final"
+
+
+# ---------------------------------------------------------------------------
+# plan F3.4 v1: final body inline + feedback pairs + raw-response refs
+# ---------------------------------------------------------------------------
+
+
+def test_plan_tool_default_schema_f34(fake_claude_plan_feedback: str) -> None:
+    res = plan(session=fake_claude_plan_feedback)
+    # Final body inline by default; authoritative approval-edited text wins.
+    final = [p for p in res["plans"] if p["kind"] == "final"][0]
+    assert "EDITED final body by user." in final["body"]
+    assert final["body_source"] == "approval_edited_by_user"
+    # Drafts stay references.
+    assert all(
+        "body" not in p for p in res["plans"] if p["kind"] == "draft"
+    )
+    # All quote→comment pairs ride along, with counts.
+    assert res["feedback_count"] == 5
+    assert len(res["feedback"]) == 5
+    first = res["feedback"][0]
+    assert set(first) == {
+        "session_id", "agent", "plan_id", "plan_version", "verdict",
+        "round", "quote", "comment", "section", "ref", "ts",
+    }
+    # v2: every plan atom carries its chronological revision number.
+    assert [p["version"] for p in res["plans"]] == [1, 2, 3, 4]
+
+
+def test_plan_tool_rounds_last(fake_claude_plan_feedback: str) -> None:
+    res = plan(session=fake_claude_plan_feedback, rounds="last")
+    # Only the final feedback round (the stay-in-plan-mode pair set).
+    assert res["feedback_count"] == 2
+    assert all(p["round"] == 2 for p in res["feedback"])
+    # The plan atoms themselves are unaffected by the rounds filter.
+    assert res["count"] == 4
+
+
+def test_plan_tool_invalid_rounds_returns_error(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback, rounds="first")
+    assert res["error"] == "invalid_argument"
+    # Fails loud even when feedback is disabled — never silently ignored.
+    res2 = plan(
+        session=fake_claude_plan_feedback, feedback=False, rounds="first"
+    )
+    assert res2["error"] == "invalid_argument"
+
+
+def test_plan_tool_feedback_redacted_by_default(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback)
+    comments = " ".join(p["comment"] for p in res["feedback"])
+    assert "abc12345secret" not in comments
+    assert "[REDACTED_GENERIC_SECRET]" in comments
+    assert res["redactions"]["GENERIC_SECRET"] >= 1
+    # redact=False returns the raw comment.
+    raw = plan(session=fake_claude_plan_feedback, redact=False)
+    assert any(
+        "abc12345secret" in p["comment"] for p in raw["feedback"]
+    )
+
+
+def test_plan_tool_historical_shape_switches(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(
+        session=fake_claude_plan_feedback, bodies="none", feedback=False
+    )
+    assert "feedback" not in res and "feedback_count" not in res
+    assert all("body" not in p for p in res["plans"])
+
+
+def test_plan_tool_invalid_bodies_returns_error(
+    fake_claude_plan_feedback: str,
+) -> None:
+    res = plan(session=fake_claude_plan_feedback, bodies="everything")
+    assert res["error"] == "invalid_argument"
+
+
+def test_get_body_feedback_ref_over_mcp_client(
+    fake_claude_plan_feedback: str,
+) -> None:
+    ref = plan(session=fake_claude_plan_feedback)["feedback"][0]["ref"]
+    out = _run(_call("get_body", {"id": ref}))
+    payload = json.loads(out[0])
+    assert payload["type"] == "plan_feedback"
+    assert payload["verdict"] == "rejected"
+    assert payload["text"].startswith("The user doesn't want to proceed")
+
+
+def test_plan_tool_feedback_empty_for_codex(
+    fake_codex_plan_session: str,
+) -> None:
+    res = plan(session=fake_codex_plan_session, agent="codex")
+    # No approval flow → honest empty feedback, plans untouched.
+    assert res["feedback"] == [] and res["feedback_count"] == 0
+    assert res["count"] == 3

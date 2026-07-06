@@ -3,7 +3,9 @@
 Exposes these tools over the Model Context Protocol:
 
 * :func:`list_sessions`  — enumerate sessions, optionally filtered by agent.
-* :func:`read_session`   — load a single session by ``uuid`` and ``agent``.
+* :func:`read_session`   — load a single session by ``uuid`` (``agent``
+  optional: omitted → the id is resolved across every parser; a rare
+  cross-agent id collision returns a candidate list, not an error).
 * :func:`find_file_edits` — find file edits across sessions.
 * :func:`find_tool_calls` — find arbitrary tool calls across sessions.
 * :func:`session_diff`   — reconstruct what a session changed, without git.
@@ -40,8 +42,9 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Mapping, Optional, Sequence, Union
 
 _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
@@ -52,20 +55,42 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from ai_r import __version__  # noqa: E402
 from ai_r.find_file_edits import (  # noqa: E402
     PARSERS as _PARSERS,
-    coerce_agent as _coerce_agent,
+    # Re-exported for downstream consumers/tests that historically import
+    # it from here (read_session no longer uses it directly).
+    coerce_agent as _coerce_agent,  # noqa: F401
     find_file_edits as _find_file_edits_core,
     iso as _iso,
     previous_user_intent as _previous_user_intent,
     target_agents as _target_agents,
 )
+from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # noqa: E402
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
+from ai_r.incidents import incidents as _incidents_core  # noqa: E402
+from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
-from ai_r.session_stats import session_stats as _session_stats_core  # noqa: E402
-from ai_r.parsers import Session  # noqa: E402
+from ai_r.session_stats import (  # noqa: E402
+    TOKEN_SCAN_LIMIT as _SESSION_STATS_TOKEN_SCAN_LIMIT,
+    children_of as _children_of,
+    session_stats as _session_stats_core,
+)
+from ai_r.tokens import component_tokens, session_tokens  # noqa: E402
+from ai_r.parsers import ParserModule, Session  # noqa: E402
+from ai_r.parsers._common import project_dir_matches  # noqa: E402
+from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
+from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
+from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
+from ai_r.resume import resume_command  # noqa: E402
+from ai_r.activity import session_activity, stall_seconds  # noqa: E402
+from ai_r.serve import resolve_transport, run_http  # noqa: E402
+from ai_r.redact import (  # noqa: E402
+    merge_redaction_counts as _merge_redactions,
+    redact_value as _redact_value,
+)
 from ai_r.events import (  # noqa: E402
     query as _query_core,
     plan as _plan_core,
+    plan_feedback as _plan_feedback_core,
     get_body as _get_body_core,
     aggregate as _aggregate_core,
     diff as _diff_core,
@@ -101,7 +126,30 @@ _LIST_LIMIT_DEFAULT = 100
 # shared across all sessions, so a DB mtime bump invalidates every OpenCode
 # session's entry at once — which is the correct, safe behavior since any
 # session may have grown.
-_HAYSTACK_CACHE_MAX = 256
+# Cache size cap. The shared long-lived http server
+# (``AI_R_MCP_TRANSPORT=http``) holds ONE warm cache for every agent, so it
+# must be able to hold a whole corpus: a cap below the session count makes a
+# full-corpus ``scope="body"`` search thrash — it LRU-evicts the very entries
+# it is about to reuse and re-parses every file, erasing the warm-repeat win.
+# Measured on a ~1492-session corpus: at the old 256 cap the "warm" repeat was
+# as slow as cold (1x); with the cap above the corpus it is ~17x faster.
+# Default holds a large corpus; tune with ``AI_R_HAYSTACK_CACHE_MAX``. Each
+# entry is already bounded by ``_HAYSTACK_CHARS_CAP`` so total stays bounded.
+def _resolve_haystack_cache_max(env: Optional[Mapping[str, str]] = None) -> int:
+    env = os.environ if env is None else env
+    raw = env.get("AI_R_HAYSTACK_CACHE_MAX")
+    if raw:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _HAYSTACK_CACHE_MAX_DEFAULT
+        if value > 0:
+            return value
+    return _HAYSTACK_CACHE_MAX_DEFAULT
+
+
+_HAYSTACK_CACHE_MAX_DEFAULT = 2048
+_HAYSTACK_CACHE_MAX = _resolve_haystack_cache_max()
 # Soft TTL is a defensive backstop only: if a source path cannot be statted
 # (OSError), we still serve a cached entry but bound its staleness so a
 # transiently-unreadable file does not pin stale content forever.
@@ -109,6 +157,57 @@ _HAYSTACK_CACHE_TTL_SEC = 300
 
 _haystack_cache: "OrderedDict[tuple[str, str, float], tuple[str, bool]]" = OrderedDict()
 _haystack_cache_lock = threading.Lock()
+
+
+def _redact_fields(
+    obj: dict[str, Any],
+    fields: Sequence[str],
+    redactions: dict[str, int],
+) -> None:
+    """Mask secrets in the named ``obj`` fields in place, folding counts.
+
+    Emission-time redaction helper (F2.1) shared by the MCP wrappers whose
+    output shaping lives in this module (``read_session`` /
+    ``search_sessions`` / ``list_sessions``).  Absent fields are skipped;
+    counts accumulate into ``redactions``.
+    """
+    for field in fields:
+        if field not in obj:
+            continue
+        new_val, counts = _redact_value(obj[field])
+        if counts:
+            obj[field] = new_val
+            _merge_redactions(redactions, counts)
+
+
+# Reference-by-default boundary (scenario QRY-1): the ``query`` MCP wrapper
+# cuts every emitted event ``text`` to this many characters — the full body
+# stays on-demand via ``get_body``.
+_EVENT_TEXT_PREVIEW_CHARS = 160
+
+
+def _preview_event_texts(
+    events: List[dict[str, Any]],
+    max_chars: int = _EVENT_TEXT_PREVIEW_CHARS,
+) -> None:
+    """Cut each event's ``text`` to a preview, in place (QRY-1 contract).
+
+    Output-boundary projection ONLY: the core (:mod:`ai_r.events.query`) and
+    every in-process consumer of full event text (``plan`` / ``diff`` /
+    ``session_stats`` / ``session_diff`` / ``find_*``) keep seeing the full
+    text — this runs on the MCP wrapper's already-materialized row dicts.
+    It also runs AFTER emission-time redaction (the core redacts before
+    returning), so a secret at the head of a long body is masked in the
+    preview too.  A real cut is marked with a trailing ``…`` and
+    ``text_truncated: true``; shorter texts are left untouched (no flag).
+    ``id`` / ``refs`` / ``sha256`` are never modified, so ``get_body(id)``
+    still resolves the full body.
+    """
+    for ev in events:
+        text = ev.get("text")
+        if isinstance(text, str) and len(text) > max_chars:
+            ev["text"] = text[:max_chars] + "…"
+            ev["text_truncated"] = True
 
 
 mcp = FastMCP(
@@ -120,17 +219,59 @@ mcp = FastMCP(
 )
 
 
-def _session_summary(session: Session) -> dict[str, Any]:
-    """Project a :class:`Session` to a JSON-safe summary dict."""
-    return {
+def _session_summary(
+    session: Session,
+    now: Optional[datetime] = None,
+    stale_sec: Optional[float] = None,
+) -> dict[str, Any]:
+    """Project a :class:`Session` to a JSON-safe summary dict.
+
+    ``project_dir`` / ``launch_surface`` are top-level fields (next to
+    ``kind`` / ``parent_uuid``) and stay ``None`` when the source format
+    carries no signal — absence is honest, never fabricated (F1.4).
+    ``resume_command`` (F2.2) is the ready-to-run shell one-liner that
+    reopens the session in its agent's CLI, ``None`` when no real
+    command exists (Antigravity, subagent sessions, reference-only
+    Desktop sessions) — text only, never executed (SSOT
+    :mod:`ai_r.resume`).
+
+    When ``now`` is supplied (``list_sessions`` samples the wall clock once
+    per call and passes it in), the A3 recency fields are attached:
+
+    * ``last_activity`` — the last-activity timestamp as an explicit ISO
+      string (same instant as ``date``, kept alongside it for a clearly
+      named field; ``date`` is retained for backward compatibility);
+    * ``age_sec`` — whole seconds since ``last_activity``;
+    * ``activity`` — ``"fresh"`` / ``"stale"`` (recency of the last written
+      record only — NOT a claim about process liveness; see
+      :mod:`ai_r.activity`).
+
+    ``stale_sec`` defaults to :func:`ai_r.activity.stall_seconds` when a
+    ``now`` is given but no explicit threshold.  Without ``now`` the summary
+    is byte-identical to the historical shape (no recency fields).
+    """
+    date_iso = _iso(session.date)
+    result: dict[str, Any] = {
         "uuid": session.uuid,
         "agent": session.agent.value,
         "title": session.title,
-        "date": _iso(session.date),
+        "date": date_iso,
         "message_count": session.message_count,
         "kind": session.kind,
         "parent_uuid": session.parent_uuid,
+        "project_dir": session.project_dir,
+        "launch_surface": session.launch_surface,
+        "resume_command": resume_command(session),
     }
+    if now is not None:
+        threshold = stall_seconds() if stale_sec is None else stale_sec
+        recency = session_activity(session.date, now, threshold)
+        result["last_activity"] = date_iso
+        result["age_sec"] = recency["age_sec"]
+        result["activity"] = recency["activity"]
+    if session.extra:
+        result["extra"] = session.extra
+    return result
 
 
 def _codex_text(parts: object) -> str:
@@ -321,6 +462,67 @@ def _project_message_content(m: Any) -> str:
     return "\n".join(chunks)
 
 
+def _message_token_blocks(
+    messages: Sequence[Any],
+    hard_cap: int = 0,
+) -> List[Optional[dict[str, Any]]]:
+    """Per-surfaced-message exact token blocks, aligned with ``_project_messages``.
+
+    Walks the messages applying the *exact same* surface-drop logic as
+    :func:`_project_messages` (drop non-user/assistant records without qa,
+    then drop empty-content records) and returns one entry per SURFACED
+    message — so the result lines up positionally with
+    ``_project_messages(messages, hard_cap)``.  Each entry is the message's
+    exact ``tokens`` block (F3.3) to attach, or ``None`` when the record
+    carries no per-message usage (Codex / Antigravity / user turns).
+
+    Claude dedup: a streamed API call writes several JSONL records sharing
+    one ``(message.id, requestId)`` — every one carries an identical
+    ``tokens`` block tagged with an internal ``_call`` key.  The block is
+    emitted only on the FIRST surviving (surfaced) record per ``_call``;
+    later records of the same call get ``None``.  The internal ``_call``
+    key is stripped from the emitted block so it never leaks to the client.
+    OpenCode / Pi carry no ``_call`` key → each assistant block is attached
+    directly.
+
+    CRITICAL: this walk is over the FULL message list (the caller runs it
+    BEFORE the ``[offset:offset+limit]`` page slice), so which record is
+    "first" for a ``_call`` is decided on absolute positions and never
+    shifts with the page window.
+    """
+    out: List[Optional[dict[str, Any]]] = []
+    seen_calls: set[str] = set()
+    for m in messages:
+        qa = getattr(m, "qa", ()) or ()
+        if m.role not in ("user", "assistant") and not qa:
+            continue
+        content = _project_message_content(m)
+        if not content:
+            continue
+        block = getattr(m, "tokens", None)
+        emit: Optional[dict[str, Any]] = None
+        if isinstance(block, dict):
+            call = block.get("_call")
+            if isinstance(call, str):
+                # Claude streamed-call dedup on absolute position.
+                if call not in seen_calls:
+                    seen_calls.add(call)
+                    emit = {k: v for k, v in block.items() if k != "_call"}
+            else:
+                # OpenCode / Pi: no dedup key, attach directly.
+                emit = dict(block)
+        if emit is not None:
+            # A per-message block is always the format's own recorded usage
+            # → tag it ``source="exact"`` so the tier reads the same as the
+            # session block (and never mixes with the estimate component
+            # breakdown).
+            emit["source"] = "exact"
+        out.append(emit)
+        if hard_cap and hard_cap > 0 and len(out) >= hard_cap:
+            break
+    return out
+
+
 def _project_messages(
     messages: Sequence[Any],
     hard_cap: int = 0,
@@ -508,6 +710,9 @@ def list_sessions(
     limit: int = _LIST_LIMIT_DEFAULT,
     offset: int = 0,
     kind: Optional[str] = None,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
@@ -517,10 +722,41 @@ def list_sessions(
 
     Each summary carries ``kind`` (``"agent"`` for a top-level session,
     ``"subagent"`` for a spawned subagent/sidechain) and ``parent_uuid``
-    (the parent session's uuid for subagents, else ``None``).  NOTE:
-    subagent-tree detection is currently implemented for **Claude only**;
-    every other agent always reports ``kind="agent"``.  This is a scope
-    boundary, not a bug.
+    (the parent session's uuid for subagents, else ``None``).  Subagent
+    detection covers Claude, OpenCode, Codex and Pi; Antigravity's format
+    has no parent signal, so it always reports ``kind="agent"``.
+
+    Each summary also carries the F1.4 origin fields, ``None`` when the
+    source format has no signal (never fabricated):
+
+    * ``project_dir`` — the project directory the session ran in
+      (Claude: transcript ``cwd`` / Desktop metadata / verified slug
+      decode; Codex: ``session_meta.cwd``; OpenCode:
+      ``session.directory``; Pi: header ``cwd``; Antigravity: no signal).
+    * ``launch_surface`` — where the session was driven from (Claude:
+      ``"claude-cli"`` | ``"claude-desktop"``; Codex: the raw
+      ``originator``, e.g. ``"codex_vscode"``; Antigravity:
+      ``"antigravity-ide"`` | ``"antigravity-cli"``; OpenCode/Pi: no
+      signal).
+
+    Each summary also carries the A3 recency signal, measured against a
+    single wall-clock ``now`` sampled once for the whole call:
+
+    * ``last_activity`` — the last-activity timestamp as an explicit ISO
+      string (same instant as ``date``; ``date`` is kept for backward
+      compatibility);
+    * ``age_sec`` — whole seconds since ``last_activity`` (clamped at ``0``
+      when a future timestamp implies writer/reader clock skew);
+    * ``activity`` — ``"fresh"`` if ``age_sec`` is at or under the
+      ``AI_R_STALL_SEC`` threshold (default ``600`` s = 10 min),
+      ``"stale"`` if past it.
+
+    Honest contract (F1.1): ``activity`` describes only the **recency of the
+    last written record**.  It is **not** a claim about process liveness — a
+    session file cannot show whether its producer is still running.
+    "Running but silent" vs. "crashed" is a consumer-side inference
+    (correlate ``activity == "stale"`` with an OS pid-alive check); ai-r does
+    not fabricate it.
 
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
@@ -532,12 +768,29 @@ def list_sessions(
         kind: Optional filter. ``"agent"`` returns only top-level sessions,
             ``"subagent"`` returns only subagent sessions. When omitted
             (default), both kinds are returned.
+        noise: Noise filter — a session is *noise* when it is a spawned
+            subagent (``kind == "subagent"`` or ``parent_uuid`` set).
+            ``"include"`` (default) returns everything, ``"exclude"`` drops
+            noise sessions, ``"only"`` returns only noise sessions.
+            ``kind`` and ``noise`` compose (AND).
+        project_dir: Keep only sessions whose ``project_dir`` equals this
+            path or is a **descendant** of it (path-boundary aware:
+            ``/a/b`` matches ``/a/b`` and ``/a/b/sub``, never ``/a/bc``);
+            trailing slashes ignored.  Sessions without a ``project_dir``
+            signal never match.  Composes with the other filters (AND).
+        redact: When ``True`` (default) secrets in emitted ``title`` /
+            ``extra`` values are masked as ``[REDACTED_<TYPE>]`` and the
+            response carries a ``redactions`` type→count dict when any
+            replacement happened; ``False`` returns raw titles.
 
     Returns:
         ``{"sessions": [...], "total": int, "offset": int, "limit": int,
         "truncated": bool}``. ``total`` is the full count matching the
-        ``agent`` (and ``kind``) filter; ``truncated`` is True when more
-        sessions remain beyond this page.
+        ``agent`` (and ``kind``/``noise``) filter; ``truncated`` is True
+        when more sessions remain beyond this page.  When ``total == 0``
+        the dict additionally carries ``diagnostics`` (scanned agents +
+        session counts, source-dir presence, cause hints) so an empty
+        inventory is explainable.
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         return {"error": "invalid_argument",
@@ -548,18 +801,45 @@ def list_sessions(
     if kind is not None and kind not in ("agent", "subagent"):
         return {"error": "invalid_argument",
                 "message": f"kind must be 'agent', 'subagent' or null, got {kind!r}"}
+    if noise not in NOISE_MODES:
+        return {"error": "invalid_argument",
+                "message": f"noise must be one of {'/'.join(NOISE_MODES)}, "
+                           f"got {noise!r}"}
+    if project_dir is not None and (
+        not isinstance(project_dir, str) or not project_dir.strip()
+    ):
+        return {"error": "invalid_argument",
+                "message": "project_dir must be a non-empty path string "
+                           f"or null, got {project_dir!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 
     summaries: List[dict[str, Any]] = []
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty inventory never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
+    # Sample the wall clock and the fresh/stale threshold ONCE per call so
+    # every session's A3 recency (``age_sec`` / ``activity``) is measured
+    # against a single, consistent "now" (the pure classifier lives in
+    # :mod:`ai_r.activity` and never reads the clock itself).
+    now = datetime.now(timezone.utc)
+    stale_sec = stall_seconds()
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
             if kind is not None and session.kind != kind:
                 continue
-            summaries.append(_session_summary(session))
+            if not noise_allows(session, noise):
+                continue
+            if project_dir is not None and not project_dir_matches(
+                session.project_dir, project_dir
+            ):
+                continue
+            summaries.append(_session_summary(session, now=now, stale_sec=stale_sec))
 
     # Global newest-first sort: parsers sort per-agent, but across agents we
     # merge into one timeline so offset/limit pages show the freshest sessions.
@@ -567,32 +847,100 @@ def list_sessions(
 
     total = len(summaries)
     page = summaries[offset:] if limit == 0 else summaries[offset:offset + limit]
-    return {
+    redactions: dict[str, int] = {}
+    if redact:
+        for summary in page:
+            _redact_fields(summary, ("title", "extra"), redactions)
+    result: dict[str, Any] = {
         "sessions": page,
         "total": total,
         "offset": offset,
         "limit": limit,
         "truncated": (offset + len(page)) < total,
     }
+    if redactions:
+        result["redactions"] = redactions
+    if total == 0:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent,
+            filters={
+                "kind": kind,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
+                "project_dir": project_dir,
+            },
+            scanned_sessions=scanned_sessions,
+            redact_active=redact,
+        )
+    return result
 
 
 @mcp.tool()
 def read_session(
     uuid: str,
-    agent: str,
+    agent: Optional[str] = None,
     offset: int = 0,
     limit: int = _MESSAGES_CAP,
+    redact: bool = True,
+    with_tokens: bool = False,
+    include_subagents: bool = False,
 ) -> dict[str, Any]:
-    """Read a single session by ``uuid`` and ``agent``.
+    """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
     Args:
         uuid: Session identifier.
-        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``, ``pi``.
+        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
+            ``pi``.  **Optional**: when omitted, the ``uuid`` is looked up
+            across every parser (session ids are unique across agents in
+            practice).  If — rarely — the same id exists under several
+            agents, a ``candidates`` list is returned (not an error) so
+            the caller can re-ask with an explicit ``agent``.
         offset: Zero-based index of the first message to return
             (applied to the projected ``{role, content}`` list).
         limit: Maximum number of messages to return.  Defaults to
             :data:`_MESSAGES_CAP` (100).  A non-positive value means
             "no upper bound".
+        redact: When ``True`` (default) secrets in the emitted ``title``,
+            message ``content``/``intent``/``qa`` are masked as
+            ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement happened
+            (see ``ai_r.redact``); ``False`` returns the raw content.
+        with_tokens: When ``True`` (F3.3) attach token usage read at
+            request time (nothing runs in the background):
+
+            * ``summary["tokens"]`` — the session's flat
+              :func:`ai_r.tokens.session_tokens` block (exact where the agent
+              records usage, a labeled estimate otherwise, honest
+              ``source=None`` without any signal);
+            * ``summary["component_tokens"]`` — the
+              :func:`ai_r.tokens.component_tokens` breakdown: the transcript's
+              estimated token volume split across ai-r's event taxonomy
+              (``user_turn`` / ``assistant_turn`` / ``thinking`` / ``plan``
+              and a ``tool_call`` per-``tool_kind`` sub-dict), always
+              ``source="estimate"`` (never merged with the exact tier),
+              ``None`` on an empty transcript;
+            * per-message ``tokens`` on projected entries that carry exact
+              usage — Claude (deduplicated per streamed API call), OpenCode
+              and Pi.  Codex / Antigravity / user turns carry **no**
+              ``tokens`` key at all (absent, not ``null``).  The dedup/attach
+              is decided on absolute message positions BEFORE pagination, so
+              page boundaries never shift which record is "first" for a call.
+
+            Default ``False``: output is byte-identical to the historical
+            shape (no ``tokens`` / ``component_tokens`` key on the summary or
+            any message).  The token blocks carry only integers and
+            ai-r-authored labels (never raw session text), so they stay
+            outside the F2.1 redaction pass by construction.
+        include_subagents: When ``True`` attach
+            ``summary["subagent_rollup"]`` — the parent session's
+            ``component_tokens`` block plus one per spawned subagent child
+            (resolved via :func:`ai_r.session_stats.children_of` on
+            ``parent_uuid``) and a ``total`` folding parent + children through
+            the ``aggregate`` ``component_tokens`` metric.  A childless parent
+            (or an agent like Antigravity that never records ``parent_uuid``)
+            yields an empty ``children`` list and a ``total`` equal to the
+            parent's own block — honest, not an error.  Independent of
+            ``with_tokens``.  Default ``False``.
 
     Returns:
         A dict with session metadata plus:
@@ -605,9 +953,24 @@ def read_session(
           used.
         * ``messages_truncated`` — True when the MCP hard cap stopped
           extraction before every projected message could be returned.
+        * ``outcome`` — session outcome classification (F2.3):
+          ``{status: success|failure|mixed|unknown, signals, user_verdict,
+          markers, tool_results, tool_errors, error_rate,
+          error_rate_reliable}``.  ``status`` combines the tool-call
+          error rate (real flag only for Claude/OpenCode —
+          ``None`` elsewhere, never guessed) with a calibrated bilingual
+          success/failure dictionary over the tail user turns;
+          ``"unknown"`` when neither signal exists (SSOT
+          :mod:`ai_r.outcome`).
+
+        On an id collision (agent omitted, several agents own the id):
+        ``{"ambiguous": True, "uuid": ..., "candidates": [...],
+        "count": N, "message": ...}`` where each candidate is a session
+        summary carrying its ``agent``.
 
         On a missing session, returns an ``error`` dict instead of
-        raising.
+        raising (``agents_scanned`` lists the parsers probed when the
+        agent was omitted).
     """
     if not uuid or not str(uuid).strip():
         return {"error": "invalid_argument", "message": "uuid must be non-empty"}
@@ -615,36 +978,97 @@ def read_session(
         return {"error": "invalid_argument", "message": "offset must be >= 0"}
     if not isinstance(limit, int) or isinstance(limit, bool):
         return {"error": "invalid_argument", "message": "limit must be an integer"}
+    if not isinstance(with_tokens, bool):
+        return {"error": "invalid_argument",
+                "message": f"with_tokens must be a bool, got {with_tokens!r}"}
+    if not isinstance(include_subagents, bool):
+        return {"error": "invalid_argument",
+                "message": (
+                    f"include_subagents must be a bool, "
+                    f"got {include_subagents!r}"
+                )}
     try:
-        agent_name = _coerce_agent(agent)
+        targets = _target_agents(agent)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 
-    parser = _PARSERS[agent_name]
-    try:
-        session = parser.read_session(uuid)
-    except ValueError as exc:
-        # Parsers reject malformed uuids (path separators, whitespace, …)
-        # with ValueError; surface them as structured invalid_argument
-        # instead of letting them propagate as an uncaught server error.
-        return {"error": "invalid_argument", "message": str(exc)}
-    except FileNotFoundError:
+    matches: List[Session] = []
+    value_errors: List[str] = []
+    for agent_name in targets:
+        parser = _PARSERS[agent_name]
+        try:
+            matches.append(parser.read_session(uuid))
+        except ValueError as exc:
+            # Parsers reject malformed uuids (path separators, whitespace,
+            # …) with ValueError; collect them — they only surface when NO
+            # parser resolved the id.
+            value_errors.append(str(exc))
+        except FileNotFoundError:
+            continue
+
+    if not matches:
+        if value_errors:
+            # At least one parser rejected the id as malformed and none
+            # resolved it — a structured invalid_argument, matching the
+            # historical single-agent behaviour.
+            return {"error": "invalid_argument", "message": value_errors[0]}
         return {
             "error": "not_found",
             "uuid": uuid,
-            "agent": agent_name.value,
+            "agent": targets[0].value if agent else None,
+            "agents_scanned": [t.value.lower() for t in targets],
         }
 
-    projected = _extract_messages(
-        session,
-        offset=0,
-        limit=0,
-        hard_cap=_MESSAGES_HARD_CAP + 1,
+    if len(matches) > 1:
+        # Same id under several agents: NOT an error — return the
+        # candidates so the caller can disambiguate via ``agent``.
+        return {
+            "ambiguous": True,
+            "uuid": uuid,
+            "candidates": [_session_summary(s) for s in matches],
+            "count": len(matches),
+            "message": (
+                "session id matches multiple agents; pass agent to "
+                "disambiguate"
+            ),
+        }
+
+    session = matches[0]
+
+    # Read the raw structured messages ONCE: the projection consumes them
+    # below and the outcome classifier (F2.3) scans the same list — no
+    # second parse of the transcript.
+    session_parser: Optional[ParserModule] = _PARSERS.get(session.agent)
+    raw_messages: List[Any] = []
+    if session_parser is not None:
+        try:
+            raw_messages = session_parser.read_messages(session.uuid)
+        except (FileNotFoundError, ValueError, OSError):
+            raw_messages = []
+    projected = _project_messages(
+        raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1
     )
     messages_truncated = len(projected) > _MESSAGES_HARD_CAP
     if messages_truncated:
         projected = projected[:_MESSAGES_HARD_CAP]
     total = len(projected)
+    # Per-message exact token blocks (F3.3, only when requested).  Built
+    # over the FULL projected list with the SAME hard cap so it aligns 1:1
+    # with ``projected`` — the Claude ``_call`` dedup is thus decided on
+    # absolute positions, BEFORE the page slice below.
+    token_blocks: List[Optional[dict[str, Any]]] = []
+    if with_tokens:
+        token_blocks = _message_token_blocks(
+            raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1
+        )
+        if messages_truncated:
+            token_blocks = token_blocks[:_MESSAGES_HARD_CAP]
+        # Attach on absolute positions before pagination so a call's block
+        # is not re-emitted on a later page when its first record was
+        # already surfaced (and consumed) on an earlier one.
+        for entry, block in zip(projected, token_blocks):
+            if block is not None:
+                entry["tokens"] = block
     if offset > 0:
         projected = projected[offset:]
     if limit and limit > 0:
@@ -656,6 +1080,68 @@ def read_session(
     summary["offset"] = offset
     summary["limit"] = limit
     summary["messages_truncated"] = messages_truncated
+    # Session outcome (F2.3): tool-call error rate + user-verdict
+    # dictionary over the tail user turns; honest "unknown" when neither
+    # signal exists.  The block carries only ai-r-authored strings and
+    # dictionary marker labels (never raw session text), so it stays
+    # outside the redaction pass by construction (SSOT ai_r.outcome).
+    summary["outcome"] = _session_outcome(raw_messages, session.agent)
+    # Session token usage (F3.3, only when requested): the flat block (exact
+    # where the agent records it, labeled estimate otherwise) plus a separate
+    # per-component estimate breakdown.  Both reuse the already-parsed
+    # ``raw_messages`` so the transcript is not parsed a second time.
+    # Integers + ai-r labels only, so they are outside the redaction pass by
+    # construction.
+    if with_tokens:
+        summary["tokens"] = session_tokens(session, messages=raw_messages)
+        summary["component_tokens"] = component_tokens(
+            raw_messages, agent=session.agent
+        )
+    # Subagent rollup (F3.3, only when requested): parent's component_tokens +
+    # one per spawned child, folded via the aggregate ``component_tokens``
+    # metric.  Independent of ``with_tokens``.  A childless parent (or an
+    # agent that never records ``parent_uuid``) yields empty ``children`` and
+    # a ``total`` equal to the parent block.
+    if include_subagents:
+        parent_block = component_tokens(raw_messages, agent=session.agent)
+        rollup_rows: List[dict[str, Any]] = [
+            {"component_tokens": parent_block}
+        ]
+        children_out: List[dict[str, Any]] = []
+        for child in _children_of(session.uuid):
+            child_parser: Optional[ParserModule] = _PARSERS.get(child.agent)
+            child_msgs: List[Any] = []
+            if child_parser is not None:
+                try:
+                    child_msgs = child_parser.read_messages(child.uuid)
+                except (FileNotFoundError, ValueError, OSError):
+                    child_msgs = []
+            child_block = component_tokens(child_msgs, agent=child.agent)
+            children_out.append({
+                "uuid": child.uuid,
+                "agent": child.agent.value.lower(),
+                "component_tokens": child_block,
+            })
+            rollup_rows.append({"component_tokens": child_block})
+        folded = _aggregate_core(
+            rollup_rows,
+            group_by=lambda _r: "all",
+            metrics=["component_tokens"],
+        )
+        summary["subagent_rollup"] = {
+            "parent": parent_block,
+            "children": children_out,
+            "total": folded["totals"]["component_tokens"],
+        }
+    # Emission-time redaction (F2.1): after pagination so only the emitted
+    # page pays; the raw transcript on disk is never touched.
+    if redact:
+        redactions: dict[str, int] = {}
+        _redact_fields(summary, ("title", "extra"), redactions)
+        for entry in projected:
+            _redact_fields(entry, ("content", "intent", "qa"), redactions)
+        if redactions:
+            summary["redactions"] = redactions
     return summary
 
 
@@ -667,8 +1153,13 @@ def find_file_edits(
     until: Optional[str] = None,
     limit: int = 100,
     include_input: bool = False,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
+
+    ``redact=True`` (default) masks secrets in emitted record fields as
+    ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count dict when
+    any replacement happened; ``redact=False`` returns raw content.
 
     Reference-by-default: to keep an audit listing small, each record does
     **not** inline the full edit body.  Instead it carries a light-weight
@@ -691,6 +1182,7 @@ def find_file_edits(
             until=until,
             limit=limit,
             include_input=include_input,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -709,8 +1201,14 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
+
+    ``redact=True`` (default) masks secrets in emitted record fields as
+    ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count dict when
+    any replacement happened; ``redact=False`` returns raw content.
+    Filters always match the RAW, pre-redaction text.
 
     Exactly one of ``tool_name`` (exact, case-insensitive) or
     ``tool_name_pattern`` (substring, case-insensitive) must be set.
@@ -723,7 +1221,12 @@ def find_tool_calls(
     selects output truncation — ``"head"``/``"tail"``/``"smart"``;
     ``None`` is adaptive (``"smart"`` on errors, ``"head"`` otherwise).
     Each record also carries ``is_error_reliable`` (``True`` only for
-    Claude/OpenCode).
+    Claude/OpenCode) plus the wrapper-aware classification: ``tool_kind``
+    (``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
+    ``web``/``other``) and ``tool_resolved`` — the real name under a
+    Skill/Task/MCP wrapper (subagent type, skill name, or
+    ``"<server>:<tool>"``); ``None`` when there is no wrapper or the
+    input carries no name signal.
 
     Thin wrapper over :func:`ai_r.find_tool_calls.find_tool_calls`
     that translates the core ``ValueError`` contract into the
@@ -743,6 +1246,7 @@ def find_tool_calls(
             output_excludes=output_excludes,
             is_error=is_error,
             output_mode=output_mode,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -756,6 +1260,8 @@ def session_stats(
     group_by: str = "agent",
     top: int = 8,
     edit_path: str = "/",
+    with_tokens: bool = False,
+    token_scan_limit: int = _SESSION_STATS_TOKEN_SCAN_LIMIT,
 ) -> dict[str, Any]:
     """Summarise sessions, grouped and ranked — the *bird's-eye* audit view.
 
@@ -782,6 +1288,34 @@ def session_stats(
     ``kind_split_available`` (``False`` here) plus a ``note`` making clear
     that this is NOT a verified "no subagents", just an absent split.
 
+    ``with_tokens=True`` (F3.3) additionally reads every matched session's
+    **token usage at request time** (nothing runs in the background) and
+    adds a folded ``tokens`` block to each group and to ``totals``:
+    ``{input, output, reasoning, cache_read, cache_write, total, exact,
+    estimated, unknown}``.  Per session the numbers are *exact* where the
+    agent's own files record usage (Claude ``message.usage``, Codex
+    ``token_count``, OpenCode ``message.data.tokens``, Pi ``usage``); a
+    session without a recorded signal (e.g. Antigravity) gets a
+    transcript-volume **estimate** — tokenized with the optional
+    `tiktoken` dependency (``pip install "ai-r[tokens]"``) when installed,
+    else a rough chars/4 heuristic — and counts under ``estimated``, never
+    silently mixed in as exact; no signal at all counts under ``unknown``.
+    Sums that no session carried stay ``null`` (never a fabricated 0).
+    The block contains only ai-r-computed integers and labels — no raw
+    session text — so it is outside the redaction surface by construction.
+    Default ``False``: byte-identical historical output, no extra reads.
+
+    Scan guard (``token_scan_limit``): because ``with_tokens`` reads every
+    matched session's files at request time, an **unscoped** run over a huge
+    corpus is a multi-hour I/O storm.  When ``with_tokens`` is set with no
+    narrowing filter (``agent``/``since``/``until``) and more than
+    ``token_scan_limit`` sessions match, the call returns
+    ``{"error": "scope_required", ...}`` (naming the count and the limit)
+    INSTEAD of scanning — the check runs on the cheap inventory count before
+    any file is read.  Narrow the scope, or raise ``token_scan_limit`` (``0``
+    disables the cap) to force the full scan.  A permitted-but-large scan runs
+    but carries a ``warning``.
+
     Thin wrapper over :func:`ai_r.session_stats.session_stats` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
@@ -795,6 +1329,167 @@ def session_stats(
             group_by=group_by,
             top=top,
             edit_path=edit_path,
+            with_tokens=with_tokens,
+            token_scan_limit=token_scan_limit,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def incidents(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    category: Optional[str] = None,
+    confirmed: str = "include",
+    reaction_window: int = 6,
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Dangerous shell commands + regret reactions — the *incidents* preset.
+
+    One call answers "where did an agent run something destructive — and
+    did it then apologise?".  A preset over the existing core, not a second
+    engine: ONE ``query`` scan (``type="tool_call"``, ``tool_kind="bash"``)
+    supplies the candidates, a deterministic **danger dictionary** (harvested
+    from public agent-guardrail rule sets, calibrated on real history)
+    selects the dangerous commands, and a bilingual (ru + en) **regret
+    dictionary** scans the next ``reaction_window`` messages (default 6) for
+    an apology/rollback reaction — the two-step check behind the
+    ``confirmed`` flag.  Zero LLM, zero guessing: no dictionary hit → no
+    incident; no reaction → ``confirmed: false``, never inferred.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list of
+    uuids), ``since``/``until`` (ISO bounds on the call ts), ``category``
+    (``fs``/``git``/``db``/``net`` — unknown values fail loud),
+    ``confirmed`` (``include`` default | ``only`` | ``exclude``), ``noise``
+    and ``project_dir`` (session-level, same semantics as ``query``).
+
+    Each incident record carries the query event ``id`` (walk its context
+    via ``query(relative_to=...)`` / ``read_session``), the matched
+    ``patterns`` + ``categories``, a char-capped ``command`` fragment
+    centred on the hit (token budget — full context stays on-demand),
+    ``is_error`` (``null`` when the agent's format has no correlated
+    outcome signal — honest, cross-agent), ``confirmed`` and ``reaction``
+    (``message_index``/``offset``/``role``/marker labels/capped preview;
+    ``null`` when unconfirmed).  ``count``/``confirmed_count``/
+    ``by_pattern`` always reflect the FULL match set; ``limit`` (default
+    50, ``0`` = no cap) bounds only the emitted records (``truncated``).
+
+    Dictionary caveat (documented, not hidden): patterns are a
+    deterministic dictionary, not a shell interpreter — a command that
+    merely *mentions* a dangerous string (e.g. ``echo "rm -rf /"``) can
+    still match.  Matching runs on the extracted command field (a Bash
+    ``description`` alone never fires) and always on the RAW stored text;
+    ``redact=true`` (default) masks secrets only in the emitted
+    ``session_title``/``command``/``reaction.preview`` fields
+    (``redactions`` type→count dict when anything was masked).  When
+    ``count == 0`` the response carries ``diagnostics`` so an empty result
+    is explainable (missing source dir vs all-excluding filter vs a
+    genuinely clean history).
+
+    Thin wrapper over :func:`ai_r.incidents.incidents` that translates the
+    core ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _incidents_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            category=category,
+            confirmed=confirmed,
+            reaction_window=reaction_window,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def network(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    kind: Optional[str] = None,
+    risk: str = "include",
+    domain: Optional[str] = None,
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Network-egress audit — the *network* preset (F4.3).
+
+    One call answers "where did an agent reach out to the network — and
+    how risky did those requests look?".  A preset over the existing core,
+    not a second engine: ONE ``query`` scan (``type="tool_call"``,
+    ``tool_kind="web"``) supplies the candidates — Claude
+    ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
+    (surfaced from ``web_search_call`` rollout records),
+    Gemini/Antigravity ``web_fetch``/``google_web_search``; Pi records no
+    web tool (honest absence).  The request target (``url``/``query``) is
+    extracted from each call's own input and assessed with a deterministic
+    **risk dictionary**: ``plain_http``, ``credentials_in_url``,
+    ``secret_in_url`` / ``secret_in_query`` (the redaction patterns double
+    as the detector), ``ip_literal_host``, ``private_or_local_host``,
+    ``punycode_host``.  Zero LLM, zero guessing: no extractable target →
+    honest ``null`` fields; a risk fires only on parse/regex evidence.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list of
+    uuids), ``since``/``until`` (ISO bounds on the call ts), ``kind``
+    (``fetch``|``search`` — derived from the extracted fields, unknown
+    values fail loud), ``risk`` (``include`` default | ``only`` |
+    ``exclude``), ``domain`` (host equals-or-subdomain match), ``noise``
+    and ``project_dir`` (session-level, same semantics as ``query``).
+
+    Each request record carries the query event ``id`` (walk its context
+    via ``query(relative_to=...)`` / ``read_session``), the derived
+    ``kind``, char-capped ``url``/``query`` (token budget — full context
+    stays on-demand), ``domain``, the ``risks`` labels and tri-state
+    ``is_error`` (``null`` when the agent's format has no correlated
+    outcome signal — honest, cross-agent).  ``count``/``risky_count``/
+    ``by_domain``/``by_risk`` always reflect the FULL match set; ``limit``
+    (default 50, ``0`` = no cap) bounds only the emitted records
+    (``truncated``).
+
+    Honesty caveats (documented, not hidden): risk labels are a
+    deterministic dictionary, not a threat oracle; MCP-mediated network
+    access (browser-automation servers etc.) stays under
+    ``tool_kind="mcp"`` — a name alone cannot prove an MCP server touches
+    the network, so it is never guessed into this audit.  Risk assessment
+    runs on the RAW stored strings; ``redact=true`` (default) masks
+    secrets only in the emitted ``url``/``query``/``session_title`` fields
+    (``redactions`` type→count dict when anything was masked).  When
+    ``count == 0`` the response carries ``diagnostics`` so an empty result
+    is explainable.
+
+    Thin wrapper over :func:`ai_r.network.network` that translates the
+    core ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _network_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            kind=kind,
+            risk=risk,
+            domain=domain,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -805,6 +1500,7 @@ def session_diff(
     session_uuid: str,
     agent: str,
     path: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Reconstruct *what the agent changed* in one session — without git.
 
@@ -821,6 +1517,10 @@ def session_diff(
     ``find_file_edits`` shell-redirect gap (``tee`` / ``sed -i`` / ``cp`` /
     ``mv`` / heredoc writes are not detected and are silently skipped).
 
+    ``redact=True`` (default) masks secrets in the emitted diff/hunks/
+    intents as ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count
+    dict when any replacement happened; ``redact=False`` returns raw.
+
     Thin wrapper over :func:`ai_r.session_diff.session_diff` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
@@ -831,6 +1531,7 @@ def session_diff(
             session_uuid=session_uuid,
             agent=agent,
             path=path,
+            redact=redact,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
@@ -844,6 +1545,8 @@ def search_sessions(
     operator: str = "AND",
     limit: int = 50,
     sort: str = "relevance",
+    noise: str = "include",
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Case-insensitive search across sessions.
 
@@ -871,6 +1574,29 @@ def search_sessions(
               (default).  Pure-stdlib scoring; ties keep newest-first.
             * ``"date"`` — newest-first by session date (the historical
               pre-ranking order).
+            * ``"semantic"`` — F5.1 (optional ``ai-r[semantic]``): the
+              BM25 top-50 candidates re-ranked by *meaning* with a local
+              multilingual embedding model (cross-lingual ru↔en,
+              synonyms); the response carries a ``semantic`` dict —
+              either the active ranking (``active: true``, model,
+              candidate count, blend weight) or the honest degradation
+              notice (``active: false`` + plain-words ``reason`` +
+              ``fallback: "bm25"``, order stays BM25 — never a crash).
+        noise: Noise filter — a session is *noise* when it is a spawned
+            subagent (``kind == "subagent"`` or ``parent_uuid`` set).
+            * ``"include"`` — no filtering (default).
+            * ``"exclude"`` — search only top-level agent sessions.
+            * ``"only"``    — search only subagent sessions.
+            Applied *before* matching, so excluded sessions never pay
+            the body-scan cost.
+        redact: When ``True`` (default) secrets in the emitted ``title`` /
+            ``snippet`` / ``extra`` fields are masked as
+            ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement
+            happened; ``False`` returns raw content.  Matching always
+            runs on the RAW stored text, so searching for a literal
+            secret still finds its session — only the displayed
+            snippet is masked.
 
     Returns:
         A dict ``{"results": [...], "count": N}`` where ``results`` is the
@@ -878,6 +1604,11 @@ def search_sessions(
         ``scope`` is ``"body"`` or ``"all"`` and a match is found, each
         summary includes a ``"snippet"`` field with the first matching
         message excerpt (up to 200 chars) and may carry ``body_truncated``.
+        When a scan matches nothing (``count == 0``), the dict additionally
+        carries ``diagnostics`` (scanned agents + session counts, corpus
+        date bounds, cause hints) so an empty result is explainable.  With
+        ``sort="semantic"`` the dict also carries a ``semantic`` report
+        (active ranking vs BM25 fallback + reason).
 
     Errors are returned as a top-level ``{"error": ..., "message": ...}``
     dict (matches the existing convention).
@@ -906,10 +1637,18 @@ def search_sessions(
         }
 
     sort_lower = (sort or "relevance").lower()
-    if sort_lower not in ("relevance", "date"):
+    if sort_lower not in ("relevance", "date", "semantic"):
         return {
             "error": "invalid_argument",
-            "message": f"unknown sort {sort!r}; expected relevance or date",
+            "message": f"unknown sort {sort!r}; "
+                       "expected relevance, date or semantic",
+        }
+
+    if noise not in NOISE_MODES:
+        return {
+            "error": "invalid_argument",
+            "message": f"noise must be one of {'/'.join(NOISE_MODES)}, "
+                       f"got {noise!r}",
         }
 
     try:
@@ -924,9 +1663,16 @@ def search_sessions(
     # pays for tokenisation.
     score_texts: List[str] = []
 
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty result never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
+            if not noise_allows(session, noise):
+                continue
             matched = False
             snippet_text = ""
             score_text = ""
@@ -980,7 +1726,8 @@ def search_sessions(
             summaries.append(summary)
             score_texts.append(score_text)
 
-    if sort_lower == "relevance" and summaries:
+    semantic_info: dict[str, Any] = {}
+    if sort_lower in ("relevance", "semantic") and summaries:
         # Flatten phrase terms into BM25 query tokens; lazily tokenise only
         # the matched docs (never the whole haystack cache).
         query_tokens: List[str] = []
@@ -988,28 +1735,69 @@ def search_sessions(
             query_tokens.extend(_tokenize(term))
         docs_tokens = [_tokenize(text) for text in score_texts]
         scores = _bm25_scores(query_tokens, docs_tokens)
-        # ``sorted`` is stable: equal scores preserve list_sessions order
-        # (newest-first), giving a deterministic recency tie-break.
-        order = sorted(
-            range(len(summaries)), key=lambda i: scores[i], reverse=True
-        )
+        order: Optional[List[int]] = None
+        if sort_lower == "semantic":
+            # F5.1: BM25 supplies the candidate pool; the local embedding
+            # model re-ranks it by meaning.  ``None`` = the optional
+            # dependencies/model are missing or failed — honest BM25
+            # fallback (reported in the ``semantic`` response field),
+            # never a crash.
+            order, semantic_info = _semantic_order(
+                " ".join(positive) or needle, score_texts, scores
+            )
+        if order is None:
+            # ``sorted`` is stable: equal scores preserve list_sessions
+            # order (newest-first), giving a deterministic recency
+            # tie-break.
+            order = sorted(
+                range(len(summaries)), key=lambda i: scores[i], reverse=True
+            )
         summaries = [summaries[i] for i in order]
+    elif sort_lower == "semantic" and not summaries:
+        # Zero matches: nothing to rank, but still report availability so
+        # the caller learns whether semantic ranking was even possible.
+        _order_unused, semantic_info = _semantic_order(needle, [], [])
     # ``sort == "date"`` keeps the existing newest-first insertion order.
 
     if limit:
         summaries = summaries[:limit]
-    return {"results": summaries, "count": len(summaries)}
+    # Emission-time redaction (F2.1): after ranking + limit so only emitted
+    # summaries pay; matching above ran on the raw haystack.
+    redactions: dict[str, int] = {}
+    if redact:
+        for summary in summaries:
+            _redact_fields(summary, ("title", "snippet", "extra"), redactions)
+    result: dict[str, Any] = {"results": summaries, "count": len(summaries)}
+    if redactions:
+        result["redactions"] = redactions
+    if semantic_info:
+        result["semantic"] = semantic_info
+    if not summaries:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent,
+            filters={
+                "query": needle,
+                "scope": scope,
+                "operator": op_upper,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
+            },
+            scanned_sessions=scanned_sessions,
+            redact_active=redact,
+        )
+    return result
 
 
 @mcp.tool()
 def query(
     type: Optional[str] = None,
     agent: Optional[str] = None,
-    session: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     file: Optional[str] = None,
     tool: Optional[str] = None,
+    tool_kind: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -1018,9 +1806,12 @@ def query(
     step_type: str = "user_turn",
     limit: int = 0,
     with_intent: bool = False,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Filter/search the unified session **event** stream — the workhorse verb.
 
@@ -1035,14 +1826,39 @@ def query(
       ``tool_call(edit|write|read|bash|other)`` | ``plan_event``.  Bare
       ``tool_call`` matches every subtype.
     * ``agent`` — one of claude/codex/opencode/antigravity/pi (all if omitted).
-    * ``session`` — restrict to a single session uuid.
+    * ``session`` — restrict to a single session uuid, OR a list of uuids
+      (the union of those sessions' events in one call — e.g. the ids
+      picked from a ``search_sessions`` / ``list_sessions`` result).
+      Duplicates collapse; an unknown uuid contributes nothing.  An empty
+      list or a non-string item is a fail-loud ``invalid_argument`` —
+      never a silent unfiltered scan.
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on the event ts.
     * ``file`` — substring matched against an event's referenced file path.
-    * ``tool`` — substring (pattern) matched against the referenced tool name.
+    * ``tool`` — substring (pattern) matched against the referenced tool
+      name OR the resolved name under a wrapper (``tool_resolved``) — so
+      ``tool="commit"`` also finds the Skill call that ran the ``commit``
+      skill.
+    * ``tool_kind`` — exact match against the wrapper-aware classification
+      of a tool call: ``edit`` / ``write`` / ``read`` / ``bash`` / ``task``
+      (subagent spawn) / ``skill`` / ``mcp`` / ``web`` / ``other``.
+      Every ``tool_call`` event carries ``tool_kind`` (in ``refs`` and as
+      a top-level field); wrappers whose input names the real actor also
+      carry ``tool_resolved`` — the subagent type under Task/Agent/
+      spawn_agent, the skill name under Skill/SlashCommand, or
+      ``"<server>:<tool>"`` for a Claude-style ``mcp__<server>__<tool>``
+      call.  No signal → no ``tool_resolved`` (never guessed).  An
+      unknown ``tool_kind`` value is a fail-loud ``invalid_argument``.
     * ``text`` — substring matched against event text.  With
       ``sort="relevance"`` survivors are BM25-ranked using the **same
-      scorer** as ``search_sessions``; ``sort="date"`` (default) orders
-      by timestamp ascending.
+      scorer** as ``search_sessions``; ``sort="semantic"`` (F5.1,
+      optional ``ai-r[semantic]``) re-ranks the BM25 top-50 candidates
+      by *meaning* with a local multilingual embedding model
+      (cross-lingual ru↔en, synonyms) — the response carries a
+      ``semantic`` dict reporting either the active ranking
+      (``active: true``, model, candidate count, blend weight) or the
+      honest degradation (``active: false`` + plain-words ``reason`` +
+      ``fallback: "bm25"`` — the order is then plain BM25, never a
+      crash); ``sort="date"`` (default) orders by timestamp ascending.
     * ``relative_to`` (event id) + ``direction`` (``prev``|``next``) +
       ``n`` (``"1"`` | ``"all"``) — the neighbouring-turn walk.
       Generalises the ``previous_user_intent`` used by ``find_file_edits``
@@ -1055,14 +1871,49 @@ def query(
     tools use) to every returned event.  Default ``False`` keeps the base
     event shape unchanged.
 
+    ``noise`` filters at the *session* level before events are read — a
+    session is noise when it is a spawned subagent (``kind == "subagent"``
+    or ``parent_uuid`` set): ``"include"`` (default, no filtering),
+    ``"exclude"`` (top-level sessions only), ``"only"`` (subagent sessions
+    only).  Ignored on the ``relative_to`` walk, like every other filter
+    facet.
+
+    ``project_dir`` also filters at the *session* level: keep only events
+    of sessions whose ``project_dir`` equals this path or is a
+    **descendant** of it (path-boundary aware, trailing slashes ignored) —
+    "events of this project".  Sessions without a ``project_dir`` signal
+    never match.  Ignored on the ``relative_to`` walk, like every other
+    filter facet.
+
     ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
     **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
     non-``None`` value is a fail-loud error (returns the standard
     ``invalid_argument`` dict) rather than a silent no-op.
 
+    ``redact=True`` (default) masks secrets in the emitted ``text`` /
+    ``intent`` fields as ``[REDACTED_<TYPE>]`` and adds a top-level
+    ``redactions`` type→count dict when any replacement happened;
+    ``redact=False`` returns raw content.  Redaction is emission-time only:
+    the ``text`` facet (and every other filter) matches the RAW stored text.
+
+    Events are reference-by-default: each emitted event's ``text`` is a
+    **preview** cut to ~160 chars (applied after redaction).  A real cut is
+    marked with a trailing ``…`` and ``text_truncated: true`` (absent when
+    nothing was cut).  ``id``/``refs``/``sha256`` are untouched — fetch the
+    full body on demand with ``get_body(id)``.
+
     Returns ``{"events": [...], "count": N}`` or the standard
-    ``{"error": ..., "message": ...}`` dict on invalid arguments.
+    ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
+    ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
+    agents + session counts, corpus date bounds, cause hints) so an empty
+    result is explainable.
     """
+    # Filled by the core scan with the per-agent list_sessions() results,
+    # reused by the empty-result diagnostics so an empty result never pays
+    # for a second corpus walk.
+    scanned_sessions: dict[str, Any] = {}
+    redactions: dict[str, int] = {}
+    semantic_info: dict[str, Any] = {}
     try:
         events = _query_core(
             type=type,
@@ -1072,6 +1923,7 @@ def query(
             until=until,
             file=file,
             tool=tool,
+            tool_kind=tool_kind,
             text=text,
             sort=sort,
             relative_to=relative_to,
@@ -1080,13 +1932,49 @@ def query(
             step_type=step_type,
             limit=limit,
             with_intent=with_intent,
+            noise=noise,
+            project_dir=project_dir,
             kind=kind,
             parent=parent,
             group=group,
+            scanned_sessions_out=scanned_sessions,
+            redact=redact,
+            redactions_out=redactions,
+            semantic_out=semantic_info,
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
-    return {"events": events, "count": len(events)}
+    # Reference-by-default (QRY-1): cut emitted ``text`` to a preview at the
+    # output boundary — AFTER the core's emission-time redaction, so secrets
+    # in a long head are masked before the cut.  In-process consumers call
+    # the core directly and keep the full text.
+    _preview_event_texts(events)
+    result: dict[str, Any] = {"events": events, "count": len(events)}
+    if redactions:
+        result["redactions"] = redactions
+    if semantic_info:
+        result["semantic"] = semantic_info
+    if not events:
+        result["diagnostics"] = _empty_diagnostics(
+            agent=agent,
+            since=since,
+            until=until,
+            filters={
+                "type": type,
+                "session": session,
+                "file": file,
+                "tool": tool,
+                "tool_kind": tool_kind,
+                "text": text,
+                "relative_to": relative_to,
+                # "include" is the no-op default — never a cause of emptiness.
+                "noise": None if noise == "include" else noise,
+                "project_dir": project_dir,
+            },
+            scanned_sessions=scanned_sessions,
+            redact_active=redact,
+        )
+    return result
 
 
 @mcp.tool()
@@ -1095,6 +1983,10 @@ def plan(
     kind: Optional[str] = None,
     group: str = "task",
     agent: Optional[str] = None,
+    redact: bool = True,
+    bodies: str = "final",
+    feedback: bool = True,
+    rounds: str = "all",
 ) -> dict[str, Any]:
     """Normalized plan atoms for a session — final vs drafts, grouped by task.
 
@@ -1111,28 +2003,105 @@ def plan(
     Within a task the latest plan is ``final`` and earlier revisions are
     ``draft``; plans of *earlier* completed tasks are ``completed_major``.
 
+    F3.4 default schema (measured ≈×3.7 cheaper than "everything inlined"):
+    the ``final`` plan's full text is inlined (``body`` +
+    ``body_source`` — ``"approval_edited_by_user"`` when the user's
+    approval carried an edited plan, which is the AUTHORITATIVE text and
+    overrides the signal/file body, else ``"plan_signal"``); drafts stay
+    references (bodies via ``get_body``); every «plan quote → user comment»
+    pair extracted from the user's plan responses is returned under
+    ``feedback``, each with a ``ref`` (``"<session>:pf<N>"``) that
+    ``get_body`` resolves to the FULL raw response.  Only agents with an
+    interactive plan-approval flow have the feedback signal (today: Claude —
+    an ``ExitPlanMode`` verdict or a rejected plan-file ``Write``); others
+    honestly contribute nothing.  Technical failures and bare no-comment
+    rejections are filtered out.
+
+    F3.4 v2 additions: every plan atom carries ``version`` — its 1-based
+    revision number within the task group, chronological (drafts are
+    ``v1…vN-1``, the final is ``vN``); every feedback pair carries
+    ``plan_version`` (the answered revision's number), ``round`` (1-based
+    feedback-round number within the session — one round per user response
+    that produced pairs) and ``section`` — the heading of the plan section
+    the quote anchors to.  Quotes are selected from the RENDERED plan, so
+    the anchor match strips markdown markup from both sides; a quote that
+    matches no section — or more than one — gets an honest ``null``
+    anchor, never a nearest guess.
+
     Args:
         session: Restrict to one session uuid (recommended).
         kind: Optional filter — ``draft`` | ``final`` | ``completed_major``.
         group: Grouping strategy; only ``"task"`` is supported.
         agent: Optional agent filter (claude/codex/opencode/antigravity/pi).
+        redact: When ``True`` (default) secrets in the emitted plan/feedback
+            fields (``title``/``steps``/``body``/``quote``/``comment``…)
+            are masked as ``[REDACTED_<TYPE>]`` and the response carries a
+            ``redactions`` type→count dict when any replacement happened;
+            ``False`` returns raw content.
+        bodies: ``"final"`` (default) inlines the final plan's full text;
+            ``"none"`` returns reference-only atoms.
+        feedback: ``True`` (default) adds the ``feedback`` pair list +
+            ``feedback_count``; ``False`` omits both (historical shape).
+        rounds: ``"all"`` (default) returns every feedback round;
+            ``"last"`` keeps only each session's final round (v2).  Any
+            other value fails loud.
 
     Returns:
-        ``{"plans": [...], "count": N}`` (each plan carries
-        ``id/session_id/agent/title/task_id/kind/path/steps/status/refs/
-        sha256``; bodies are on-demand via :func:`get_body`) or the standard
+        ``{"plans": [...], "count": N, "feedback": [...],
+        "feedback_count": M}`` — each plan carries
+        ``id/session_id/agent/title/task_id/kind/version/path/steps/status/
+        refs/sha256`` (+ ``body``/``body_source`` on the ``final`` when
+        ``bodies="final"``); each feedback pair carries
+        ``session_id/agent/plan_id/plan_version/verdict/round/quote/comment/
+        section/ref/ts`` (``verdict`` ∈ ``rejected`` | ``stay_in_plan_mode``;
+        ``quote`` is ``null`` for a free-text comment; ``plan_version``/
+        ``section`` are ``null`` without a signal).  Draft bodies and raw
+        responses stay on-demand via :func:`get_body`.  Standard
         ``{"error": ..., "message": ...}`` dict on invalid arguments.
     """
     try:
-        plans = _plan_core(session=session, kind=kind, group=group, agent=agent)
+        if rounds not in ("all", "last"):
+            raise ValueError(
+                f"rounds must be 'all' or 'last', got {rounds!r}"
+            )
+        plans = _plan_core(
+            session=session, kind=kind, group=group, agent=agent,
+            bodies=bodies,
+        )
+        pairs = (
+            _plan_feedback_core(session=session, agent=agent, rounds=rounds)
+            if feedback else None
+        )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
-    return {"plans": plans, "count": len(plans)}
+    result: dict[str, Any] = {"plans": plans, "count": len(plans)}
+    if pairs is not None:
+        result["feedback"] = pairs
+        result["feedback_count"] = len(pairs)
+    # Emission-time redaction (F2.1): the core runs its internal query with
+    # ``redact=False`` and defers the single masking pass to this wrapper.
+    if redact:
+        redactions: dict[str, int] = {}
+        redacted_plans, counts = _redact_value(plans)
+        if counts:
+            result["plans"] = redacted_plans
+            _merge_redactions(redactions, counts)
+        if pairs is not None:
+            redacted_pairs, fb_counts = _redact_value(pairs)
+            if fb_counts:
+                result["feedback"] = redacted_pairs
+                _merge_redactions(redactions, fb_counts)
+        if redactions:
+            result["redactions"] = redactions
+    return result
 
 
 @mcp.tool()
 def get_body(
-    id: str, shallow: bool = False, max_chars: int = 500_000
+    id: str,
+    shallow: bool = False,
+    max_chars: int = 500_000,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Return the on-demand body for an event / plan ``id``.
 
@@ -1151,11 +2120,16 @@ def get_body(
     disable).  When it trips, the field is sliced with a ``…[truncated]``
     marker and ``body_truncated: true`` is set.
 
+    ``redact=True`` (default) masks secrets in the emitted
+    ``text``/``body``/``title``/``steps`` as ``[REDACTED_<TYPE>]`` and adds
+    a ``redactions`` type→count dict when any replacement happened;
+    ``redact=False`` returns the raw content.
+
     Returns the body dict, or ``{"error": ..., "message": ...}`` on a bad id.
     """
     if not id or not str(id).strip():
         return {"error": "invalid_argument", "message": "id must be non-empty"}
-    return _get_body_core(id, shallow=shallow, max_chars=max_chars)
+    return _get_body_core(id, shallow=shallow, max_chars=max_chars, redact=redact)
 
 
 @mcp.tool()
@@ -1182,7 +2156,23 @@ def aggregate(
             under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
-            ``messages`` / ``files``.  Defaults to ``["count"]``.
+            ``messages`` / ``files`` / ``tokens`` / ``component_tokens``.
+            Defaults to ``["count"]``.
+            ``tokens`` (F3.3) folds per-row ``tokens`` blocks (the shape
+            ``session_stats(with_tokens=True)`` rows carry, or a bare int
+            total) into ``{input, output, reasoning, cache_read,
+            cache_write, total, exact, estimated, unknown}`` — sums over
+            rows that carry each field (``null`` when none does) plus
+            honest provenance counters (``exact + estimated + unknown ==
+            len(rows)``).
+            ``component_tokens`` (F3.3) folds per-row ``component_tokens``
+            blocks (the shape :func:`ai_r.tokens.component_tokens` produces,
+            as ``read_session(with_tokens=True)`` attaches) into summed
+            event-taxonomy components (``user_turn`` / ``assistant_turn`` /
+            ``thinking`` / ``plan`` and a ``tool_call`` per-kind sub-dict) +
+            ``total`` + provenance counters (``estimated`` / ``unknown``;
+            never ``exact`` — always an estimate).  A component/kind no row
+            carried stays absent (never a fabricated ``0``).
         rank_by: Group ordering — ``"default"`` (edits→sessions→count→label,
             the ``file_frequency`` order) or ``"stats"`` (sessions→edits→label,
             the ``session_stats`` order).
@@ -1211,6 +2201,7 @@ def diff(
     rows: List[dict[str, Any]],
     per_file: bool = True,
     format: str = "unified",
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Stitch edit rows into a per-file chronological diff — the diff verb.
 
@@ -1225,6 +2216,10 @@ def diff(
             and a ``refs`` list with a ``file`` entry; unresolvable rows skip.
         per_file: Group by file (the only mode today).
         format: ``"unified"`` (the only rendering today).
+        redact: When ``True`` (default) secrets in the stitched output are
+            masked as ``[REDACTED_<TYPE>]`` and the result carries a
+            ``redactions`` type→count dict when any replacement happened;
+            ``False`` returns raw content.
 
     Returns:
         ``{"files": [{"file", "edits", "diff", "hunks"}], "count", "caveats"}``
@@ -1232,7 +2227,7 @@ def diff(
         ``{"error": ..., "message": ...}`` dict on an unsupported ``format``.
     """
     try:
-        return _diff_core(rows, per_file=per_file, format=format)
+        return _diff_core(rows, per_file=per_file, format=format, redact=redact)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 
@@ -1285,12 +2280,18 @@ def _build_haystack(
     messages: Sequence[Any],
     max_chars: int = _HAYSTACK_CHARS_CAP,
 ) -> str:
-    """Concatenate message text + tool_use inputs + tool_result contents.
+    """Concatenate message text + thinking + tool_use inputs + tool_result contents.
 
     Lowercased once on return. Includes content that lives in tool calls
     and tool results, not just plain text — this is what makes the
     full-text search actually useful for finding references buried in
     Bash/file/etc. invocations.
+
+    ``m.thinking`` (model reasoning) is folded in too so body/search
+    matches reasoning for ALL agents (feature-for-all-where-signal).  This
+    also preserves OpenCode's searchability after its reasoning was moved
+    out of ``text`` into ``thinking``, and newly surfaces Claude / Codex /
+    Pi reasoning that was previously discarded.
     """
     chunks: List[str] = []
     total_chars = 0
@@ -1299,6 +2300,10 @@ def _build_haystack(
         if isinstance(text, str) and text:
             chunks.append(text)
             total_chars += len(text)
+        thinking = getattr(m, "thinking", "")
+        if isinstance(thinking, str) and thinking:
+            chunks.append(thinking)
+            total_chars += len(thinking)
         for tool in getattr(m, "tool_use", ()) or ():
             if isinstance(tool, dict):
                 inp = tool.get("input", "")
@@ -1366,9 +2371,18 @@ def _extract_snippet(haystack: str, terms: list[str], max_len: int = 200) -> str
 
 
 def main() -> int:
-    """Entry point for the ``ai-r-mcp`` console script."""
-    mcp.run(transport="stdio")
-    return 0
+    """Entry point for the ``ai-r-mcp`` console script.
+
+    Transport is selected by ``AI_R_MCP_TRANSPORT`` (default ``stdio`` for full
+    back-compat).  ``http`` runs a single shared streamable-http server on
+    localhost — the fix for the per-agent stdio swarm that re-scans the corpus
+    N times (see :mod:`ai_r.serve`).
+    """
+    transport = resolve_transport()
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return 0
+    return run_http(mcp)
 
 
 if __name__ == "__main__":

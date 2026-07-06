@@ -1,6 +1,6 @@
 """Claude Code session parser.
 
-Source layout::
+Source layout (CLI root)::
 
     ~/.claude/projects/<project-slug>/<session-uuid>.jsonl
 
@@ -31,12 +31,59 @@ explicitly to the module-level functions.  When unset, the directory
 is read from the ``AI_R_HOME`` environment variable (used as
 ``$AI_R_HOME/.claude/projects``), falling back to
 ``~/.claude/projects``.
+
+Desktop root (metadata overlay, F1.3)
+-------------------------------------
+
+Claude Desktop keeps its OWN per-session store::
+
+    ~/.config/Claude/claude-code-sessions/<device-uuid>/<workspace-uuid>/local_<id>.json
+
+Each file is a SINGLE JSON object (not JSONL) of session *metadata* — no
+transcript.  Relevant keys observed on disk: ``sessionId``
+(``"local_<id>"``), ``cliSessionId`` (the uuid of the backing CLI JSONL
+transcript under ``~/.claude/projects``), ``title`` + ``titleSource``
+(the user-visible Desktop title), ``cwd``/``originCwd``,
+``createdAt``/``lastActivityAt``/``lastFocusedAt`` (epoch **milliseconds**),
+``model``, ``permissionMode``, ``isArchived``.
+
+Desktop-launched sessions therefore normally exist in BOTH roots: the
+transcript in the CLI root, the metadata in the Desktop root.  The parser
+scans both and deduplicates by uuid (``cliSessionId`` == the JSONL stem):
+
+* transcript found in the CLI root **and** matched by a Desktop metadata
+  file → ONE session, enriched: the Desktop ``title`` wins (it is what the
+  user sees in the app; the CLI-derived title is kept as
+  ``extra["cli_title"]``) and ``extra["source_root"]`` flips to
+  ``"desktop"``;
+* transcript only → ``extra["source_root"] == "cli"``;
+* metadata only (transcript deleted/never synced) → a reference-only
+  session built from the metadata (``message_count == 0``, ``path`` points
+  at the metadata JSON, ``source_root == "desktop"``).
+
+``extra["source_root"]`` is deliberately a *launch-surface* signal ("was
+this session driven from the Desktop app?"), NOT a "where did the bytes
+come from" flag.  F1.4 surfaces it first-class as
+``Session.launch_surface`` (``"claude-cli"`` | ``"claude-desktop"``),
+alongside ``Session.project_dir`` (record-level ``cwd`` from the
+transcript, else the Desktop metadata ``cwd``, else a
+filesystem-verified decode of the storage slug).
+
+The Desktop root honours the same overrides: an explicit ``desktop_dir``
+argument, else ``$AI_R_HOME/.config/Claude/claude-code-sessions``, else
+``~/.config/Claude/claude-code-sessions``.  A missing root is silently
+skipped (not an error).  To keep explicit-``base_dir`` callers hermetic
+(tests point ``base_dir`` at a fixture tree and must not see the real
+HOME), the Desktop root participates only when ``desktop_dir`` is given
+explicitly OR ``base_dir`` was NOT given (both roots env-resolved).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -69,6 +116,59 @@ def _resolve_base_dir(base_dir: Optional[str]) -> Path:
     if env_home:
         return Path(env_home).expanduser() / ".claude" / "projects"
     return Path("~/.claude/projects").expanduser()
+
+
+def _resolve_desktop_dir(desktop_dir: Optional[str]) -> Path:
+    """Return the Claude Desktop session-metadata directory.
+
+    Lookup order (mirrors :func:`_resolve_base_dir` so hermetic tests that
+    fake ``AI_R_HOME`` redirect BOTH roots):
+
+    1. Explicit ``desktop_dir`` argument.
+    2. ``$AI_R_HOME/.config/Claude/claude-code-sessions``.
+    3. ``~/.config/Claude/claude-code-sessions``.
+    """
+    if desktop_dir:
+        return Path(desktop_dir).expanduser()
+    env_home = os.environ.get("AI_R_HOME")
+    if env_home:
+        return (
+            Path(env_home).expanduser()
+            / ".config"
+            / "Claude"
+            / "claude-code-sessions"
+        )
+    return Path("~/.config/Claude/claude-code-sessions").expanduser()
+
+
+def _desktop_scan_enabled(
+    base_dir: Optional[str], desktop_dir: Optional[str]
+) -> bool:
+    """Whether the Desktop overlay participates in this call.
+
+    ``True`` when ``desktop_dir`` is explicit, or when NEITHER root is
+    explicit (both env-resolved — the normal production path).  An
+    explicit ``base_dir`` alone pins the scan to that one root, keeping
+    existing fixture-scoped callers hermetic (no real-HOME leak).
+    """
+    return desktop_dir is not None or base_dir is None
+
+
+def source_roots(
+    base_dir: Optional[str] = None, desktop_dir: Optional[str] = None
+) -> List[str]:
+    """Candidate source root(s) for Claude sessions.
+
+    Returns the directories the parser *would* scan — whether or not they
+    exist.  Used by :mod:`ai_r.diagnostics` to explain empty results
+    ("source directory not found" vs "source present but empty").  The
+    Desktop metadata root is included under the participation rule of
+    :func:`_desktop_scan_enabled`.
+    """
+    roots = [str(_resolve_base_dir(base_dir))]
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        roots.append(str(_resolve_desktop_dir(desktop_dir)))
+    return roots
 
 
 def _extract_text_from_user_message(message: dict) -> str:
@@ -182,20 +282,73 @@ def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
     ``projects/<slug>/subagents/agent-*.jsonl``.  When the file sits in a
     ``subagents`` directory, the parent uuid is the name of the directory
     holding ``subagents`` (the parent session's own folder).  Returns
-    ``None`` when the path is not a subagent file or the parent folder name
-    is not usable as a uuid (e.g. the project slug itself).
+    ``None`` when the path is not a subagent file or the folder holding
+    ``subagents`` is the project slug itself (flat form, no per-session
+    wrapper) — there the ``sessionId`` scan supplies the spawner instead.
     """
     parent = jsonl_path.parent
     if parent.name != "subagents":
         return None
-    grandparent_name = parent.parent.name
-    # The directory wrapping ``subagents/`` is normally the parent session
-    # uuid folder.  If it is the project slug (no per-session folder), we
-    # have no reliable parent uuid from the path and fall back to ``None``;
-    # the in-file ``parentUuid``/``sessionId`` scan can still supply one.
+    grandparent = parent.parent
+    grandparent_name = grandparent.name
     if not grandparent_name:
         return None
+    # Flat form: the folder wrapping ``subagents/`` is the ``projects/<slug>``
+    # dir (its own parent is literally ``projects``).  That name is the
+    # project slug, NOT a session uuid — no reliable parent from the path.
+    if grandparent.parent.name == "projects":
+        return None
     return grandparent_name
+
+
+def _project_dir_from_slug(slug: str) -> Optional[str]:
+    """Best-effort decode of a ``projects/<slug>`` name back to a path.
+
+    Claude flattens the session cwd into the storage slug by replacing
+    ``/`` and ``.`` with ``-`` (``/home/u/dev/ai-r`` →
+    ``-home-u-dev-ai-r``).  The encoding is LOSSY: a dash inside a real
+    directory name is indistinguishable from a separator, so a naive
+    ``-``→``/`` decode would corrupt names like ``ai-r`` → ``ai/r``.
+
+    Decoding therefore searches over the possible segment boundaries
+    (each dash is either a ``/`` separator or a literal dash inside one
+    segment) and verifies against the filesystem at every *segment
+    boundary*: every ancestor of a real cwd is itself an existing
+    directory, so any candidate prefix that is not a directory prunes
+    that branch immediately (bounded DFS, no unverified guessing).
+    Returns the decoded path only when the full directory exists;
+    ``None`` otherwise — this is a *fallback* signal used only when the
+    transcript carries no record-level ``cwd``, and an unverifiable
+    guess is worse than an honest absence.  (Dots flattened by the
+    encoder are NOT recovered; a dotted cwd only resolves if its dashed
+    sibling exists.)
+    """
+    if not slug.startswith("-"):
+        return None
+    tokens = slug[1:].split("-")
+    if not tokens or not all(tokens):
+        return None
+
+    def _resolve(i: int, base: str, pending: str) -> Optional[str]:
+        # ``base`` is a verified existing directory ("" == fs root);
+        # ``pending`` is the segment currently being assembled.
+        if i == len(tokens):
+            full = f"{base}/{pending}"
+            return full if os.path.isdir(full) else None
+        token = tokens[i]
+        # Option 1: the next dash was a literal dash — extend the
+        # pending segment.  Deferred verification (checked at closure).
+        resolved = _resolve(i + 1, base, f"{pending}-{token}")
+        if resolved is not None:
+            return resolved
+        # Option 2: the dash was a separator — close the pending
+        # segment (must exist as a directory) and start a new one.
+        closed = f"{base}/{pending}"
+        if os.path.isdir(closed):
+            return _resolve(i + 1, closed, token)
+        return None
+
+    return _resolve(1, "", tokens[0])
 
 
 def _scan_file(jsonl_path: Path) -> Optional[Session]:
@@ -208,12 +361,20 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     * **directory form** — the file lives under a ``subagents/`` folder
       (``.../<parent-uuid>/subagents/agent-*.jsonl``); the parent uuid is
       taken from the folder wrapping ``subagents/``.
-    * **inline form** — any record carries ``isSidechain: true``; the
-      parent uuid is read from that record's ``parentUuid`` field.
+    * **inline / flat form** — any record carries ``isSidechain: true``.
 
     The presence of an ``isSidechain`` *key* is NOT a signal — only the
     value ``True`` marks a sidechain (Claude writes ``isSidechain: false``
     on every normal record).
+
+    The spawner-session uuid (``parent_uuid``) is derived from a *session*
+    signal, never a message signal.  Priority: the ``subagents/`` wrapper
+    folder name (directory form) → else the sidechain records' own
+    ``sessionId`` field (which equals that folder name when present, and is
+    the only spawner signal for the flat form).  Record-level
+    ``parentUuid`` is deliberately NOT used: it is a message uuid (the
+    chain root / previous message), not the spawner session, and using it
+    was the A2 defect (``parent_uuid`` = chain root instead of spawner).
     """
     custom_title: Optional[str] = None
     ai_title: Optional[str] = None
@@ -221,22 +382,32 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     last_timestamp: Optional[datetime] = None
     message_count = 0
     is_sidechain = False
-    inline_parent_uuid: Optional[str] = None
+    record_session_id: Optional[str] = None
+    record_cwd: Optional[str] = None
 
     for record in iter_jsonl_records(jsonl_path):
         ts = _parse_iso_timestamp(record.get("timestamp", ""))
         if ts is not None:
             last_timestamp = ts
 
+        # Record-level ``cwd`` (present on user/assistant records) is the
+        # authoritative project-dir signal; first occurrence wins.
+        if record_cwd is None:
+            raw_cwd = record.get("cwd")
+            if isinstance(raw_cwd, str) and raw_cwd.strip():
+                record_cwd = raw_cwd.strip()
+
         # Inline sidechain detection: value must be True, the mere
         # presence of the key is not enough (it is False everywhere
-        # on normal records).
+        # on normal records).  The spawner-session uuid comes from the
+        # record's ``sessionId`` (a *session* signal), NOT its
+        # ``parentUuid`` (a *message* uuid — chain root / previous msg).
         if record.get("isSidechain") is True:
             is_sidechain = True
-            if inline_parent_uuid is None:
-                raw_parent = record.get("parentUuid")
-                if isinstance(raw_parent, str) and raw_parent.strip():
-                    inline_parent_uuid = raw_parent.strip()
+            if record_session_id is None:
+                raw_sid = record.get("sessionId")
+                if isinstance(raw_sid, str) and raw_sid.strip():
+                    record_session_id = raw_sid.strip()
 
         rec_type = record.get("type")
         if rec_type == "custom-title" and custom_title is None:
@@ -274,18 +445,34 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
             return None
 
     # Resolve subagent classification + parent uuid from BOTH the directory
-    # layout and any inline sidechain marker.  The path-derived parent uuid
-    # wins when present (it is the canonical parent-session folder); the
-    # in-file ``parentUuid`` is the fallback for the inline form.
+    # layout and any inline sidechain marker.  ``parent_uuid`` is the
+    # *spawner session* uuid, derived only from session-level signals:
+    #   1. the ``subagents/`` wrapper folder name (directory form) — the
+    #      canonical parent-session folder, most explicit;
+    #   2. else the sidechain records' ``sessionId`` (spawner session; the
+    #      only signal for the flat form) — but never the file's own uuid,
+    #      guarding against a session becoming its own parent.
+    # Record-level ``parentUuid`` (a message uuid) is intentionally NOT a
+    # source here — that was the A2 defect.
+    own_uuid = jsonl_path.stem
     path_parent_uuid = _parent_uuid_from_subagent_path(jsonl_path)
     is_subagent = path_parent_uuid is not None or is_sidechain
-    parent_uuid = path_parent_uuid or inline_parent_uuid
+    if path_parent_uuid is not None:
+        parent_uuid = path_parent_uuid
+    elif record_session_id is not None and record_session_id != own_uuid:
+        parent_uuid = record_session_id
+    else:
+        parent_uuid = None
 
     # project_slug is the first non-``subagents`` ancestor folder name.
     slug_dir = jsonl_path.parent
     if slug_dir.name == "subagents":
         slug_dir = slug_dir.parent.parent
     project_slug = slug_dir.name
+
+    # project_dir: the record-level cwd is authoritative; the storage-slug
+    # decode is a filesystem-verified fallback (see _project_dir_from_slug).
+    project_dir = record_cwd or _project_dir_from_slug(project_slug)
 
     return Session(
         uuid=jsonl_path.stem,
@@ -296,41 +483,220 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         message_count=message_count,
         parent_uuid=parent_uuid,
         kind="subagent" if is_subagent else "agent",
-        extra={"project_slug": project_slug},
+        project_dir=project_dir,
+        launch_surface="claude-cli",
+        extra={"project_slug": project_slug, "source_root": "cli"},
     )
 
 
-def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
-    """Return every Claude session visible under ``base_dir``.
+# ---------------------------------------------------------------------------
+# Claude Desktop metadata overlay (F1.3)
+# ---------------------------------------------------------------------------
+
+
+def _load_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
+    """Map session uuid -> ``(metadata, json_path)`` from the Desktop root.
+
+    Scans ``<root>/**/*.json`` (observed layout is
+    ``<device-uuid>/<workspace-uuid>/local_<id>.json`` but the depth is not
+    load-bearing).  A file must parse as a JSON *object* carrying a usable
+    id to be indexed; anything else is silently skipped.  The key is
+    ``cliSessionId`` when present (== the stem of the backing CLI JSONL,
+    which makes deduplication a plain dict lookup), else ``sessionId``.
+    A missing root yields an empty index — never an error.
+    """
+    if not root.is_dir():
+        return {}
+    index: dict[str, Tuple[dict, Path]] = {}
+    for json_path in sorted(root.rglob("*.json")):
+        if not json_path.is_file():
+            continue
+        try:
+            record = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        uuid = ""
+        for key in ("cliSessionId", "sessionId"):
+            raw = record.get(key)
+            if isinstance(raw, str) and raw.strip():
+                uuid = raw.strip()
+                break
+        if not uuid:
+            continue
+        index[uuid] = (record, json_path)
+    return index
+
+
+def _desktop_timestamp(record: dict, json_path: Path) -> Optional[datetime]:
+    """Best-effort last-activity time from Desktop metadata (UTC).
+
+    ``lastActivityAt``/``createdAt`` are epoch **milliseconds**; file
+    mtime is the fallback.
+    """
+    for key in ("lastActivityAt", "createdAt"):
+        raw = record.get(key)
+        if isinstance(raw, (int, float)) and raw > 0:
+            try:
+                return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                continue
+    try:
+        return datetime.fromtimestamp(
+            json_path.stat().st_mtime, tz=timezone.utc
+        )
+    except OSError:
+        return None
+
+
+def _desktop_extra(record: dict) -> dict:
+    """Common ``extra`` payload derived from one Desktop metadata record."""
+    extra: dict = {"source_root": "desktop"}
+    session_id = record.get("sessionId")
+    if isinstance(session_id, str) and session_id:
+        extra["desktop_session_id"] = session_id
+    cwd = record.get("cwd") or record.get("originCwd")
+    if isinstance(cwd, str) and cwd:
+        extra["cwd"] = cwd
+    return extra
+
+
+def _session_from_desktop_meta(
+    uuid: str, record: dict, json_path: Path
+) -> Optional[Session]:
+    """Build a reference-only :class:`Session` from Desktop metadata alone.
+
+    Used for sessions visible ONLY in the Desktop root (the backing CLI
+    transcript is gone).  ``path`` points at the metadata JSON — reading
+    messages through it yields an empty list (the file holds no
+    transcript), which is the honest answer.
+    """
+    date = _desktop_timestamp(record, json_path)
+    if date is None:
+        return None
+    raw_title = record.get("title")
+    title = (
+        _normalise_title(raw_title)
+        if isinstance(raw_title, str) and raw_title.strip()
+        else _resolve_title(None, None, None, json_path)
+    )
+    if not title:
+        return None
+    extra = _desktop_extra(record)
+    cwd = extra.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        # Mirror the CLI slug convention (path with separators/dots
+        # flattened to dashes) so slug-based grouping stays uniform.
+        extra["project_slug"] = re.sub(r"[/.]", "-", cwd)
+    return Session(
+        uuid=uuid,
+        agent=AgentName.CLAUDE,
+        title=title,
+        date=date,
+        path=str(json_path),
+        message_count=0,
+        parent_uuid=None,
+        kind="agent",
+        project_dir=cwd if isinstance(cwd, str) and cwd else None,
+        launch_surface="claude-desktop",
+        extra=extra,
+    )
+
+
+def _enrich_from_desktop(session: Session, record: dict) -> Session:
+    """Overlay Desktop metadata onto a CLI-discovered session.
+
+    The Desktop ``title`` wins (it is the title the user sees in the app,
+    hence what they will search for); the CLI-derived title is preserved
+    as ``extra["cli_title"]``.  ``extra["source_root"]`` flips to
+    ``"desktop"`` — the session was driven from the Desktop app even
+    though its transcript lives in the CLI root.
+    """
+    extra = dict(session.extra)
+    extra.update(_desktop_extra(record))
+    title = session.title
+    raw_title = record.get("title")
+    if isinstance(raw_title, str) and raw_title.strip():
+        desktop_title = _normalise_title(raw_title)
+        if desktop_title and desktop_title != session.title:
+            extra["cli_title"] = session.title
+            title = desktop_title
+    # The transcript-derived project_dir wins (it is what actually ran);
+    # the Desktop metadata cwd only fills an absent signal.
+    project_dir = session.project_dir or extra.get("cwd") or None
+    return dataclasses.replace(
+        session,
+        title=title,
+        project_dir=project_dir,
+        launch_surface="claude-desktop",
+        extra=extra,
+    )
+
+
+def _apply_desktop_overlay(
+    sessions: List[Session], desktop_root: Path
+) -> List[Session]:
+    """Merge the Desktop metadata index into a CLI session list.
+
+    Deduplication key is the session uuid (Desktop ``cliSessionId`` ==
+    CLI JSONL stem): a uuid present on both sides yields ONE enriched
+    session, a Desktop-only uuid appends a reference-only session.
+    """
+    index = _load_desktop_index(desktop_root)
+    if not index:
+        return sessions
+    by_uuid = {s.uuid: i for i, s in enumerate(sessions)}
+    for uuid, (record, json_path) in index.items():
+        pos = by_uuid.get(uuid)
+        if pos is not None:
+            sessions[pos] = _enrich_from_desktop(sessions[pos], record)
+            continue
+        extra_session = _session_from_desktop_meta(uuid, record, json_path)
+        if extra_session is not None:
+            sessions.append(extra_session)
+    return sessions
+
+
+def list_sessions(
+    base_dir: Optional[str] = None, desktop_dir: Optional[str] = None
+) -> List[Session]:
+    """Return every Claude session visible under the CLI + Desktop roots.
 
     Sessions are sorted by date (most recent first).  Files that fail
     to parse are silently skipped — Claude JSONL records are noisy
-    and one bad line should not break enumeration.
+    and one bad line should not break enumeration.  The Desktop metadata
+    root (see module docstring) is overlaid under the participation rule
+    of :func:`_desktop_scan_enabled`; a missing root contributes nothing.
     """
     root = _resolve_base_dir(base_dir)
-    if not root.is_dir():
-        return []
-
     sessions: List[Session] = []
-    seen: set[str] = set()
-    # Two discovery passes:
-    #  1. ``<slug>/<uuid>.jsonl`` — top-level sessions (and inline-sidechain
-    #     files, which live alongside their parent and are classified by
-    #     ``_scan_file`` via the ``isSidechain`` marker).
-    #  2. ``**/subagents/agent-*.jsonl`` — directory-form subagent sessions,
-    #     which the shallow ``*/*.jsonl`` glob never reaches.
-    globs = ("*/*.jsonl", "**/subagents/agent-*.jsonl")
-    for pattern in globs:
-        for jsonl_path in root.glob(pattern):
-            if not jsonl_path.is_file():
-                continue
-            key = str(jsonl_path)
-            if key in seen:
-                continue
-            seen.add(key)
-            session = _scan_file(jsonl_path)
-            if session is not None:
-                sessions.append(session)
+    if root.is_dir():
+        seen: set[str] = set()
+        # Two discovery passes:
+        #  1. ``<slug>/<uuid>.jsonl`` — top-level sessions (and
+        #     inline-sidechain files, which live alongside their parent and
+        #     are classified by ``_scan_file`` via the ``isSidechain``
+        #     marker).
+        #  2. ``**/subagents/agent-*.jsonl`` — directory-form subagent
+        #     sessions, which the shallow ``*/*.jsonl`` glob never reaches.
+        globs = ("*/*.jsonl", "**/subagents/agent-*.jsonl")
+        for pattern in globs:
+            for jsonl_path in root.glob(pattern):
+                if not jsonl_path.is_file():
+                    continue
+                key = str(jsonl_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                session = _scan_file(jsonl_path)
+                if session is not None:
+                    sessions.append(session)
+
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        sessions = _apply_desktop_overlay(
+            sessions, _resolve_desktop_dir(desktop_dir)
+        )
 
     sessions.sort(key=lambda s: s.date, reverse=True)
     return sessions
@@ -360,19 +726,45 @@ def _find_session_file(uuid: str, base_dir: Optional[str]) -> Path:
     )
 
 
-def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
+def read_session(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    desktop_dir: Optional[str] = None,
+) -> Session:
     """Read and return a single Claude session by ``uuid``.
 
+    The Desktop metadata overlay applies here too (same participation
+    rule as :func:`list_sessions`): a CLI-backed session is enriched with
+    its Desktop title/``source_root``; a uuid known ONLY to the Desktop
+    root resolves to the reference-only metadata session instead of
+    raising.
+
     Raises:
-        FileNotFoundError: the session does not exist.
+        FileNotFoundError: the session does not exist in either root.
         ValueError: ``uuid`` is malformed.
     """
-    path = _find_session_file(uuid, base_dir)
+    desktop_enabled = _desktop_scan_enabled(base_dir, desktop_dir)
+    try:
+        path = _find_session_file(uuid, base_dir)
+    except FileNotFoundError:
+        if desktop_enabled:
+            index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+            entry = index.get(uuid)
+            if entry is not None:
+                session = _session_from_desktop_meta(uuid, *entry)
+                if session is not None:
+                    return session
+        raise
     session = _scan_file(path)
     if session is None:
         raise FileNotFoundError(
             f"Claude session {uuid!r} at {path} yielded no parseable data"
         )
+    if desktop_enabled:
+        index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+        entry = index.get(uuid)
+        if entry is not None:
+            session = _enrich_from_desktop(session, entry[0])
     return session
 
 
@@ -381,8 +773,10 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
 
     Returns ``None`` for blank lines, malformed JSON, non-dict records,
     and records whose ``type`` is not ``"user"`` or ``"assistant"``.
-    Assistant records yield ``text`` (from ``text`` blocks) and
-    ``tool_use`` entries (from ``tool_use`` blocks).  User records yield
+    Assistant records yield ``text`` (from ``text`` blocks),
+    ``thinking`` (from ``thinking`` blocks) and ``tool_use`` entries
+    (from ``tool_use`` blocks), plus a normalized ``tokens`` block when
+    the record carries ``message.usage``.  User records yield
     ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
     they carry (Claude embeds tool results in user-role records); each
     result carries ``is_error`` from the block's ``is_error`` flag.
@@ -416,6 +810,7 @@ def _message_from_record(record: dict) -> Optional[Message]:
         return None
     content = payload.get("content", "")
     text_chunks: List[str] = []
+    thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     if isinstance(content, list):
@@ -427,6 +822,14 @@ def _message_from_record(record: dict) -> Optional[Message]:
                 text = part.get("text", "")
                 if isinstance(text, str) and text:
                     text_chunks.append(text)
+            elif part_type == "thinking":
+                # Extended-thinking block: the reasoning plaintext lives in
+                # the ``thinking`` key.  ``redacted_thinking`` blocks carry
+                # only an encrypted ``data`` blob (no plaintext) and are
+                # intentionally NOT matched here — absence is honest.
+                thought = part.get("thinking", "")
+                if isinstance(thought, str) and thought:
+                    thinking_chunks.append(thought)
             elif part_type == "tool_use":
                 name = part.get("name", "")
                 raw_input = part.get("input", "")
@@ -483,12 +886,34 @@ def _message_from_record(record: dict) -> Optional[Message]:
                 tool_result.append(result_entry)
     elif isinstance(content, str):
         text_chunks.append(content)
+    # Per-record exact usage (assistant records only).  A streamed API
+    # call writes ONE JSONL record per content block, ALL carrying the
+    # same (message.id, requestId) and identical usage numbers — and the
+    # first record may be thinking-only, which downstream projections
+    # drop.  So the block is attached to EVERY record of the call plus an
+    # internal ``_call`` key; consumers dedup by ``_call`` and emit the
+    # block once per API call, on whichever record survives their view.
+    tokens: Optional[dict] = None
+    if rec_type == "assistant":
+        block = _usage_block(payload)
+        if block is not None:
+            msg_id = payload.get("id")
+            request_id = record.get("requestId")
+            tokens = {
+                **block,
+                "_call": "{}|{}".format(
+                    msg_id if isinstance(msg_id, str) else "",
+                    request_id if isinstance(request_id, str) else "",
+                ),
+            }
     return Message(
         role=rec_type,
         text="\n".join(text_chunks),
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
         timestamp=ts,
+        thinking="\n".join(thinking_chunks),
+        tokens=tokens,
     )
 
 
@@ -590,6 +1015,11 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
                 tool_result=_scrub_tool_result(msg.tool_result),
                 timestamp=msg.timestamp,
                 qa=tuple(qa),
+                # Reconstruction MUST carry every remaining field —
+                # dropping ``thinking``/``tokens`` here would silently
+                # lose them on any qa-bearing message.
+                thinking=msg.thinking,
+                tokens=msg.tokens,
             )
         )
     return out
@@ -609,6 +1039,113 @@ def read_messages(
     """
     session = read_session(uuid, base_dir)
     return _extract_messages_from_jsonl(Path(session.path))
+
+
+# ``message.usage`` key → normalized token-usage field (F3.3).
+_USAGE_FIELD_MAP: Tuple[Tuple[str, str], ...] = (
+    ("input", "input_tokens"),
+    ("output", "output_tokens"),
+    ("cache_read", "cache_read_input_tokens"),
+    ("cache_write", "cache_creation_input_tokens"),
+)
+
+
+def _usage_block(message: dict) -> Optional[dict]:
+    """Normalize a record's ``message.usage`` into the F3.3 token block.
+
+    Returns ``{"input", "output", "reasoning", "cache_read",
+    "cache_write", "total"}`` with non-int counters defaulting to ``0``
+    (``reasoning`` is always ``None`` — Claude records no reasoning
+    breakdown), or ``None`` when the message carries no ``usage`` dict.
+    Shared by :func:`read_token_usage` (session totals, the SSOT) and the
+    per-message ``Message.tokens`` attachment in ``_message_from_record``
+    so the two can never drift.
+    """
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    block: dict = {}
+    for field, usage_key in _USAGE_FIELD_MAP:
+        val = usage.get(usage_key)
+        block[field] = (
+            val if isinstance(val, int) and not isinstance(val, bool) else 0
+        )
+    block["reasoning"] = None
+    block["total"] = (
+        block["input"] + block["output"]
+        + block["cache_read"] + block["cache_write"]
+    )
+    return block
+
+
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Claude CLI transcripts record a per-API-call ``message.usage`` block on
+    every assistant JSONL record.  A streamed response writes ONE record per
+    content block, all sharing the same ``message.id`` / ``requestId`` and
+    the same usage numbers — so calls are **deduplicated** by
+    ``(message.id, requestId)`` before summing (an id-less record is counted
+    as its own call).
+
+    Normalized fields (format-native semantics): ``input`` =
+    ``input_tokens`` (uncached), ``output`` = ``output_tokens``,
+    ``cache_read`` / ``cache_write`` = the prompt-cache read/creation
+    counts; ``reasoning`` has no Claude breakdown → ``None``.  ``total`` is
+    the sum of the four counters.  Returns ``None`` when no record carries a
+    usage block (e.g. a Desktop reference-only session raises
+    ``FileNotFoundError`` upstream) or the sum is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist (CLI root).
+        ValueError: ``uuid`` is malformed.
+    """
+    path = _find_session_file(uuid, base_dir)
+    totals = {field: 0 for field, _ in _USAGE_FIELD_MAP}
+    seen_calls: set[Tuple[str, object]] = set()
+    found = False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                block = _usage_block(message)
+                if block is None:
+                    continue
+                msg_id = message.get("id")
+                if isinstance(msg_id, str) and msg_id:
+                    key = (msg_id, record.get("requestId"))
+                    if key in seen_calls:
+                        continue
+                    seen_calls.add(key)
+                for field in totals:
+                    totals[field] += block[field]
+                found = True
+    except OSError:
+        return None
+    total = sum(totals.values())
+    if not found or total <= 0:
+        return None
+    return {
+        "input": totals["input"],
+        "output": totals["output"],
+        "reasoning": None,
+        "cache_read": totals["cache_read"],
+        "cache_write": totals["cache_write"],
+        "total": total,
+    }
 
 
 def get_session_size(uuid: str, base_dir: Optional[str] = None) -> int:
@@ -673,12 +1210,26 @@ def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     ]
 
 
-def session_exists(uuid: str, base_dir: Optional[str] = None) -> bool:
-    """Return ``True`` if a Claude session with this uuid is on disk."""
+def session_exists(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    desktop_dir: Optional[str] = None,
+) -> bool:
+    """Return ``True`` if a Claude session with this uuid is on disk.
+
+    Checks the CLI transcript root first, then (under the participation
+    rule) the Desktop metadata root — a Desktop-only session exists too.
+    """
     if not uuid or "/" in uuid or "\\" in uuid or ".." in uuid:
         return False
     try:
         _find_session_file(uuid, base_dir)
-    except (FileNotFoundError, ValueError):
+        return True
+    except ValueError:
         return False
-    return True
+    except FileNotFoundError:
+        pass
+    if _desktop_scan_enabled(base_dir, desktop_dir):
+        index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
+        return uuid in index
+    return False

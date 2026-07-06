@@ -1,0 +1,34 @@
+[Unit]
+Description=ai-r MCP shared server (streamable-http, socket-activated)
+Documentation=https://github.com/pro-target/ai-r
+Requires=ai-r-mcp.socket
+After=ai-r-mcp.socket
+
+[Service]
+Type=simple
+# Hardening. The server only READS local session files under $HOME and
+# serves localhost http, so it needs no privileges, no system writes, and
+# no extra address families. $HOME stays readable (that is its whole job);
+# writes (semantic model cache under ~/.cache) still work.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+# http transport; the server picks up the socket systemd passes via
+# LISTEN_FDS/LISTEN_PID (ai_r.serve.systemd_listen_sockets).
+Environment=AI_R_MCP_TRANSPORT=http
+# Self-exit after 15 min idle (never mid-request). systemd keeps the socket
+# and re-activates the service on the next connection -> zero resident
+# process when idle, respawn on demand.
+Environment=AI_R_MCP_IDLE_SEC=900
+ExecStart=%h/.local/bin/ai-r-mcp
+# Idle self-exit is normal, not a failure; let the socket (not systemd) drive
+# respawn, so do not auto-restart on clean exit.
+Restart=no
+
+[Install]
+# Reached through the socket; no direct WantedBy needed.

@@ -10,10 +10,12 @@ Moved verbatim from the former ``ai_r/events.py`` monolith — no logic change.
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict as _OrderedDict
 from dataclasses import dataclass
 from typing import (
     Any,
+    Dict,
     List,
     Optional,
     OrderedDict as OrderedDictType,
@@ -22,11 +24,15 @@ from typing import (
 )
 
 from ai_r.parsers import PARSERS, target_agents
+from ai_r.redact import merge_redaction_counts, redact_value
 
 from ai_r.events._common import _plan_ref_value
 from ai_r.events.model import (
+    _PlanResponse,
     _PlanSignal,
+    _anchor_quote_to_section,
     _normalize_task_key,
+    _plan_responses_for_session,
     _plan_signals_for_session,
     iter_events,
 )
@@ -51,6 +57,9 @@ class Plan:
             group the latest plan_event is ``final``, earlier ones are
             ``draft``; plans belonging to *earlier* completed task groups
             are ``completed_major``.
+        version: 1-based revision number within the task group, in
+            chronological ``(ts, seq)`` order (F3.4 v2) — drafts are
+            ``v1…vN-1``, the final is ``vN``; numbering restarts per task.
         path: Source path when the signal is file-backed (``plans/*.md`` for
             Claude Write, ``implementation_plan.md`` for Antigravity).
         steps: Codex ``update_plan`` steps (with per-step ``status``), else
@@ -68,6 +77,7 @@ class Plan:
     title: str
     task_id: str
     kind: str
+    version: int = 1
     path: Optional[str] = None
     steps: Optional[Tuple[dict, ...]] = None
     status: Optional[str] = None
@@ -130,7 +140,9 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
         ordered = sorted(evs, key=_sort_key)
         final_ev = ordered[-1] if ordered else None
         is_latest_task = key == latest_task_key
-        for ev in ordered:
+        # F3.4 v2: 1-based revision numbering per task group, chronological —
+        # drafts are v1…vN-1, the final is vN (restarts for every task).
+        for version, ev in enumerate(ordered, start=1):
             if not is_latest_task:
                 kind = "completed_major"
             elif ev is final_ev:
@@ -145,6 +157,7 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
                 title=_plan_ref_value(ev.get("refs", ()), "title") or ev.get("text") or "",
                 task_id=key,
                 kind=kind,
+                version=version,
                 path=_plan_ref_value(ev.get("refs", ()), "path"),
                 refs=refs,
                 sha256=ev.get("sha256", ""),
@@ -165,6 +178,7 @@ def _plan_to_dict(p: Plan) -> dict[str, Any]:
         "title": p.title,
         "task_id": p.task_id,
         "kind": p.kind,
+        "version": p.version,
         "path": p.path,
         "steps": [dict(s) for s in p.steps] if p.steps else None,
         "status": p.status,
@@ -173,12 +187,92 @@ def _plan_to_dict(p: Plan) -> dict[str, Any]:
     }
 
 
+def _session_plan_context(
+    session_id: str, agent_hint: Optional[str]
+) -> Tuple[List[_PlanSignal], List[_PlanResponse]]:
+    """Read one session ONCE and derive its plan signals + user responses.
+
+    The signal list is index-aligned with the session's ``plan_event`` ids
+    (both are emitted in the same order — the invariant
+    :func:`_resolve_plan_signal` already relies on); the response list index
+    is the stable ``pf<N>`` ordinal.  Unknown/unreadable session → two empty
+    lists (an audit tool prefers a partial view to a crash).
+    """
+    for agent_name in target_agents(agent_hint):
+        parser = PARSERS[agent_name]
+        for sess in parser.list_sessions():
+            if sess.uuid != session_id:
+                continue
+            try:
+                messages = parser.read_messages(sess.uuid)
+            except (FileNotFoundError, ValueError, OSError):
+                return [], []
+            agent_lc = agent_name.value.lower()
+            signals = _plan_signals_for_session(
+                messages,
+                agent=agent_lc,
+                session_path=getattr(sess, "path", "") or "",
+            )
+            responses = _plan_responses_for_session(messages, agent=agent_lc)
+            return signals, responses
+    return [], []
+
+
+class _PlanContextCache:
+    """Per-call cache: one message read per session, shared by all lookups."""
+
+    def __init__(self) -> None:
+        self._ctx: Dict[str, Tuple[List[_PlanSignal], List[_PlanResponse]]] = {}
+
+    def get(
+        self, session_id: str, agent_hint: Optional[str]
+    ) -> Tuple[List[_PlanSignal], List[_PlanResponse]]:
+        if session_id not in self._ctx:
+            self._ctx[session_id] = _session_plan_context(
+                session_id, agent_hint
+            )
+        return self._ctx[session_id]
+
+
+def _plan_ids_by_session(
+    events: Sequence[dict[str, Any]],
+) -> "OrderedDictType[str, List[str]]":
+    """Group the queried plan_event ids per session, preserving order."""
+    grouped: "OrderedDictType[str, List[str]]" = _OrderedDict()
+    for ev in events:
+        sid = ev.get("session_id") or ""
+        grouped.setdefault(sid, []).append(ev.get("id", ""))
+    return grouped
+
+
+def _approved_edited_body(
+    sig: Optional[_PlanSignal], responses: Sequence[_PlanResponse]
+) -> Optional[str]:
+    """The user-edited approved text answering ``sig``'s call, if any.
+
+    The approval tool_result is the AUTHORITATIVE final text (the plan file
+    on disk can diverge from what the user actually approved — audited on
+    real vaults), so it overrides the signal body when present.
+    """
+    if sig is None or not sig.tool_use_id:
+        return None
+    for resp in responses:
+        if (
+            resp.verdict == "approved"
+            and resp.tool_use_id == sig.tool_use_id
+            and resp.edited_body
+        ):
+            return resp.edited_body
+    return None
+
+
 def plan(
     session: Optional[str] = None,
     *,
     kind: Optional[str] = None,
     group: str = "task",
     agent: Optional[str] = None,
+    bodies: str = "final",
 ) -> List[dict[str, Any]]:
     """Preset: normalized plan atoms for a session (or across sessions).
 
@@ -198,11 +292,22 @@ def plan(
             (``draft`` / ``final`` / ``completed_major``).
         group: Grouping strategy; only ``"task"`` is implemented.
         agent: Optional agent filter.
+        bodies: ``"final"`` (default, F3.4) inlines the full text of each
+            ``final`` plan as ``body`` + ``body_source`` — the one plan a
+            consumer almost always needs, per the measured default schema;
+            ``"none"`` restores the historical reference-only shape.
+            Draft/major bodies are NEVER inlined — use :func:`get_body`.
 
     Returns:
         A list of normalized plan dicts (see :func:`_plan_to_dict`), in
-        timeline order.  Steps/status are carried for Codex plans; bodies
-        are never inlined — use :func:`get_body`.
+        timeline order.  Every atom carries ``version`` — its 1-based
+        chronological revision number within the task group (F3.4 v2:
+        drafts are ``v1…vN-1``, the final is ``vN``).  Steps/status are
+        carried for Codex plans.  With ``bodies="final"`` the ``final``
+        atom carries ``body`` (honest ``None`` when the signal has no
+        text, e.g. a steps-only Codex plan) and ``body_source`` —
+        ``"approval_edited_by_user"`` when the authoritative user-edited
+        approval text overrides the signal body, else ``"plan_signal"``.
     """
     if group != "task":
         raise ValueError(f"group must be 'task', got {group!r}")
@@ -210,24 +315,147 @@ def plan(
         raise ValueError(
             f"kind must be draft|final|completed_major or null, got {kind!r}"
         )
-    events = query(type="plan_event", session=session, agent=agent)
+    if bodies not in ("final", "none"):
+        raise ValueError(f"bodies must be 'final' or 'none', got {bodies!r}")
+    # ``redact=False``: internal call — the public wrappers apply the single
+    # emission-time redaction pass on their own final output (F2.1).
+    events = query(type="plan_event", session=session, agent=agent, redact=False)
     plans = _assign_plan_kinds(events)
+    ids_by_session = _plan_ids_by_session(events)
+    agent_by_session = {
+        ev.get("session_id") or "": ev.get("agent") for ev in events
+    }
+    cache = _PlanContextCache()
     # Enrich Codex plans with their steps/status (resolved on demand from the
-    # source, mirroring get_body — kept off the bare Event to honour "no body
-    # inlined").
+    # source, one message read per session) and — F3.4 — inline the final
+    # plan's body.
     enriched: List[dict[str, Any]] = []
     for p in plans:
         if kind is not None and p.kind != kind:
             continue
         d = _plan_to_dict(p)
-        sig = _resolve_plan_signal(p.id)
+        signals, responses = cache.get(
+            p.session_id, agent_by_session.get(p.session_id)
+        )
+        session_ids = ids_by_session.get(p.session_id, [])
+        try:
+            ordinal = session_ids.index(p.id)
+        except ValueError:
+            ordinal = -1
+        sig = (
+            signals[ordinal] if 0 <= ordinal < len(signals) else None
+        )
         if sig is not None:
             if sig.steps:
                 d["steps"] = [dict(s) for s in sig.steps]
             if sig.status:
                 d["status"] = sig.status
+        if bodies == "final" and p.kind == "final":
+            edited = _approved_edited_body(sig, responses)
+            if edited is not None:
+                d["body"] = edited
+                d["body_source"] = "approval_edited_by_user"
+            else:
+                d["body"] = sig.body if sig is not None else None
+                d["body_source"] = (
+                    "plan_signal" if d["body"] is not None else None
+                )
         enriched.append(d)
     return enriched
+
+
+def plan_feedback(
+    session: Optional[str] = None,
+    *,
+    agent: Optional[str] = None,
+    rounds: str = "all",
+) -> List[dict[str, Any]]:
+    """All «plan quote → user comment» pairs for a session's plan iterations.
+
+    F3.4: extracts every pair from the user's plan responses (rejections and
+    stay-in-plan-mode comments), chronological.  Each pair carries:
+
+    * ``plan_id`` — the ``plan_event`` id of the revision the response
+      answered (``None`` when the transcript has no call-id correlation);
+    * ``plan_version`` — the 1-based revision number (``v1…vN``) of that
+      revision within its task group (v2; ``None`` without correlation);
+    * ``verdict`` — ``rejected`` | ``stay_in_plan_mode``;
+    * ``round`` — 1-based feedback-round number within the session, one
+      round per user response that produced pairs (v2);
+    * ``quote`` — the plan excerpt the user selected (``None`` for a
+      free-text comment with no selection);
+    * ``comment`` — the user's words, verbatim;
+    * ``section`` — the heading of the plan section the quote anchors to
+      (v2).  The quote is selected from the RENDERED plan, so both sides
+      are compared through the same markup-stripping normalization; a miss
+      or an ambiguous (multi-section) match is an honest ``None``, never a
+      nearest guess;
+    * ``ref`` — a ``"<session_id>:pf<N>"`` id; :func:`get_body` on it
+      returns the FULL raw response the pair came from (reference-by-default:
+      the raw blob is on-demand);
+    * ``session_id`` / ``agent`` / ``ts``.
+
+    ``rounds="all"`` (default) returns every round; ``"last"`` keeps only
+    each session's final feedback round (v2).
+
+    Only agents with an interactive plan-approval flow have the signal
+    (today: Claude — both ``ExitPlanMode`` and a rejected plan-file
+    ``Write`` carry it); other agents honestly contribute nothing.
+    Technical failures (permission-stream errors) and bare no-comment
+    rejections are filtered out.
+    """
+    if rounds not in ("all", "last"):
+        raise ValueError(f"rounds must be 'all' or 'last', got {rounds!r}")
+    events = query(type="plan_event", session=session, agent=agent, redact=False)
+    ids_by_session = _plan_ids_by_session(events)
+    agent_by_session = {
+        ev.get("session_id") or "": ev.get("agent") for ev in events
+    }
+    # v2: revision numbers ride on the pairs — one grouping pass gives the
+    # per-task v1…vN map (same numbering the plan atoms carry).
+    version_by_id = {p.id: p.version for p in _assign_plan_kinds(events)}
+    cache = _PlanContextCache()
+    rows: List[dict[str, Any]] = []
+    for sid, plan_ids in ids_by_session.items():
+        signals, responses = cache.get(sid, agent_by_session.get(sid))
+        call_to_plan_id: Dict[str, str] = {}
+        sig_by_call: Dict[str, _PlanSignal] = {}
+        for i, sig in enumerate(signals):
+            if sig.tool_use_id and i < len(plan_ids):
+                call_to_plan_id[sig.tool_use_id] = plan_ids[i]
+                sig_by_call[sig.tool_use_id] = sig
+        session_rows: List[dict[str, Any]] = []
+        round_no = 0
+        for ordinal, resp in enumerate(responses):
+            if resp.verdict == "approved":
+                continue
+            if not resp.pairs:
+                continue
+            round_no += 1  # one round per pair-bearing user response
+            ref = f"{sid}:pf{ordinal}"
+            plan_id = call_to_plan_id.get(resp.tool_use_id)
+            answered = sig_by_call.get(resp.tool_use_id)
+            answered_body = answered.body if answered is not None else None
+            for quote, comment in resp.pairs:
+                session_rows.append({
+                    "session_id": sid,
+                    "agent": agent_by_session.get(sid),
+                    "plan_id": plan_id,
+                    "plan_version": version_by_id.get(plan_id) if plan_id is not None else None,
+                    "verdict": resp.verdict,
+                    "round": round_no,
+                    "quote": quote,
+                    "comment": comment,
+                    "section": _anchor_quote_to_section(quote, answered_body),
+                    "ref": ref,
+                    "ts": resp.ts,
+                })
+        if rounds == "last" and round_no:
+            session_rows = [
+                r for r in session_rows if r["round"] == round_no
+            ]
+        rows.extend(session_rows)
+    return rows
 
 
 def _resolve_plan_signal(event_id: str) -> Optional[_PlanSignal]:
@@ -292,17 +520,75 @@ def _cap_body(text: object, max_chars: int) -> tuple[object, bool]:
     return text, False
 
 
-def get_body(
-    id: str, shallow: bool = False, *, max_chars: int = _BODY_CHARS_CAP
+# A plan-feedback ref minted by :func:`plan_feedback`:
+# ``"<session_id>:pf<ordinal>"`` — the ordinal indexes the session's plan
+# responses (message order, deterministic).  Distinct from event ids, whose
+# trailing segment is purely numeric.
+_FEEDBACK_ID_RE = re.compile(r"^(?P<sid>.+):pf(?P<ord>\d+)$")
+
+
+def _feedback_body(
+    session_id: str,
+    ordinal: int,
+    *,
+    max_chars: int,
+    redact: bool,
 ) -> dict[str, Any]:
-    """Return the on-demand body for an event / plan id.
+    """Resolve a ``"<session>:pf<N>"`` ref to the FULL raw plan response.
+
+    The default ``plan_feedback`` rows carry only the extracted pairs; this
+    is the on-demand escape hatch to the verbatim response blob (all pairs,
+    boilerplate and surrounding words included).
+    """
+    ref = f"{session_id}:pf{ordinal}"
+    stream = list(iter_events(session=session_id))
+    if not stream:
+        return {"error": "not_found", "id": ref}
+    plan_ids = [e.id for e in stream if e.type == "plan_event"]
+    signals, responses = _session_plan_context(session_id, stream[0].agent)
+    if not (0 <= ordinal < len(responses)):
+        return {"error": "not_found", "id": ref}
+    resp = responses[ordinal]
+    plan_id: Optional[str] = None
+    for i, sig in enumerate(signals):
+        if sig.tool_use_id == resp.tool_use_id and i < len(plan_ids):
+            plan_id = plan_ids[i]
+            break
+    text, truncated = _cap_body(resp.raw, max_chars)
+    result: dict[str, Any] = {
+        "id": ref,
+        "type": "plan_feedback",
+        "verdict": resp.verdict,
+        "plan_id": plan_id,
+        "text": text,
+        "pairs": [
+            {"quote": quote, "comment": comment}
+            for quote, comment in resp.pairs
+        ],
+        "ts": resp.ts,
+    }
+    if truncated:
+        result["body_truncated"] = True
+    return _redact_body_fields(result, redact)
+
+
+def get_body(
+    id: str,
+    shallow: bool = False,
+    *,
+    max_chars: int = _BODY_CHARS_CAP,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Return the on-demand body for an event / plan / plan-feedback id.
 
     For a ``plan_event`` the body is the full plan text (Claude
     ``ExitPlanMode`` / ``Write plans/*.md`` markdown, Antigravity
     ``implementation_plan.md``) and/or Codex ``steps``.  For a ``user_turn``
-    / ``assistant_turn`` the body is the turn text.  Bodies are fetched here
-    rather than inlined into :class:`Event`, so a caller pays for them only
-    when needed.
+    / ``assistant_turn`` the body is the turn text.  For a plan-feedback ref
+    (``"<session>:pf<N>"``, minted by :func:`plan_feedback`) the body is the
+    FULL raw user response the pairs were extracted from.  Bodies are
+    fetched here rather than inlined into :class:`Event`, so a caller pays
+    for them only when needed.
 
     ``shallow`` (plans only): return just the *final* plan of the id's task,
     dropping the bodies of any earlier ``draft`` revisions — the S6 scenario
@@ -313,6 +599,11 @@ def get_body(
     is set.  The default (500_000) is generous — ordinary bodies are never
     cut; pass ``0`` to disable.
 
+    ``redact`` (default ``True``) masks secrets in the emitted
+    ``text``/``body``/``title``/``steps`` as ``[REDACTED_<TYPE>]`` and adds
+    a ``redactions`` type→count dict when any replacement happened (see
+    :mod:`ai_r.redact`); ``False`` returns the raw content.
+
     Returns:
         ``{"id", "type", "title"?, "body"?, "steps"?, "status"?, "path"?,
         "shallow", "body_truncated"?}`` for a plan, or ``{"id", "type",
@@ -321,6 +612,14 @@ def get_body(
     """
     if not id or ":" not in id:
         return {"error": "invalid_argument", "message": f"invalid id {id!r}"}
+    feedback_match = _FEEDBACK_ID_RE.match(id)
+    if feedback_match:
+        return _feedback_body(
+            feedback_match.group("sid"),
+            int(feedback_match.group("ord")),
+            max_chars=max_chars,
+            redact=redact,
+        )
     session_id = id.rsplit(":", 1)[0]
     stream = list(iter_events(session=session_id))
     event = next((e for e in stream if e.id == id), None)
@@ -333,7 +632,7 @@ def get_body(
         out: dict[str, Any] = {"id": id, "type": event.type, "text": text}
         if body_truncated:
             out["body_truncated"] = True
-        return out
+        return _redact_body_fields(out, redact)
 
     sig = _resolve_plan_signal(id)
     title = _plan_ref_value(event.refs, "title") or event.text or ""
@@ -357,7 +656,7 @@ def get_body(
         # Resolve the task the id belongs to, find its final plan, and return
         # that plan's body (never the earlier drafts').
         task_plans = _assign_plan_kinds(
-            query(type="plan_event", session=session_id)
+            query(type="plan_event", session=session_id, redact=False)
         )
         my = next((p for p in task_plans if p.id == id), None)
         if my is not None:
@@ -387,4 +686,26 @@ def get_body(
         result["body"], body_truncated = _cap_body(result["body"], max_chars)
         if body_truncated:
             result["body_truncated"] = True
+    return _redact_body_fields(result, redact)
+
+
+def _redact_body_fields(result: dict[str, Any], redact: bool) -> dict[str, Any]:
+    """Emission-time redaction for a ``get_body`` payload (F2.1), in place.
+
+    Masks ``text``/``body``/``title``/``steps``/``pairs``; attaches per-type
+    ``redactions`` counts only when something was actually masked.  No-op
+    when ``redact`` is ``False``.
+    """
+    if not redact:
+        return result
+    redactions: dict[str, int] = {}
+    for field in ("text", "body", "title", "steps", "pairs"):
+        if field not in result:
+            continue
+        new_val, counts = redact_value(result[field])
+        if counts:
+            result[field] = new_val
+            merge_redaction_counts(redactions, counts)
+    if redactions:
+        result["redactions"] = redactions
     return result

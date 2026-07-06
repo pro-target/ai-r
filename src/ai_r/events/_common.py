@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -73,6 +74,106 @@ TOOL_SUBTYPE: frozenset[str] = frozenset(
 )
 
 
+# --- Wrapper resolution: tool_kind + tool_resolved (F3.1) ------------------
+# Some tool names are WRAPPERS that hide the real actor: a subagent spawn
+# (Claude ``Task``/``Agent``, Codex ``spawn_agent``, OpenCode ``task``), a
+# skill invocation (Claude ``Skill``/``SlashCommand``, OpenCode ``skill``) or
+# an MCP tool (Claude-style ``mcp__<server>__<tool>``).  ``resolve_tool``
+# classifies every call into a ``tool_kind`` and, for wrappers whose input
+# carries the real name, surfaces it as ``tool_resolved``.  Signals are
+# per-agent honest: when a wrapper's input has no recognisable name key the
+# resolved name is ``None`` — never guessed.
+#
+# ``tool_kind`` is a SUPERSET of the ``classify_tool`` subtypes: the base
+# categories stay as-is and wrappers/network calls get their own kinds.  The
+# event ``type`` (``tool_call(<sub>)``) is untouched for backward-compat —
+# a Task call is still ``tool_call(other)``; its kind lives in the refs.
+
+# Subagent-spawn wrapper names (lowercase) — Claude ``Task`` (legacy) /
+# ``Agent`` (current), OpenCode ``task``, Codex ``spawn_agent``.
+_TASK_NAMES = frozenset({"task", "agent", "spawn_agent"})
+# Skill/slash-command wrapper names — Claude ``Skill``/``SlashCommand``,
+# OpenCode ``skill``.
+_SKILL_NAMES = frozenset({"skill", "slashcommand"})
+# Network-touching tool names (the F4.3 web-audit signal) — Claude
+# ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
+# (surfaced from ``web_search_call`` rollout records by the codex parser),
+# Gemini/Antigravity ``web_fetch``/``google_web_search`` (verified against
+# the vendored gemini-cli reference).  Name-based only; Pi records no web
+# tool — honest absence.
+_WEB_NAMES = frozenset({
+    "webfetch", "web_fetch", "websearch", "web_search", "google_web_search",
+})
+
+# Input keys that carry the real name under each wrapper, by preference.
+# Task: Claude/OpenCode ``subagent_type``, Codex ``agent_type``.
+_TASK_RESOLVE_KEYS = ("subagent_type", "agent_type", "subagent")
+# Skill: Claude ``skill``, OpenCode ``name``, SlashCommand ``command``.
+_SKILL_RESOLVE_KEYS = ("skill", "name", "command")
+
+# Claude-style MCP tool name: ``mcp__<server>__<tool>``.  The first ``__``
+# after the prefix splits server from tool (non-greedy: a server name never
+# contains ``__``, a tool name may).  Codex/OpenCode/Pi record MCP calls
+# under bare/underscore-joined names with no reliable server delimiter —
+# no signal, so no mcp detection there (honest fallthrough).
+_MCP_NAME_RE = re.compile(r"^mcp__(.+?)__(.+)$")
+
+# The complete ``tool_kind`` vocabulary — base subtypes + wrapper kinds +
+# ``web``.  Exported so consumers (and the ``query`` facet validator) can
+# enumerate/validate kinds without re-deriving the mapping.
+TOOL_KIND: frozenset[str] = frozenset(
+    {"edit", "write", "read", "bash", "task", "skill", "mcp", "web", "other"}
+)
+
+
+def _first_str_value(payload: object, keys: Sequence[str]) -> Optional[str]:
+    """Return the first non-empty string under ``keys`` in a dict payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def resolve_tool(name: str, payload: object = None) -> Tuple[str, Optional[str]]:
+    """Classify a tool call: ``(tool_kind, tool_resolved)``.
+
+    Args:
+        name: The raw tool name as recorded by the agent.
+        payload: The (already-parsed) tool input, when available — the
+            wrapper's real name lives inside it (``subagent_type`` /
+            ``agent_type`` for spawns, ``skill``/``name``/``command`` for
+            skills).  Non-dict payloads are ignored.
+
+    Returns:
+        ``tool_kind`` is always one of :data:`TOOL_KIND`.  ``tool_resolved``
+        is the real name under the wrapper — the subagent type, the skill
+        name (a ``/command arg`` string is reduced to its bare command
+        token), or ``"<server>:<tool>"`` for an MCP call — and ``None``
+        whenever there is nothing to resolve (non-wrapper tools, or a
+        wrapper whose input carries no recognisable name key).
+    """
+    key = (name or "").strip()
+    low = key.lower()
+    mcp_match = _MCP_NAME_RE.match(key)
+    if mcp_match:
+        return "mcp", f"{mcp_match.group(1)}:{mcp_match.group(2)}"
+    if low in _TASK_NAMES:
+        return "task", _first_str_value(payload, _TASK_RESOLVE_KEYS)
+    if low in _SKILL_NAMES:
+        resolved = _first_str_value(payload, _SKILL_RESOLVE_KEYS)
+        if resolved:
+            # SlashCommand carries ``"/commit -m msg"`` — keep the bare
+            # command token so the resolved name is a stable identifier.
+            resolved = resolved.split()[0].lstrip("/") or None
+        return "skill", resolved
+    if low in _WEB_NAMES:
+        return "web", None
+    return classify_tool(key), None
+
+
 @dataclass(frozen=True)
 class Event:
     """A single normalized session event — the query atom.
@@ -96,9 +197,13 @@ class Event:
             ``{"file": path}`` and/or ``{"tool": name}`` entries so
             ``file`` / ``tool`` facets can filter without re-parsing.
             A ``tool_call`` event additionally carries
-            ``{"is_error": bool}`` when its result was correlated (by
-            ``tool_use_id``); the ref is absent when the outcome is
-            unknown (agent exposes no per-result error signal).
+            ``{"tool_kind": kind}`` (always, one of :data:`TOOL_KIND`) and
+            ``{"tool_resolved": name}`` (only when a Skill/Task/MCP
+            wrapper's input carried the real name — see
+            :func:`resolve_tool`), plus ``{"is_error": bool}`` when its
+            result was correlated (by ``tool_use_id``); the ``is_error``
+            ref is absent when the outcome is unknown (agent exposes no
+            per-result error signal).
         source: Provenance tag, ``"parser:<agent>"``.
         sha256: Content hash over ``(type, text, refs)`` for dedup /
             change-detection.  Deterministic across runs.

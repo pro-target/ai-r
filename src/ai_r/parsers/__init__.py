@@ -62,6 +62,8 @@ class ParserModule(Protocol):
 
     def session_exists(self, uuid: str, base_dir: str | None = None) -> bool: ...
 
+    def source_roots(self, base_dir: str | None = None) -> list[str]: ...
+
 __all__ = [
     "AgentName",
     "Message",

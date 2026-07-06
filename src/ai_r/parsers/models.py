@@ -54,15 +54,46 @@ class Session:
             for Antigravity this is the number of records in the
             overview.txt / transcript.jsonl; for Pi this is the number
             of user/assistant message entries.
-        parent_uuid: For OpenCode sub-sessions (``session.parent_id``)
-            and for Claude subagent sessions (the parent session uuid
-            inferred from the ``subagents/`` directory layout or the
-            ``parentUuid`` field of an inline sidechain record).  ``None``
-            for top-level sessions and for agents without subagent support.
+        parent_uuid: Parent (spawner) session uuid for spawned
+            sub-sessions:
+            Claude — the spawner session, taken from the ``subagents/``
+            wrapper folder name, else the ``sessionId`` of the inline
+            sidechain records (the message-level ``parentUuid`` is a
+            message uuid, not a session, and is NOT used),
+            OpenCode (``session.parent_id``), Codex
+            (``session_meta.payload.parent_thread_id`` or the nested
+            ``source.subagent.thread_spawn.parent_thread_id``), Pi
+            (the ``parentSession`` header field).  ``None`` for top-level
+            sessions and for Antigravity (no parent signal in the format).
         kind: ``"agent"`` for a normal top-level session, ``"subagent"``
             for a spawned subagent (sidechain) session.  Defaults to
-            ``"agent"``.  Subagent detection is currently implemented only
-            for Claude; every other parser leaves this at ``"agent"``.
+            ``"agent"``.  Detected for Claude, OpenCode, Codex and Pi;
+            Antigravity has no subagent signal and always reports
+            ``"agent"``.  Kept consistent with ``parent_uuid`` (a session
+            with a parent is a subagent); the noise criterion lives in
+            :mod:`ai_r.parsers._noise`.
+        project_dir: Absolute path of the project directory the session
+            ran in, when the format records one; ``None`` when the
+            format carries no signal (never fabricated).  Sources:
+            Claude — the record-level ``cwd`` of the CLI transcript
+            (fallback: Desktop metadata ``cwd``/``originCwd``, then a
+            filesystem-verified decode of the ``projects/<slug>``
+            storage encoding); Codex — ``session_meta.payload.cwd``;
+            OpenCode — the ``session.directory`` column (absent on old
+            schemas → ``None``); Pi — the session-header ``cwd``.
+            Antigravity has no per-session directory signal → always
+            ``None``.
+        launch_surface: The surface the session was driven from, when
+            the format makes it distinguishable; ``None`` when it does
+            not (never fabricated).  Values: Claude —
+            ``"claude-cli"`` | ``"claude-desktop"`` (from the F1.3
+            Desktop-overlay ``source_root`` signal); Codex — the raw
+            ``session_meta.payload.originator`` string (e.g.
+            ``"codex_vscode"``, ``"Codex Desktop"``), passed through
+            verbatim, no invented taxonomy; Antigravity —
+            ``"antigravity-ide"`` | ``"antigravity-cli"`` (from which
+            brain root holds the session).  OpenCode and Pi carry no
+            launch-surface signal → always ``None``.
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.
@@ -76,6 +107,8 @@ class Session:
     message_count: int
     parent_uuid: Optional[str] = None
     kind: str = "agent"
+    project_dir: Optional[str] = None
+    launch_surface: Optional[str] = None
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -123,6 +156,23 @@ class Message:
             ``answer`` is the chosen label(s) joined by ``" | "`` for
             multi-select.  Empty when the message carries no answered
             question, so existing consumers are unaffected.
+        thinking: Model reasoning text, where the format marks it as
+            such: Claude ``thinking`` content blocks (``redacted_thinking``
+            carries no plaintext and is skipped), Codex ``reasoning``
+            response items (the plaintext ``summary`` — the
+            ``encrypted_content`` blob is opaque), OpenCode ``reasoning``
+            parts, Pi ``thinking`` blocks.  Antigravity has no marked
+            reasoning signal → always ``""``.  Kept out of :attr:`text`
+            so narrative and reasoning are never conflated (nor
+            double-counted by token estimates).
+        tokens: The format's own per-assistant-message usage, normalized
+            to ``{"input", "output", "reasoning", "cache_read",
+            "cache_write", "total"}`` (same shape as the session-level
+            ``read_token_usage`` blocks; a counter the format does not
+            record is ``None``).  ``None`` where the format records no
+            per-message usage — Codex (cumulative session counter only),
+            Antigravity (no usage at all), user messages — absence is
+            honest, never fabricated.  Not part of the equality contract.
     """
 
     role: str
@@ -131,6 +181,8 @@ class Message:
     tool_result: Tuple[dict, ...] = ()
     timestamp: Optional[datetime] = None
     qa: Tuple[dict, ...] = ()
+    thinking: str = ""
+    tokens: Optional[dict] = field(default=None, compare=False)
 
 
 __all__ = ["AgentName", "Message", "Session"]

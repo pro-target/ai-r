@@ -67,7 +67,7 @@ query shape per agent; format differences are normalized inside the parsers.
 - **Small answer, body on demand.** Records carry a reference to the content
   (hash + length); the full edit text is fetched separately — the response
   doesn't balloon.
-- **Works over MCP (13 tools).** An agent calls `ai-r` directly in plain
+- **Works over MCP (15 tools).** An agent calls `ai-r` directly in plain
   language; the same data is available from the terminal (CLI) and from code
   (Python SDK).
 - **A reader, not a guard.** Extracts entities; you (or your tool) build the
@@ -157,8 +157,10 @@ ports to any tool in minutes. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 `ai-r` gives the same reading power three ways:
 
-- **MCP server** (`ai-r-mcp`) — 13 tools over stdio JSON-RPC, so any MCP agent
-  calls it directly (recommended). Registration — see
+- **MCP server** (`ai-r-mcp`) — 15 tools over JSON-RPC, so any MCP agent
+  calls it directly (recommended). Default is **stdio**; optionally a **shared
+  http server** (one warm process for all agents instead of a per-agent stdio
+  swarm), see the `http` extra under Quick start. Registration — see
   [docs/mcp-registration.md](./docs/mcp-registration.md).
 - **CLI** (`ai-r`) — subcommands for scripts and manual use (`list` / `read` /
   `search` / `find-file-edits` / `find-tool-calls` / `file-frequency` /
@@ -167,73 +169,9 @@ ports to any tool in minutes. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Python SDK** (`from ai_r.parsers import ...`) — parsers, typed
   `Session`/message models, and the event verbs, to build your own tools.
 
-### Method vocabulary (SSOT)
+### Method vocabulary
 
-The block below is framed from [`docs/methods.md`](./docs/methods.md) — the
-English source of truth for the public verbs and presets. It's kept in sync with
-that file's marker block.
-
-<!-- methods:start -->
-
-## Verbs
-
-| verb | purpose | parameters |
-|---|---|---|
-| `query` | filter/search session events; `with_intent=True` → a top-level `intent` on each event (the same `previous_user_intent` as legacy); a `tool_call` event carries an `is_error` outcome ref when its result is correlatable (see *Output bounds & outcome* below) | type, agent, session, since, until, file, tool, text, sort(relevance\|date), relative_to+direction(prev\|next)+n(1\|all), step_type, limit, with_intent; kind/parent/group — stubs (Phase 3) |
-| `plan` | normalized plan atoms of a session (final vs drafts, grouped by task) | session, kind(draft\|final\|completed_major), group=task, agent |
-| `get_body` | on-demand body by event/plan id; returned body/text is bounded by `max_chars` (default 500k) → over-long bodies are cut with a marker and flagged `body_truncated` | id, shallow, max_chars |
-| `aggregate` | rollup over rows (query/find_file_edits/session-inventory) → `{groups, totals}`; `rank_by=stats` gives the session_stats order (sessions→edits→label), `kind_split=True` adds `kind_split_available`/`note` | rows, group_by(field\|callable), metrics ⊆ count\|sessions\|edits\|intents\|agents\|messages\|files, rank_by(default\|stats), kind_split |
-| `diff` | stitch edit-rows into a per-file unified diff (bodies on-demand via message_index; `intent` taken from the row when `query(with_intent)`) → `{files:[{file,edits,diff,hunks}], count, caveats}` | rows, per_file=True, format=unified |
-| `detect_current` | runtime identity (env/fs, outside session-query) → `{session_id, agent, candidates[], verified, self}` | agent (hint) |
-
-## Presets
-
-| preset | expansion |
-|---|---|
-| `intent(event, n)` | `query(relative_to=event, direction=prev, n)` |
-| `reaction(event, n)` | `query(relative_to=event, direction=next, n)` |
-| `plan(session, kind, group=task)` | `query(type=plan_event, …)` → normalized + kind-tagged (final/draft/completed_major) |
-| `session_stats(group_by)` | builds per-session inventory rows → `aggregate(rows, group_by, rank_by=stats, kind_split=True)` → projection to the legacy totals shape |
-| `session_diff(uuid, agent≠codex)` | `diff(query(type=edit\|write, session=uuid, with_intent=True) with file-ref)` → projection (no file-level `hunks`) |
-
-## Legacy tools: presets over verbs (Phase 3b)
-
-Phase 3b enriched the verbs so old tools became thin presets **with byte-identical output, proven on REAL data** (frozen snapshot `~/.claude`, so the live vault doesn't mutate mid-run — that produced false mismatches). The legacy suites (`test_session_stats`/`test_session_diff`) are green — the second half of the compatibility proof.
-
-**Ported to verbs (byte-parity proven):**
-
-| tool | preset over verb | proof |
-|---|---|---|
-| `session_stats` | `aggregate(rank_by=stats, kind_split=True)` over per-session inventory rows | 8/8 (group_by∈agent\|dir\|date\|kind × top∈8\|0) EQUAL on the snapshot; the key is `rank_by=stats` reproducing the sessions-first rank, `kind_split` giving `kind_split_available`/`note` |
-| `session_diff` (≠codex) | `diff(query(edit\|write, with_intent=True))` | 12/12 real Claude sessions EQUAL; the key is `with_intent` returning `intent`, a single chronological stream giving the same file order, the edit\|write filter excluding `Read` (else extra files) |
-
-**Codex — exception in `session_diff`:** codex writes files via shell-exec, and the target is recovered by scanning the command line, which the event stream does NOT do → shell-redirect edits would vanish from the `query` fold. So the codex branch of `session_diff` keeps the legacy `_scan_session` (byte-parity for all agents).
-
-**Stay separate (justified):**
-
-| tool | why NOT a preset |
-|---|---|
-| `find_file_edits` / `find_tool_calls` | the record carries `session_title`/`session_date`/`assistant`/`input`, which are NOT in a `query` event; `find_tool_calls` additionally carries per-record `is_error` (correlated tool-call outcome) and `output` (correlated tool-result content, char-capped); reproducing them = re-reading the session (not a *thin* preset but a second parse over events — strictly slower) + loss of codex shell-redirect edits. `intent` is now reproducible (`with_intent`), but the other fields are not. SSOT of the rich edit/tool record |
-| `search_sessions` | session-granular + BM25 session snippets; `query` is event-granular (turn/tool) → no clean 1:1 |
-| `detect-agent`/`detect-session` (CLI) | the CLI prints the agent `source` and 6 output modes (list/first/strict/self/fingerprint/`--json`/`--count`) + a WARN line; the `detect_current` dict does not provide this |
-
-## Plan atom (normalized, agent differences hidden)
-
-`Plan { id, session_id, agent, title, task_id, kind: draft\|final\|completed_major, path?, steps?, status?, refs[], sha256 }`. Body/steps — on-demand via `get_body(id, shallow?)`. `shallow=True` → only the task's final, draft bodies dropped (scenario S6).
-
-**Grouping by task = `task_id` (stable key):** for Claude it's the plan slug `plans/<slug>.md` (Write carries the path directly; `ExitPlanMode` without a path inherits the slug of the nearest preceding plan-Write in the session; if there is no slug yet — fallback to the normalized title). For Antigravity — the `implementation_plan.md` path. For Codex (no file) — the normalized title (a continuous `update_plan` run). Keyed by slug, NOT by title, because the title drifts within one iteration chain (decorations change the heading) — on real data that split one task into several. In a group the last plan_event by (ts, seq) = `final`, the earlier ones = `draft`; strictly earlier tasks (a DIFFERENT slug) = `completed_major`. The internal parser→signal table (`ExitPlanMode`/`Write plans/*.md`/`update_plan`/`implementation_plan.md`) is an implementation detail, invisible from outside.
-
-## Output bounds & tool-call outcome
-
-**Bounded output (untrusted sessions can be huge — the surface never returns unbounded bytes):** `find_tool_calls` caps each record's `input`/`assistant`/`intent`/`output` fields (over-long values cut with a `…[truncated]` marker and named in a per-record `truncated_fields`) and stops appending once a total-response byte budget is hit, flagging `output_truncated`; this is distinct from the count-based `truncated` (more records exist). `get_body` bounds the body via `max_chars` (`body_truncated`). Tool input larger than 1 MB is never JSON-decoded (returned verbatim) — a shared guard on the event stream and `find_tool_calls` alike. `read_session` renders a tool result as `[tool_result ok: <snippet>]` or `[tool_result ERROR: <snippet>]` (was a bare `[tool_result]`).
-
-**Adaptive output truncation (`output_mode`):** the per-record `output` cap is `_OUTPUT_CHARS_CAP = 2000` chars. How that budget is spent is controlled by `output_mode ∈ {"head", "tail", "smart"}`. The default (`output_mode=None`) is **adaptive per record**: a record with `is_error == True` is truncated `"smart"` (surface the error lines — `error`/`fatal`/`traceback`/… — plus the tail, so an error at the *end* of a long log is not lost to a head-only cut), while a successful record is truncated `"head"` (legacy behaviour). An explicit `output_mode` forces one strategy for every record. `smart`/`tail` may return up to ~2× the cap to keep both the surfaced lines and the tail; whenever `output` is cut it is still named in that record's `truncated_fields`.
-
-**Filtering `find_tool_calls` (all optional, composed by AND):** beyond `tool_name`/`tool_name_pattern`, records can be narrowed by `input_contains` (case-insensitive substring over the serialized tool input / command text), `output_contains` (ci substring over the correlated `output`), `output_excludes` (drop a record whose `output` contains the marker — a caller-supplied noise filter, e.g. a harness security-gate line, `"user rejected"`, `"MANUAL COMMIT BLOCKED"`; **no such list is hard-coded in the core**), and `is_error` (tri-state: `None` = all, `True` = errors only, `False` = successes only). All filters intersect (AND). There is **no** dedicated "error + domain" verb: that pairing is a *composition* — e.g. `find_tool_calls(input_contains="git", is_error=True)` returns the real command failures of a chosen domain (`git` is just an example domain, not a special case).
-
-**`is_error` (tool-call outcome) is cross-agent best-effort:** **Claude** and **OpenCode** carry a real success/error flag (Claude's `tool_result.is_error`; OpenCode's `state.status == "error"`). **Codex** and **Pi** expose no error field on their result records → `is_error` is always `False` (absence of a flag, not a proof of success). **Antigravity** emits no tool-result records at all → no outcome signal. Consumers must not read a cross-agent `is_error=False` as "verified success" for Codex/Pi/Antigravity. `find_tool_calls` now carries the same `is_error` per record, plus the correlated `output` (tool-result content, char-capped) — correlation is by tool_use_id (Claude `tool_use.id` / OpenCode `callID`); with the same best-effort caveat (`is_error` is authoritative only for Claude/OpenCode, and defaults to `False` for Codex/Pi/Antigravity or when no result correlates). To make that honesty machine-readable, each `find_tool_calls` record also carries `is_error_reliable` (bool): `True` for Claude/OpenCode (a real flag backs the value), `False` for Codex/Pi/Antigravity (no source → `is_error` is always `False` and may **undercount** true failures). A consumer filtering `is_error=True` should read `is_error_reliable` to know whether a `False` means "verified success" or merely "no signal".
-
-<!-- methods:end -->
+The full dictionary of public verbs and presets (signatures, parameters, behaviour) lives in its own file: [`docs/methods.md`](./docs/methods.md).
 
 ### Event core
 
@@ -264,6 +202,55 @@ The installer creates a venv, installs the runtime package, patches MCP configs
 for **Claude**, **Codex**, **OpenCode**, **Antigravity** (where the configs
 exist), installs the **Pi** CLI skill, and runs smoke tests.
 
+Optional extra — `tokens`: `AI_R_EXTRAS=tokens bash install.sh` (or
+`pip install "ai-r[tokens]"`) adds [tiktoken](https://github.com/openai/tiktoken)
+for better token **estimates** on sessions whose format stores no exact usage
+numbers. Fully optional: without it exact numbers still come straight from the
+session files where recorded, and the fallback estimate degrades to a rough
+chars/4 heuristic, honestly labeled `estimate` — never a crash.
+
+Optional extra — `semantic`: `AI_R_EXTRAS=semantic bash install.sh` (or
+`pip install "ai-r[semantic]"` + a one-time model download the installer does
+for you) enables `sort="semantic"` on text search (`query`, `search_sessions`):
+the BM25 top-50 candidates are re-ranked by **meaning** with a local
+multilingual embedding model —
+[intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
+(int8 ONNX, ~118 MB, MIT), run directly via
+[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
+no torch, no persistent index. Why this model: strong cross-lingual retrieval
+(a Russian query finds an English session and vice versa) at a small size. How
+the score works, in plain words: BM25 picks the 50 best word-matches (a cost
+budget, not a quality cut-off — there is deliberately *no* similarity
+threshold, because this model family scores even unrelated texts ≈0.7); within
+that pool the final score is **75 % meaning + 25 % word match** — meaning
+dominates, the word share keeps exact-term hits from being drowned and breaks
+ties. Fully optional: without the packages or model files, `sort="semantic"`
+honestly falls back to the BM25 order and the response says why
+(`semantic: {active: false, reason, fallback: "bm25"}`) — never a crash.
+
+Two knobs keep the model well-behaved inside a long-lived MCP process (both
+env-tunable, both degrading to the default on blank/invalid input — never a
+crash): `AI_R_SEMANTIC_THREADS` caps how many CPU threads onnxruntime may use
+per inference (default `2`, never more than the machine's core count — so it
+does not grab every core and fight the server for CPU), and
+`AI_R_SEMANTIC_IDLE_SEC` frees the loaded model's ~118 MB of RAM after that
+many idle seconds (default `300`); the next request transparently re-loads it.
+
+Optional extra — `http`: `AI_R_EXTRAS=http bash install.sh` (or
+`pip install "ai-r[http]"`) adds [uvicorn](https://www.uvicorn.org) and enables
+a **shared streamable-http transport**. By default every agent spawns its own
+`ai-r-mcp` over stdio — under multi-agent fan-out that is N processes, each with
+a cold cache, re-scanning the corpus (the measured cause of RAM exhaustion).
+With `AI_R_MCP_TRANSPORT=http` a single **warm server** on localhost (default
+`127.0.0.1:8756`) is shared by every agent instead of a swarm; the systemd units
+in `packaging/systemd/` add socket-activation with idle self-exit — the process
+exists only under load. The bind is loopback-only and **fail-closed**: a
+non-localhost `AI_R_MCP_HOST` is refused (transcripts carry secrets and are
+served without a token) until the operator explicitly sets
+`AI_R_MCP_ALLOW_REMOTE=1`. Other knobs: `AI_R_MCP_PORT`, `AI_R_MCP_IDLE_SEC`
+(idle self-exit threshold), `AI_R_HAYSTACK_CACHE_MAX` (search cache ceiling).
+Fully optional: without it stdio mode works as before.
+
 ## Boundaries: a reader, not a guard
 
 - **Read-only.** It never runs an agent's code and never writes to its history —
@@ -277,35 +264,21 @@ exist), installs the **Pi** CLI skill, and runs smoke tests.
   must treat session text as data, not instructions. See
   [Security](docs/security.md).
 
-<!-- scenarios:start -->
+## Acceptance (end-to-end scenarios)
 
-## Acceptance summary
+The public surface is covered by end-to-end scenarios an LLM agent runs against the live MCP (complementing pytest). Full list — [`docs/scenarios.md`](./docs/scenarios.md).
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 41 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+<!-- gallery:start -->
+## Example: ai-r in action
 
-| Function | # scenarios | Headline pass criteria |
-|---|---|---|
-| `query` | 8 | Facet filters return correct event shape (references, no body inlined); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result. |
-| `get_body` | 4 | Body fetched on-demand by id (turn text / plan text / codex steps); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated. |
-| `aggregate` | 4 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash. |
-| `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
-| `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
-| `plan` | 5 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by `(ts,seq)`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal. |
-| `session_stats` (preset) | 3 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot. |
-| `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
-| `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 1 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid`; `agent` filter narrows the set. |
-| `find_tool_calls` | 4 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; neither/both arguments **fail loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
-| `read_session` | 2 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices. |
-| `search_sessions` | 3 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort. |
-
-<!-- scenarios:end -->
+A gallery of real examples — one per capability (error analysis, dangerous commands, network trail, token burn, plan comments, commit phantom-check, cross-agent file history, cross-lingual search, zombie subagents, git-less diff): [`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md).
+<!-- gallery:end -->
 
 ## Next — documentation
 
 - Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
   (English SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (Russian mirror)
-- Acceptance scenarios (32 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Acceptance scenarios (84 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Architecture & layering — [`docs/architecture.md`](./docs/architecture.md)
 - Search operators — [`docs/search-operators.md`](./docs/search-operators.md)
 - Per-agent MCP registration — [`docs/mcp-registration.md`](./docs/mcp-registration.md)
@@ -322,7 +295,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 350+ tests, CI requires ≥80% coverage
+- 1100+ tests, CI requires ≥85% coverage
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - On adding new agents, see [CONTRIBUTING.md](./CONTRIBUTING.md) and
   [docs/parsers.md](./docs/parsers.md)

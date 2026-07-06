@@ -15,9 +15,13 @@ from typing import Any, List, Optional, Sequence
 from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
 from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
+from ai_r.redact import merge_redaction_counts, redact_text
+from ai_r.semantic import semantic_order as _semantic_order
 
-from ai_r.events._common import Event
-from ai_r.events.model import iter_events
+from ai_r.parsers._noise import validate_noise
+
+from ai_r.events._common import Event, TOOL_KIND
+from ai_r.events.model import iter_events, normalize_session_filter
 
 
 # --- query facets ----------------------------------------------------------
@@ -37,8 +41,16 @@ def _type_matches(event_type: str, wanted: str) -> bool:
     return False
 
 
+def _ref_value(refs: Sequence[dict], key: str) -> Optional[Any]:
+    """Return the first ``refs[*][key]`` value, or ``None``."""
+    for r in refs:
+        if key in r:
+            return r[key]
+    return None
+
+
 def _event_to_dict(event: Event) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "id": event.id,
         "session_id": event.session_id,
         "agent": event.agent,
@@ -50,6 +62,16 @@ def _event_to_dict(event: Event) -> dict[str, Any]:
         "sha256": event.sha256,
         "message_index": event.message_index,
     }
+    # F3.1: hoist the wrapper classification out of refs so downstream
+    # ``aggregate(group_by="tool_kind")`` works on query rows directly.
+    # Only tool_call events carry these; other event types are unchanged.
+    kind = _ref_value(event.refs, "tool_kind")
+    if kind is not None:
+        out["tool_kind"] = kind
+    resolved = _ref_value(event.refs, "tool_resolved")
+    if resolved is not None:
+        out["tool_resolved"] = resolved
+    return out
 
 
 def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
@@ -98,6 +120,34 @@ def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
             ev["intent"] = None
 
 
+def _redact_events(
+    event_dicts: List[dict[str, Any]],
+    redactions_out: Optional[dict[str, int]],
+) -> None:
+    """Mask secrets in the emitted ``text``/``intent`` fields, in place (F2.1).
+
+    Runs at the END of ``query`` — after filtering, sorting and the limit
+    slice — so only emitted events pay for it and every filter above
+    matched the RAW stored text.  Per-type replacement counts are folded
+    into ``redactions_out`` when the caller provided one.
+    """
+    for ev in event_dicts:
+        for field in ("text", "intent", "tool_resolved"):
+            val = ev.get(field)
+            if not isinstance(val, str) or not val:
+                continue
+            new_val, counts = redact_text(val)
+            if counts:
+                ev[field] = new_val
+                if redactions_out is not None:
+                    merge_redaction_counts(redactions_out, counts)
+                # Keep the refs mirror consistent with the hoisted field.
+                if field == "tool_resolved":
+                    for ref in ev.get("refs") or ():
+                        if isinstance(ref, dict) and "tool_resolved" in ref:
+                            ref["tool_resolved"] = new_val
+
+
 def _walk_relative(
     events: Sequence[Event],
     anchor_id: str,
@@ -139,11 +189,12 @@ def query(
     *,
     type: Optional[str] = None,
     agent: Optional[str] = None,
-    session: Optional[str] = None,
+    session: Optional[Any] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     file: Optional[str] = None,
     tool: Optional[str] = None,
+    tool_kind: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -152,10 +203,16 @@ def query(
     step_type: str = "user_turn",
     limit: int = 0,
     with_intent: bool = False,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
     # --- Phase-2/3 placeholders (accepted, TODO not-yet-implemented) ---
     kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    scanned_sessions_out: Optional[dict[str, Any]] = None,
+    redact: bool = True,
+    redactions_out: Optional[dict[str, int]] = None,
+    semantic_out: Optional[dict[str, Any]] = None,
 ) -> List[dict[str, Any]]:
     """Filter/search the normalized Event stream — the Phase-1 workhorse.
 
@@ -165,17 +222,33 @@ def query(
       ``tool_call(<sub>)`` | ``plan_event``.  Bare ``tool_call`` matches
       every subtype.
     * ``agent`` — restrict to one agent (``claude``/``codex``/...).
-    * ``session`` — restrict to one session uuid.
+    * ``session`` — restrict to one session uuid, OR a list of uuids
+      (F3.2): the union of those sessions' events, one scan.  Duplicates
+      collapse; a uuid absent from the corpus contributes nothing (same
+      honest semantics as the single-uuid miss).  Fail-loud validation
+      (SSOT :func:`~ai_r.events.model.normalize_session_filter`): an
+      empty list or a non-string item raises :class:`ValueError` —
+      never a silent unfiltered scan.
     * ``since`` / ``until`` — ISO-8601 bounds (inclusive) on ``ts``.
     * ``file`` — substring matched against any ``refs[*].file``.
     * ``tool`` — substring (pattern) matched against any ``refs[*].tool``
-      (case-insensitive).
+      OR ``refs[*].tool_resolved`` (case-insensitive) — so ``tool="commit"``
+      also finds the Skill-wrapped call whose resolved skill is ``commit``.
+    * ``tool_kind`` — exact match against the F3.1 wrapper-aware
+      classification (one of :data:`~ai_r.events._common.TOOL_KIND`:
+      ``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
+      ``web``/``other``).  Unknown values raise :class:`ValueError`
+      (fail-loud, never a silent no-op).
     * ``text`` — substring matched against event ``text``
       (case-insensitive).  With ``sort="relevance"`` the survivors are
       BM25-ranked using the **same scorer** as ``search_sessions``.
-    * ``sort`` — ``"date"`` (default, ts-ascending) or ``"relevance"``
+    * ``sort`` — ``"date"`` (default, ts-ascending), ``"relevance"``
       (BM25 over ``text``; requires a ``text`` facet, else falls back to
-      date order).
+      date order), or ``"semantic"`` (F5.1: the BM25 top-50 candidates
+      re-ranked by a local multilingual embedding model — see
+      :mod:`ai_r.semantic`; without the optional ``ai-r[semantic]``
+      dependencies/model it honestly degrades to the plain BM25 order,
+      never a crash; the outcome lands in ``semantic_out``).
     * ``relative_to`` + ``direction`` (``prev``|``next``) + ``n``
       (``1`` | ``"all"``) — the neighbouring-turn walk.  Generalises
       ``previous_user_intent`` (prev/1) to both directions and any count.
@@ -188,6 +261,38 @@ def query(
       Default ``False`` so the base event shape is unchanged.  This is what
       lets ``diff`` / the ``find_file_edits`` preset reproduce the legacy
       ``intent`` field byte-for-byte.
+    * ``noise`` — session-level noise filter (SSOT:
+      :mod:`ai_r.parsers._noise`; noise == spawned subagent session):
+      ``"include"`` (default, no filtering), ``"exclude"`` (top-level
+      sessions only), ``"only"`` (subagent sessions only).  Applied at the
+      session level, before messages are read.  Ignored on the
+      ``relative_to`` walk (the anchor pins one concrete session), like
+      every other filter facet.
+    * ``project_dir`` — session-level project filter: keep only events of
+      sessions whose ``Session.project_dir`` equals this path or is a
+      **descendant** of it (path-boundary aware, trailing slashes
+      ignored; semantics SSOT:
+      :func:`ai_r.parsers._common.project_dir_matches`).  Sessions
+      without a ``project_dir`` signal never match.  Like ``noise``,
+      applied before any message is read, and ignored on the
+      ``relative_to`` walk.
+
+    ``scanned_sessions_out`` is a caller-owned out-dict forwarded to
+    :func:`iter_events` — it collects the per-agent ``list_sessions()``
+    results of the scan so the MCP wrapper can build empty-result
+    diagnostics WITHOUT a second corpus walk.
+
+    ``redact`` (default ``True``) masks secrets in the emitted ``text`` /
+    ``intent`` fields as ``[REDACTED_<TYPE>]`` (see :mod:`ai_r.redact`);
+    ``redactions_out`` is a caller-owned dict that collects the per-type
+    replacement counts.  Redaction is emission-time only: the ``text``
+    facet (and every other filter) matches the RAW stored text.
+
+    ``semantic_out`` is a caller-owned out-dict filled only when
+    ``sort="semantic"`` was requested with a ``text`` facet: either the
+    active-ranking report (``active``/``model``/``candidates``/``weight``)
+    or the honest degradation notice (``active: false`` + plain-words
+    ``reason`` + ``fallback: "bm25"``).
 
     ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
     — plan/subagent facets).  They are accepted in the signature for forward
@@ -204,10 +309,30 @@ def query(
             f"direction must be 'prev' or 'next', got {direction!r}"
         )
     sort_lc = (sort or "date").lower()
-    if sort_lc not in ("date", "relevance"):
+    if sort_lc not in ("date", "relevance", "semantic"):
         raise ValueError(
-            f"sort must be 'relevance' or 'date', got {sort!r}"
+            f"sort must be 'relevance', 'date' or 'semantic', got {sort!r}"
         )
+    validate_noise(noise)
+    if tool_kind is not None:
+        if not isinstance(tool_kind, str) or tool_kind not in TOOL_KIND:
+            raise ValueError(
+                f"tool_kind must be one of {sorted(TOOL_KIND)}, "
+                f"got {tool_kind!r}"
+            )
+    if project_dir is not None and (
+        not isinstance(project_dir, str) or not project_dir.strip()
+    ):
+        raise ValueError(
+            "project_dir must be a non-empty path string or None, "
+            f"got {project_dir!r}"
+        )
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
+    # F3.2: validate the session facet up front (single uuid or a list of
+    # uuids), so a malformed value fails loud even on the ``relative_to``
+    # walk — where, like every other facet, it may otherwise go unused.
+    normalize_session_filter(session)
     # Normalize ``n``: accepts 1/all (or any positive int / "all").
     n_all = False
     n_int = 1
@@ -241,13 +366,19 @@ def query(
         # The anchor id is ``"{session}:{seq}"`` — scope the scan to that
         # session so the walk is over one contiguous timeline.
         anchor_session = relative_to.rsplit(":", 1)[0] if ":" in relative_to else session
-        stream = list(iter_events(agent, session=anchor_session or session))
+        stream = list(iter_events(
+            agent,
+            session=anchor_session or session,
+            scanned_sessions_out=scanned_sessions_out,
+        ))
         walked = _walk_relative(
             stream, relative_to, direction, n_all, n_int, step_type=step_type
         )
         out = [_event_to_dict(ev) for ev in walked]
         if with_intent:
             _attach_intents(out)
+        if redact:
+            _redact_events(out, redactions_out)
         return out
 
     # --- ordinary facet filter ------------------------------------------
@@ -259,7 +390,13 @@ def query(
 
     survivors: List[Event] = []
     score_texts: List[str] = []
-    for ev in iter_events(agent, session=session):
+    for ev in iter_events(
+        agent,
+        session=session,
+        noise=noise,
+        project_dir=project_dir,
+        scanned_sessions_out=scanned_sessions_out,
+    ):
         if type is not None and not _type_matches(ev.type, type):
             continue
         if since_dt is not None or until_dt is not None:
@@ -273,8 +410,19 @@ def query(
             if not any(file_needle in f for f in files):
                 continue
         if tool_needle is not None:
-            tools = [r.get("tool", "").lower() for r in ev.refs if "tool" in r]
+            # Match the raw name AND the resolved name under a wrapper, so
+            # a Skill/Task/MCP call is findable by what it really ran.
+            tools = [
+                str(r[key]).lower()
+                for r in ev.refs
+                for key in ("tool", "tool_resolved")
+                if key in r
+            ]
             if not any(tool_needle in t for t in tools):
+                continue
+        if tool_kind is not None:
+            kinds = [r.get("tool_kind") for r in ev.refs if "tool_kind" in r]
+            if tool_kind not in kinds:
                 continue
         if text_needle is not None:
             if not ev.text or text_needle not in ev.text.lower():
@@ -282,14 +430,28 @@ def query(
         survivors.append(ev)
         score_texts.append((ev.text or "").lower())
 
-    if sort_lc == "relevance" and text_needle and survivors:
+    if sort_lc in ("relevance", "semantic") and text_needle and survivors:
         # Re-use the SAME BM25 scorer that backs search_sessions.
         query_tokens = _tokenize(text_needle)
         docs_tokens = [_tokenize(t) for t in score_texts]
         scores = _bm25_scores(query_tokens, docs_tokens)
-        order = sorted(
-            range(len(survivors)), key=lambda i: scores[i], reverse=True
-        )
+        order: Optional[List[int]] = None
+        if sort_lc == "semantic":
+            # F5.1: BM25 supplies the candidates; the local embedding
+            # model re-ranks them by meaning.  ``None`` = the optional
+            # dependencies/model are missing or failed — an honest
+            # BM25 fallback (reported via ``semantic_out``), never a
+            # crash.  Embedding sees the RAW event text (not the
+            # lowercased match copy).
+            order, sem_info = _semantic_order(
+                text or "", [ev.text or "" for ev in survivors], scores
+            )
+            if semantic_out is not None:
+                semantic_out.update(sem_info)
+        if order is None:
+            order = sorted(
+                range(len(survivors)), key=lambda i: scores[i], reverse=True
+            )
         survivors = [survivors[i] for i in order]
     else:
         # Date order: ts-ascending, None ts last (stable within session).
@@ -300,6 +462,8 @@ def query(
     out = [_event_to_dict(ev) for ev in survivors]
     if with_intent:
         _attach_intents(out)
+    if redact:
+        _redact_events(out, redactions_out)
     return out
 
 

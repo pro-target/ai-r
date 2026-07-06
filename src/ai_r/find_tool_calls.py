@@ -29,6 +29,8 @@ from ai_r.parsers import (
     iso,
     target_agents,
 )
+from ai_r.events._common import resolve_tool
+from ai_r.redact import merge_redaction_counts, redact_value
 from ai_r.security import coerce_tool_input as _coerce_input
 
 __all__ = [
@@ -159,6 +161,7 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
 
@@ -192,6 +195,13 @@ def find_tool_calls(
             (first chars), ``"tail"`` (last chars), or ``"smart"``
             (error lines + tail).  ``None`` = adaptive — ``"smart"`` for
             error records, ``"head"`` otherwise.
+        redact: When ``True`` (default) secrets in emitted record fields
+            (``session_title``/``input``/``intent``/``assistant``/
+            ``output``) are masked as ``[REDACTED_<TYPE>]`` and the
+            response carries a ``redactions`` type→count dict when any
+            replacement happened (see :mod:`ai_r.redact`).  ``False``
+            returns the raw content.  Filters always match the RAW,
+            pre-redaction text.
 
     Returns:
         A dict ``{"records": [...], "count": N, "truncated": bool,
@@ -200,9 +210,18 @@ def find_tool_calls(
         ``limit`` (count-based); ``output_truncated`` is ``True`` when the
         cumulative serialized size hit the response byte budget and record
         appending stopped early (size-based) — the two are independent.
+        When ``count == 0`` the dict additionally carries ``"diagnostics"``
+        (scanned agents + session counts, corpus date bounds, cause hints
+        — see :mod:`ai_r.diagnostics`) so an empty listing is explainable.
         Each record carries ``agent``, ``session_uuid``,
         ``session_title``, ``session_date``, ``message_index``,
-        ``timestamp``, ``tool``, ``input`` (parsed dict when the raw
+        ``timestamp``, ``tool``, ``tool_kind`` (the wrapper-aware
+        classification, one of
+        :data:`~ai_r.events._common.TOOL_KIND`), ``tool_resolved`` (the
+        real name under a Skill/Task/MCP wrapper — the subagent type, the
+        skill name, or ``"<server>:<tool>"`` for an MCP call; ``None``
+        for non-wrappers or when the input carries no name signal),
+        ``input`` (parsed dict when the raw
         input was a JSON string), ``intent`` (the immediately
         preceding user message text or ``None``), ``assistant``
         (the assistant text of the message hosting the call),
@@ -265,6 +284,8 @@ def find_tool_calls(
             "output_mode must be one of 'head', 'tail', 'smart', "
             f"got {output_mode!r}"
         )
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
 
     since_dt = parse_iso_bound(since, "since")
     until_dt = parse_iso_bound(until, "until")
@@ -274,10 +295,15 @@ def find_tool_calls(
     substr_lc = name_substr.strip().lower() if name_substr is not None else None
 
     records: List[dict[str, Any]] = []
+    # Per-agent list_sessions() results, reused by the empty-result
+    # diagnostics below so an empty result never pays for a second scan.
+    scanned_sessions: dict[str, Any] = {}
 
     for agent_name in targets:
         parser = PARSERS[agent_name]
-        for session in parser.list_sessions():
+        agent_sessions = parser.list_sessions()
+        scanned_sessions[agent_name.value.lower()] = agent_sessions
+        for session in agent_sessions:
             try:
                 messages = parser.read_messages(session.uuid)
             except (FileNotFoundError, ValueError, OSError):
@@ -413,6 +439,12 @@ def find_tool_calls(
                             ("output", output_trunc),
                         ) if hit
                     ]
+                    # F3.1: wrapper-aware classification + the real name
+                    # under a Skill/Task/MCP wrapper (None when the input
+                    # carries no recognisable name — honest, never guessed).
+                    call_kind, call_resolved = resolve_tool(
+                        name, coerced_input
+                    )
                     records.append({
                         "agent": agent_name.value.lower(),
                         "session_uuid": session.uuid,
@@ -423,6 +455,8 @@ def find_tool_calls(
                             iso(call_ts) if call_ts is not None else None
                         ),
                         "tool": name,
+                        "tool_kind": call_kind,
+                        "tool_resolved": call_resolved,
                         "input": capped_input,
                         "intent": capped_intent,
                         "assistant": capped_asst,
@@ -440,6 +474,20 @@ def find_tool_calls(
     if limit and len(records) > limit:
         records = records[:limit]
         truncated = True
+
+    # Emission-time redaction (F2.1): runs AFTER the limit slice so only
+    # emitted records pay for it, and after the field caps so the cost is
+    # bounded by the response size.  Filters above already matched on the
+    # RAW pre-redaction text.
+    redactions: dict[str, int] = {}
+    if redact:
+        for rec in records:
+            for field in ("session_title", "input", "intent",
+                          "assistant", "output", "tool_resolved"):
+                new_val, counts = redact_value(rec.get(field))
+                if counts:
+                    rec[field] = new_val
+                    merge_redaction_counts(redactions, counts)
 
     # Size-based safeguard: stop emitting records once the cumulative
     # serialized size exceeds the response byte budget.  Distinct from the
@@ -459,9 +507,34 @@ def find_tool_calls(
     if output_truncated:
         records = budgeted
 
-    return {
+    response: dict[str, Any] = {
         "records": records,
         "count": total,
         "truncated": truncated,
         "output_truncated": output_truncated,
     }
+    if redactions:
+        response["redactions"] = redactions
+    if total == 0:
+        # Zero matches: attach the corpus diagnostics so an empty listing
+        # is explainable (missing source dir vs all-excluding filter vs a
+        # genuine no-match).  Imported lazily to keep module import light
+        # and mirror ``find_file_edits``.
+        from ai_r.diagnostics import empty_result_diagnostics
+
+        response["diagnostics"] = empty_result_diagnostics(
+            agent=agent,
+            since=since,
+            until=until,
+            filters={
+                "tool_name": tool_name,
+                "tool_name_pattern": tool_name_pattern,
+                "input_contains": input_contains,
+                "output_contains": output_contains,
+                "output_excludes": output_excludes,
+                "is_error": is_error,
+            },
+            scanned_sessions=scanned_sessions,
+            redact_active=redact,
+        )
+    return response

@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,24 @@ def test_parse_iso_timestamp_tolerates_z() -> None:
     ts = _parse_iso_timestamp("2026-06-14T10:00:00.123Z")
     assert ts is not None
     assert ts.year == 2026 and ts.month == 6 and ts.day == 14
+
+
+def test_parse_iso_timestamp_always_tz_aware() -> None:
+    # Regression: the ``raw[:23]`` truncation used to cut the tz suffix
+    # BEFORE the ``Z`` replace, so every transcript date came out naive
+    # and crashed the sort against aware Desktop-overlay dates.
+    z_form = _parse_iso_timestamp("2026-06-14T10:00:00.123Z")
+    assert z_form is not None and z_form.utcoffset() == timedelta(0)
+    # Naive input is pinned to UTC.
+    naive = _parse_iso_timestamp("2026-06-14T10:00:00")
+    assert naive is not None and naive.tzinfo is timezone.utc
+    # Explicit offsets are honoured (same instant as 07:00 UTC).
+    offset = _parse_iso_timestamp("2026-06-14T10:00:00+03:00")
+    assert offset is not None
+    assert offset.utcoffset() == timedelta(hours=3)
+    assert offset == z_form.replace(
+        hour=7, minute=0, second=0, microsecond=0
+    )
 
 
 def test_parse_iso_timestamp_returns_none_on_garbage() -> None:
@@ -514,7 +533,11 @@ def test_top_level_session_defaults_to_agent_kind(
 
 
 def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
-    """An inline ``isSidechain: True`` record classifies the session."""
+    """An inline ``isSidechain: True`` record classifies the session.
+
+    ``parent_uuid`` is the spawner from ``sessionId`` — NOT the
+    message-level ``parentUuid`` (a message uuid / chain root).
+    """
     base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
     jsonl = base / "inline-sidechain.jsonl"
     records = [
@@ -522,7 +545,19 @@ def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
             "type": "user",
             "message": {"role": "user", "content": "inline task"},
             "timestamp": "2026-06-14T12:00:00Z",
-            "parentUuid": "inline-parent-9",
+            "sessionId": "spawner-sid-9",
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+            },
+            "timestamp": "2026-06-14T12:00:01Z",
+            "sessionId": "spawner-sid-9",
+            "parentUuid": "msg-root-uuid",
             "isSidechain": True,
         },
     ]
@@ -533,7 +568,138 @@ def test_inline_sidechain_marks_subagent(tmp_sessions_dir: Path) -> None:
     session = _scan_file(jsonl)
     assert session is not None
     assert session.kind == "subagent"
-    assert session.parent_uuid == "inline-parent-9"
+    # Spawner = sessionId, never the message-level parentUuid.
+    assert session.parent_uuid == "spawner-sid-9"
+
+
+def test_subagent_dir_form_parent_is_spawner_not_message_uuid(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Directory form: ``parent_uuid`` is the folder (spawner), and the
+    message-level ``parentUuid`` (a message uuid) is ignored."""
+    parent_sid = "parent-sid-dir"
+    agent_id = "agent-dir-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / parent_sid
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "subtask"},
+            "timestamp": "2026-06-14T11:00:00Z",
+            "sessionId": parent_sid,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+            "timestamp": "2026-06-14T11:00:05Z",
+            "sessionId": parent_sid,
+            "parentUuid": "some-message-uuid",
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid == parent_sid
+    assert session.parent_uuid != "some-message-uuid"
+
+
+def test_subagent_flat_form_parent_from_session_id(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Flat form ``projects/<slug>/subagents/agent-*.jsonl``: no per-session
+    wrapper folder → path yields None → spawner comes from ``sessionId``.
+
+    Regression test for the A2 defect (previously message-uuid / None).
+    """
+    parent_sid = "parent-sid-flat"
+    agent_id = "agent-flat-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "flat subtask"},
+            "timestamp": "2026-06-14T13:00:00Z",
+            "sessionId": parent_sid,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+            "timestamp": "2026-06-14T13:00:01Z",
+            "sessionId": parent_sid,
+            "parentUuid": "chain-root-msg",
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid == parent_sid
+    assert session.parent_uuid != "chain-root-msg"
+
+
+def test_subagent_self_parent_guard(tmp_sessions_dir: Path) -> None:
+    """When ``sessionId`` equals the file's own uuid (no wrapper folder),
+    the session must NOT become its own parent → ``parent_uuid is None``."""
+    agent_id = "agent-self-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / "subagents"
+        / f"{agent_id}.jsonl"
+    )
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "self task"},
+            "timestamp": "2026-06-14T14:00:00Z",
+            "sessionId": agent_id,
+            "parentUuid": None,
+            "isSidechain": True,
+        },
+    ]
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    session = _scan_file(jsonl)
+    assert session is not None
+    assert session.kind == "subagent"
+    assert session.parent_uuid is None
 
 
 def test_isSidechain_false_stays_agent(tmp_sessions_dir: Path) -> None:
@@ -572,3 +738,222 @@ def test_read_subagent_session_by_uuid(
     assert session.kind == "subagent"
     msgs = claude.read_messages("agent-sub-1", base_dir=base)
     assert any(m.role == "user" for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Thinking blocks + per-message token usage (F3.3 breakdown groundwork)
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_session(
+    tmp_sessions_dir: Path, sid: str, records: list[dict]
+) -> str:
+    """Write ``records`` as ``<sid>.jsonl`` under the fake projects tree."""
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-think" / f"{sid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return str(tmp_sessions_dir / ".claude" / "projects")
+
+
+_THINK_USAGE = {
+    "input_tokens": 100,
+    "output_tokens": 50,
+    "cache_read_input_tokens": 10,
+    "cache_creation_input_tokens": 5,
+}
+
+
+def test_thinking_block_fills_thinking_not_text(tmp_sessions_dir: Path) -> None:
+    """``thinking`` blocks land in ``Message.thinking``; ``text`` unchanged;
+    ``redacted_thinking`` (no plaintext) is skipped."""
+    base = _write_claude_session(
+        tmp_sessions_dir,
+        "claude-think-1",
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "solve it"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            {
+                "type": "assistant",
+                "requestId": "req-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "let me reason"},
+                        {"type": "redacted_thinking", "data": "opaque-blob"},
+                        {"type": "text", "text": "the answer"},
+                    ],
+                    "usage": _THINK_USAGE,
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+            },
+        ],
+    )
+    msgs = claude.read_messages("claude-think-1", base_dir=base)
+    assert len(msgs) == 2
+    assert msgs[0].thinking == ""
+    assistant = msgs[1]
+    assert assistant.thinking == "let me reason"
+    assert assistant.text == "the answer"          # text semantics unchanged
+    assert "opaque-blob" not in assistant.thinking  # redacted: no plaintext
+
+
+def test_streamed_records_share_tokens_block_and_call_key(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Two records of the SAME streamed API call carry identical tokens
+    blocks with the same internal ``_call`` key (downstream dedup unit)."""
+    base = _write_claude_session(
+        tmp_sessions_dir,
+        "claude-stream-1",
+        [
+            # First record of the call: thinking-only (projections drop it).
+            {
+                "type": "assistant",
+                "requestId": "req-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "hmm"}],
+                    "usage": _THINK_USAGE,
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+            },
+            # Second record of the SAME call (same id/requestId/usage).
+            {
+                "type": "assistant",
+                "requestId": "req-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": _THINK_USAGE,
+                },
+                "timestamp": "2026-06-14T10:00:06Z",
+            },
+            # A distinct second call.
+            {
+                "type": "assistant",
+                "requestId": "req-2",
+                "message": {
+                    "id": "msg-2",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "more"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                },
+                "timestamp": "2026-06-14T10:00:10Z",
+            },
+        ],
+    )
+    msgs = claude.read_messages("claude-stream-1", base_dir=base)
+    assert len(msgs) == 3
+    first, second, third = msgs
+    expected = {
+        "input": 100, "output": 50, "reasoning": None,
+        "cache_read": 10, "cache_write": 5, "total": 165,
+        "_call": "msg-1|req-1",
+    }
+    assert first.tokens == expected
+    assert second.tokens == expected           # every record of the call
+    assert third.tokens == {
+        "input": 10, "output": 20, "reasoning": None,
+        "cache_read": 0, "cache_write": 0, "total": 30,
+        "_call": "msg-2|req-2",
+    }
+    # The session SSOT still dedups the streamed call (165 + 30, not 330).
+    usage = claude.read_token_usage("claude-stream-1", base_dir=base)
+    assert usage is not None and usage["total"] == 195
+
+
+def test_usage_less_records_have_no_tokens(
+    fake_claude_session: Path, tmp_sessions_dir: Path
+) -> None:
+    """No ``message.usage`` in the record → ``tokens`` stays None (honest)."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    msgs = claude.read_messages("test-claude-1", base_dir=base)
+    assert all(m.tokens is None for m in msgs)
+
+
+def test_qa_linker_passes_thinking_and_tokens_through(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``_link_ask_user_questions`` reconstructs Messages — it must carry
+    ``thinking``/``tokens`` (silent data loss otherwise)."""
+    base = _write_claude_session(
+        tmp_sessions_dir,
+        "claude-ask-think-1",
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Plan the work"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            # Assistant turn: thinking + AskUserQuestion, WITH usage.  The
+            # ``_ask_*`` keys force the linker down its reconstruction path.
+            {
+                "type": "assistant",
+                "requestId": "req-1",
+                "message": {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "which option?"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_ask1",
+                            "name": "AskUserQuestion",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "Which approach?",
+                                        "options": [
+                                            {"label": "Option A"},
+                                            {"label": "Option B"},
+                                        ],
+                                    }
+                                ]
+                            },
+                        },
+                    ],
+                    "usage": _THINK_USAGE,
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+            },
+            # The user's reply: qa lands here (also reconstructed).
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_ask1",
+                            "content": '"Which approach?"="Option B"',
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:09Z",
+            },
+        ],
+    )
+    msgs = claude.read_messages("claude-ask-think-1", base_dir=base)
+    assert len(msgs) == 3
+    assistant = msgs[1]
+    # Scrubbed (reconstructed) — yet thinking/tokens survived.
+    assert all(
+        not k.startswith("_") for tu in assistant.tool_use for k in tu
+    )
+    assert assistant.thinking == "which option?"
+    assert assistant.tokens is not None
+    assert assistant.tokens["total"] == 165
+    assert assistant.tokens["_call"] == "msg-1|req-1"
+    # And the qa pairing itself still works on the answer message.
+    answer = msgs[2]
+    assert answer.qa and answer.qa[0]["answer"] == "Option B"

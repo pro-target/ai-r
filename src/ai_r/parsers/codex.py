@@ -7,8 +7,10 @@ Source layout (recursive)::
 
 Each line is a JSON object with one of the following ``type`` values:
 
-* ``"session_meta"``   — payload has the session ``id`` and ``cwd``;
-  this is the canonical UUID.
+* ``"session_meta"``   — payload has the session ``id``, ``cwd``
+  (surfaced as ``Session.project_dir``) and ``originator`` (the launch
+  surface, e.g. ``"codex_vscode"`` / ``"Codex Desktop"``, surfaced
+  verbatim as ``Session.launch_surface``); this is the canonical UUID.
 * ``"response_item"``  — payload is a message (``type: "message"``,
   ``role: "user"``/``"assistant"``, ``content: [...]``).
 * ``"event_msg"``      — extracted when ``payload.type == "user_message"``
@@ -94,6 +96,14 @@ def _resolve_base_dir(base_dir: Optional[str]) -> List[Path]:
     return [primary, primary.parent / "archived_sessions"]
 
 
+def source_roots(base_dir: Optional[str] = None) -> List[str]:
+    """Candidate source root(s) for Codex sessions (may not exist).
+
+    Used by :mod:`ai_r.diagnostics` to explain empty results.
+    """
+    return [str(p) for p in _resolve_base_dir(base_dir)]
+
+
 def _extract_text_from_parts(parts: object) -> str:
     """Concatenate ``input_text``/``output_text``/``text`` parts."""
     if not isinstance(parts, list):
@@ -124,8 +134,11 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     """Parse a Codex rollout file into a :class:`Session`."""
     uuid: Optional[str] = None
     cwd: Optional[str] = None
+    originator: Optional[str] = None
     timestamp: Optional[datetime] = None
     title: Optional[str] = None
+    parent_uuid: Optional[str] = None
+    is_subagent = False
     message_count = 0
 
     for record in iter_jsonl_records(jsonl_path):
@@ -146,9 +159,38 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
             cwd_val = payload.get("cwd")
             if isinstance(cwd_val, str):
                 cwd = cwd_val
+            # ``originator`` names the surface that spawned the session
+            # (observed values: "codex_vscode", "Codex Desktop", CLI
+            # builds).  Passed through verbatim as ``launch_surface`` —
+            # no invented taxonomy on top of the raw signal.
+            originator_val = payload.get("originator")
+            if isinstance(originator_val, str) and originator_val.strip():
+                originator = originator_val.strip()
             meta_ts = _parse_iso_timestamp(payload.get("timestamp", ""))
             if meta_ts is not None:
                 timestamp = meta_ts
+            # Subagent signal: ``thread_source ∈ {"user", "subagent"}`` plus a
+            # flat ``parent_thread_id``; older/newer layouts may carry the
+            # parent only in the nested ``source.subagent.thread_spawn`` blob,
+            # so read both (flat wins when present).
+            if payload.get("thread_source") == "subagent":
+                is_subagent = True
+            parent_val = payload.get("parent_thread_id")
+            if not isinstance(parent_val, str) or not parent_val:
+                source = payload.get("source")
+                spawn = (
+                    source.get("subagent", {}).get("thread_spawn", {})
+                    if isinstance(source, dict)
+                    and isinstance(source.get("subagent"), dict)
+                    else {}
+                )
+                parent_val = (
+                    spawn.get("parent_thread_id")
+                    if isinstance(spawn, dict) else None
+                )
+            if isinstance(parent_val, str) and parent_val:
+                parent_uuid = parent_val
+                is_subagent = True
             continue
 
         if (
@@ -195,6 +237,10 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         date=timestamp,
         path=str(jsonl_path),
         message_count=message_count,
+        parent_uuid=parent_uuid,
+        kind="subagent" if is_subagent else "agent",
+        project_dir=cwd,
+        launch_surface=originator,
         extra={"cwd": cwd} if cwd else {},
     )
 
@@ -234,6 +280,21 @@ def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
     return sessions
 
 
+def _peek_session_uuid(path: Path) -> Optional[str]:
+    """Read only up to the ``session_meta`` header to identify a file's
+    session, without parsing the whole rollout.  Returns the session id or
+    ``None`` when no valid header is present.  Keeps a by-uuid lookup from
+    reading every candidate file end-to-end (audit: O(N^2) corpus rescan)."""
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+            return payload["id"]
+        return None
+    return None
+
+
 def _find_session_file(
     uuid: str, base_dir: Optional[str]
 ) -> Tuple[Path, Session]:
@@ -241,14 +302,11 @@ def _find_session_file(
         raise ValueError(f"Invalid Codex session uuid: {uuid!r}")
     roots = _resolve_base_dir(base_dir)
     for path in _discover_files(roots):
-        for record in iter_jsonl_records(path):
-            if record.get("type") != "session_meta":
-                continue
-            payload = record.get("payload") or {}
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("id") == uuid:
-                return path, _scan_file(path)  # type: ignore[return-value]
+        if _peek_session_uuid(path) != uuid:
+            continue
+        session = _scan_file(path)
+        if session is not None:
+            return path, session
     raise FileNotFoundError(f"Codex session {uuid!r} not found under {roots}")
 
 
@@ -286,7 +344,9 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     become user/assistant :class:`Message` objects.  ``function_call``
     payloads (and the ``local_shell_call`` family) become assistant
     ``tool_use`` entries; ``function_call_output`` payloads become
-    ``tool`` messages with a ``tool_result`` entry.  Codex carries no
+    ``tool`` messages with a ``tool_result`` entry.  ``reasoning``
+    payloads with a non-empty plaintext ``summary`` become assistant
+    messages carrying :attr:`Message.thinking`.  Codex carries no
     per-result error flag, so ``tool_result.is_error`` defaults ``False``
     (best-effort).  Other record types are skipped.
 
@@ -352,6 +412,61 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                         timestamp=env_ts,
                     )
                 )
+            elif ptype == "reasoning":
+                # Codex stores model reasoning as ``reasoning`` response
+                # items: the plaintext lives in ``summary[].text`` while
+                # ``encrypted_content`` is opaque ciphertext (no plaintext
+                # → skipped, absence is honest).  Verified against real
+                # ~/.codex/sessions rollouts (2026-07 snapshot): ``summary``
+                # is the only plaintext carrier and is often empty ([]),
+                # so summary-less items are skipped rather than emitted as
+                # blank assistant messages.  No per-message usage exists in
+                # the format (cumulative ``token_count`` only) → tokens
+                # stays None.
+                summary = payload.get("summary")
+                thinking_chunks: List[str] = []
+                if isinstance(summary, list):
+                    for entry in summary:
+                        if not isinstance(entry, dict):
+                            continue
+                        text = entry.get("text", "")
+                        if isinstance(text, str) and text:
+                            thinking_chunks.append(text)
+                if thinking_chunks:
+                    messages.append(
+                        Message(
+                            role="assistant",
+                            text="",
+                            thinking="\n".join(thinking_chunks),
+                            timestamp=env_ts,
+                        )
+                    )
+            elif ptype == "web_search_call":
+                # Codex's native web access is not a function_call: the
+                # rollout stores a ``web_search_call`` response item whose
+                # ``action`` object carries the target (``search`` →
+                # ``query``/``queries``, ``open_page``/``find_in_page`` →
+                # ``url``).  Surface it as a ``web_search`` tool_use so the
+                # F3.1 classifier marks it ``tool_kind="web"`` and the F4.3
+                # network audit sees Codex egress like everyone else's.
+                # No result record exists → no tool_result (is_error stays
+                # unknown — honest).
+                action = payload.get("action")
+                if isinstance(action, dict):
+                    try:
+                        input_str = json.dumps(action, ensure_ascii=False)
+                    except (TypeError, ValueError):  # pragma: no cover
+                        input_str = str(action)
+                else:
+                    input_str = ""
+                messages.append(
+                    Message(
+                        role="assistant",
+                        text="",
+                        tool_use=({"name": "web_search", "input": input_str},),
+                        timestamp=env_ts,
+                    )
+                )
             elif ptype in ("function_call_output", "local_shell_call_output"):
                 output = payload.get("output", "")
                 if not isinstance(output, str):
@@ -408,6 +523,69 @@ def read_messages(
     """
     session = read_session(uuid, base_dir)
     return _extract_messages_from_rollout(Path(session.path))
+
+
+def read_token_usage(
+    uuid: str, base_dir: Optional[str] = None
+) -> Optional[dict]:
+    """Return the session's recorded token usage, or ``None`` without signal.
+
+    Codex rollouts interleave ``event_msg`` records whose payload
+    ``type == "token_count"`` carries ``info.total_token_usage`` — a
+    **cumulative** counter for the whole session, so the LAST valid one
+    wins (no summing).
+
+    Normalized fields (format-native semantics): ``input`` =
+    ``input_tokens`` (which Codex counts **including** the cached part),
+    ``output`` = ``output_tokens`` (including reasoning), ``reasoning`` =
+    ``reasoning_output_tokens``, ``cache_read`` = ``cached_input_tokens``;
+    Codex has no cache-creation counter → ``cache_write`` is ``None``.
+    ``total`` is the recorded ``total_tokens`` (fallback: input + output).
+    Returns ``None`` when the rollout has no ``token_count`` event or the
+    total is zero — absence is honest.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    path, _ = _find_session_file(uuid, base_dir)
+    last_usage: Optional[dict] = None
+    for record in iter_jsonl_records(path):
+        if record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            continue
+        usage = info.get("total_token_usage")
+        if isinstance(usage, dict):
+            last_usage = usage
+    if last_usage is None:
+        return None
+
+    def _count(key: str) -> Optional[int]:
+        val = last_usage.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+        return None
+
+    input_tokens = _count("input_tokens")
+    output_tokens = _count("output_tokens")
+    total = _count("total_tokens")
+    if total is None:
+        total = (input_tokens or 0) + (output_tokens or 0)
+    if total <= 0:
+        return None
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "reasoning": _count("reasoning_output_tokens"),
+        "cache_read": _count("cached_input_tokens"),
+        "cache_write": None,
+        "total": total,
+    }
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

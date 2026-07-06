@@ -15,6 +15,22 @@
 #   PYTHON         python interpreter to use (default: newest python3.x >= 3.11 on PATH)
 #   AI_R_CMD  override the absolute path of ai-r-mcp to register in
 #                  the agent MCP configs (default: ~/.local/bin/ai-r-mcp)
+#   AI_R_EXTRAS    optional pip extras, comma-separated (e.g. "tokens" to add
+#                  tiktoken for better token estimates in session_stats
+#                  with_tokens; "semantic" to add onnxruntime+tokenizers AND
+#                  download the local embedding model for sort="semantic";
+#                  "http" to add uvicorn for the shared streamable-http MCP
+#                  transport (AI_R_MCP_TRANSPORT=http, one server not a
+#                  per-agent stdio swarm); default: none — ai-r works without
+#                  extras)
+#   AI_R_SEMANTIC_MODEL_DIR
+#                  where the semantic model files are stored (default:
+#                  ~/.cache/ai-r/semantic/multilingual-e5-small)
+#   AI_R_MCP_SYSTEMD
+#                  =1 installs the systemd --user socket-activation units for
+#                  the shared streamable-http server (one warm process for all
+#                  agents, idle-off + respawn). Opt-in, non-destructive: copies
+#                  the units and prints the enable command, never auto-enables.
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
 
 set -euo pipefail
@@ -173,8 +189,16 @@ else
 fi
 
 # --- 4. pip install ---
-hdr "Step 3/6: pip install $REPO_DIR"
-PIP_ARGS=(install --quiet "$REPO_DIR")
+# Optional extras (pyproject [project.optional-dependencies]), e.g.
+# AI_R_EXTRAS=tokens adds tiktoken for better token estimates; the core
+# never requires them.
+PIP_INSTALL_TARGET="$REPO_DIR"
+if [[ -n "${AI_R_EXTRAS:-}" ]]; then
+    PIP_INSTALL_TARGET="${REPO_DIR}[${AI_R_EXTRAS}]"
+    log "Extras:  ${AI_R_EXTRAS}"
+fi
+hdr "Step 3/6: pip install $PIP_INSTALL_TARGET"
+PIP_ARGS=(install --quiet "$PIP_INSTALL_TARGET")
 if [[ "$USE_VENV" == "0" ]]; then
     PIP_ARGS+=(--break-system-packages)
     if [[ "$USE_SUDO" == "0" ]]; then
@@ -183,6 +207,63 @@ if [[ "$USE_VENV" == "0" ]]; then
 fi
 run $PIP_TARGET "${PIP_ARGS[@]}"
 log "pip install: OK"
+
+# --- 4b. optional semantic model (only when AI_R_EXTRAS contains "semantic") ---
+# sort="semantic" needs the local embedding model files next to the extra's
+# python packages. Downloaded once, idempotent; a failed download only warns
+# (ai-r then falls back to BM25 order with an honest notice — never a crash).
+if [[ ",${AI_R_EXTRAS:-}," == *",semantic,"* ]]; then
+    hdr "Optional: semantic model (intfloat/multilingual-e5-small, int8 ONNX, ~118 MB)"
+    SEM_DIR="${AI_R_SEMANTIC_MODEL_DIR:-$HOME/.cache/ai-r/semantic/multilingual-e5-small}"
+    SEM_BASE="https://huggingface.co/intfloat/multilingual-e5-small/resolve/main"
+    run mkdir -p "$SEM_DIR"
+    fetch_model_file() { # <url> <dest>
+        local url="$1" dest="$2"
+        if [[ -s "$dest" ]]; then
+            log "already present: $dest"
+            return 0
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            run curl -fL --retry 3 -o "${dest}.part" "$url" && run mv "${dest}.part" "$dest"
+        elif command -v wget >/dev/null 2>&1; then
+            run wget -q -O "${dest}.part" "$url" && run mv "${dest}.part" "$dest"
+        else
+            warn "neither curl nor wget found — cannot download the model"
+            return 1
+        fi
+    }
+    if fetch_model_file "$SEM_BASE/onnx/model_qint8_avx512_vnni.onnx" "$SEM_DIR/model_qint8_avx512_vnni.onnx" \
+       && fetch_model_file "$SEM_BASE/tokenizer.json" "$SEM_DIR/tokenizer.json"; then
+        log "semantic model ready: $SEM_DIR"
+    else
+        warn "semantic model download failed — sort=\"semantic\" will honestly fall back to BM25."
+        warn "Manual download into $SEM_DIR :"
+        warn "  $SEM_BASE/onnx/model_qint8_avx512_vnni.onnx"
+        warn "  $SEM_BASE/tokenizer.json"
+    fi
+fi
+
+# --- 4c. optional systemd --user socket-activation (AI_R_MCP_SYSTEMD=1) ---
+# Installs the shared streamable-http server as a socket-activated user service
+# (one warm process for every agent, idle-off + respawn-on-demand) instead of
+# a per-agent stdio swarm. Opt-in and non-destructive: copies the units and
+# prints the enable command; never auto-enables, never touches running servers.
+if [[ "${AI_R_MCP_SYSTEMD:-}" == "1" ]]; then
+    hdr "Optional: systemd --user socket-activation (shared ai-r-mcp http server)"
+    UNIT_SRC="${REPO_DIR}/packaging/systemd"
+    UNIT_DST="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    if command -v systemctl >/dev/null 2>&1; then
+        run mkdir -p "$UNIT_DST"
+        run cp "$UNIT_SRC/ai-r-mcp.socket" "$UNIT_DST/"
+        run cp "$UNIT_SRC/ai-r-mcp.service" "$UNIT_DST/"
+        run systemctl --user daemon-reload
+        log "units installed: $UNIT_DST/ai-r-mcp.{socket,service}"
+        log "enable with:  systemctl --user enable --now ai-r-mcp.socket"
+        log "then set agent MCP configs to http://127.0.0.1:8756/mcp"
+    else
+        warn "systemctl not found — skipping units (http still works via AI_R_MCP_TRANSPORT=http)"
+    fi
+fi
 
 # --- 5. symlink binaries ---
 hdr "Step 4/6: symlink binaries → $BIN_DIR"

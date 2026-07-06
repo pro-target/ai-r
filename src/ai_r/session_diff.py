@@ -48,6 +48,7 @@ from ai_r.find_file_edits import (
     _shell_redirect_targets,
 )
 from ai_r.parsers import PARSERS, coerce_agent
+from ai_r.redact import redact_value
 
 # The edit-hunk normalisation/rendering helpers + caveat constants used to be
 # defined here and lazily imported *into* the ``events.diff`` verb, which made
@@ -196,7 +197,9 @@ def _diff_via_verb(
     rows: List[dict[str, Any]] = [_event_to_dict(ev) for ev in survivors]
     _attach_intents(rows)
 
-    folded = _diff(rows)
+    # ``redact=False``: the preset applies ONE redaction pass on its final
+    # output (see ``session_diff``) — an inner pass here would double-count.
+    folded = _diff(rows, redact=False)
     # Project onto the legacy shape: keep only file/edits/diff per file (drop
     # the additive per-file ``hunks``), preserving order and caveats.
     files = [
@@ -214,6 +217,7 @@ def session_diff(
     session_uuid: str,
     agent: str,
     path: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Reconstruct the agent's per-file edits for one session (no git).
 
@@ -223,6 +227,12 @@ def session_diff(
             ``"codex"``, ``"opencode"``, ``"antigravity"``, ``"pi"``.
         path: Optional substring filter on the edited file path
             (case-sensitive). ``None`` = every edited file in the session.
+        redact: When ``True`` (default) secrets in the emitted output
+            (``diff`` text, hunk bodies, ``intent``) are masked as
+            ``[REDACTED_<TYPE>]`` and the result carries a ``redactions``
+            type→count dict when any replacement happened (see
+            :mod:`ai_r.redact`).  ``False`` returns raw content.  The
+            ``path`` filter always matches the raw session.
 
     Returns:
         ``{"files": [...], "count": N, "caveats": [...]}`` where each
@@ -246,6 +256,8 @@ def session_diff(
         raise ValueError("session_uuid must be a non-empty string")
     if path is not None and not isinstance(path, str):
         raise ValueError("path must be a string or None")
+    if not isinstance(redact, bool):
+        raise ValueError(f"redact must be a bool, got {redact!r}")
     # ``coerce_agent`` raises ``ValueError`` on an unknown agent, which is
     # exactly the contract the MCP/CLI wrappers expect — let it propagate.
     agent_name = coerce_agent(agent)
@@ -263,7 +275,10 @@ def session_diff(
     # agent.
     agent_lc = agent_name.value.lower()
     if agent_lc != "codex":
-        return _diff_via_verb(session_uuid.strip(), agent_lc, path if path else None)
+        result = _diff_via_verb(
+            session_uuid.strip(), agent_lc, path if path else None
+        )
+        return _redact_result(result, redact)
 
     path_filter = path if path else None
     events = _scan_session(agent_name, session_uuid.strip(), path_filter)
@@ -310,8 +325,27 @@ def session_diff(
             }
         )
 
-    return {
-        "files": files,
-        "count": len(files),
-        "caveats": [_GIT_CAVEAT, _RISK3_CAVEAT],
-    }
+    return _redact_result(
+        {
+            "files": files,
+            "count": len(files),
+            "caveats": [_GIT_CAVEAT, _RISK3_CAVEAT],
+        },
+        redact,
+    )
+
+
+def _redact_result(result: dict[str, Any], redact: bool) -> dict[str, Any]:
+    """Apply the single emission-time redaction pass to a diff result (F2.1).
+
+    One recursive pass over ``files`` (diff text, hunk bodies, intents);
+    attaches the per-type ``redactions`` counts only when something was
+    actually masked.  No-op when ``redact`` is ``False``.
+    """
+    if not redact:
+        return result
+    redacted_files, counts = redact_value(result["files"])
+    if counts:
+        result["files"] = redacted_files
+        result["redactions"] = counts
+    return result

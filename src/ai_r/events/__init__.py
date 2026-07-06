@@ -47,9 +47,11 @@ from __future__ import annotations
 
 # --- public surface (matches the historical ``events.__all__``) -----------
 from ai_r.events._common import (
+    TOOL_KIND,
     TOOL_SUBTYPE,
     Event,
     classify_tool,
+    resolve_tool,
 )
 from ai_r.events.model import iter_events
 from ai_r.events.query import (
@@ -61,6 +63,7 @@ from ai_r.events.plan import (
     Plan,
     get_body,
     plan,
+    plan_feedback,
 )
 from ai_r.events.aggregate import aggregate
 from ai_r.events.diff import diff
@@ -126,14 +129,17 @@ from ai_r.events.diff import _edit_input_from_event  # noqa: F401
 
 __all__ = [
     "Event",
+    "TOOL_KIND",
     "TOOL_SUBTYPE",
     "classify_tool",
+    "resolve_tool",
     "iter_events",
     "query",
     "intent",
     "reaction",
     "Plan",
     "plan",
+    "plan_feedback",
     "get_body",
     "aggregate",
     "diff",
