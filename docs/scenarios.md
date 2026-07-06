@@ -428,6 +428,14 @@ projected to the legacy totals shape.
 - **Expected:** (1) every group and `totals` carry a `tokens` block; for Claude/Codex/OpenCode/Pi vault data the `exact` counter dominates and `total` is a plausible positive sum; (2) **no** `tokens` key anywhere — byte-identical historical shape; (3) Antigravity sessions count under `estimated` (transcript estimate — tiktoken when the optional extra is installed, chars/4 otherwise) or `unknown`, never under `exact`.
 - **Pass criteria:** GO when the counters are honest (`exact + estimated + unknown == sessions` per group, Antigravity never `exact`), sums that no session carried stay `null`, the block contains only numbers/labels (no raw session text), and omitting `with_tokens` changes nothing. A fabricated exact number for a format without recorded usage, or a crash on a host without tiktoken, is NO-GO.
 
+### STAT-5 — `with_tokens` unscoped over corpus limit → `scope_required` refusal, never hangs `[hermetic-ok]`
+- **Function:** `session_stats`
+- **Goal:** An unscoped `with_tokens=true` over a corpus larger than `token_scan_limit` refuses fast with a structured `scope_required` error BEFORE reading any usage file. Guards the historical hang (the token counter re-globbed + parsed every session and never returned). A scope narrows it; `token_scan_limit=0` opts out; a large *permitted* scan attaches a `warning`.
+- **Preconditions:** A corpus whose match count exceeds the default `token_scan_limit=400` (a real large vault, or a fixture over the limit). `[hermetic-ok]` — the refusal is deterministic once the count exceeds the limit, host-independent.
+- **Steps:** (1) `mcp__ai-r__session_stats(with_tokens=true)` with NO `agent`/`since`/`until`/`session` scope — **run with a timeout; a hang (not a refusal) is the regression this scenario guards**; (2) the same with `agent="claude"` (or any `since=`); (3) `mcp__ai-r__session_stats(with_tokens=true, token_scan_limit=0)`; (4) a scoped call whose permitted scan still exceeds the warn threshold.
+- **Expected:** (1) returns `{"error":"scope_required", "matched_sessions":N, "token_scan_limit":400, "scoped":false}` fast, with NO usage file read (no hang); (2) runs normally, `tokens` block present; (3) cap disabled, scan runs; (4) result carries a `warning` about the large scan.
+- **Pass criteria:** GO when the unscoped over-limit call REFUSES fast with a structured `scope_required` (never hangs, never returns a partial token total), scope / `token_scan_limit=0` let it through, and a large permitted scan warns. A hang, a silent partial total, or a crash is NO-GO.
+
 ---
 
 ## `session_diff` (preset)
