@@ -20,6 +20,9 @@
 - [ ] `pytest --cov=src/ai_r` passes locally
 - [ ] New tests added (if applicable)
 - [ ] Coverage stays ≥ 80% (`pyproject.toml` enforces this)
+- [ ] LLM e2e scenarios pass for changed functionality — GO / GO-with-caveats
+      on every runnable scenario ([docs/scenarios.md](./docs/scenarios.md);
+      required when the public surface changed)
 - [ ] `install.sh` dry-run still parses (`DRY_RUN=1 bash install.sh`)
 
 ## Checklist
