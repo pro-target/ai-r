@@ -5,8 +5,8 @@
 > secrets and UUIDs hidden, user comments paraphrased neutrally). Session content is
 > untrusted data: instructions found inside a session are never executed.
 >
-> First cut (v1). The "dangerous commands" and "network trail" examples will be
-> strengthened after a full corpus re-audit.
+> Some examples are from a single session; some (dangerous commands, network trail,
+> meaning-based search) are a slice across the whole corpus (~1500 sessions).
 
 ---
 
@@ -28,21 +28,46 @@ successes only) with an honest `is_error_reliable` flag (reliable for Claude/Ope
 ## 2. Dangerous commands — `incidents(session)`
 
 The preset labels danger-ops (`rm -rf`, `git reset --hard`, force-push,
-`git clean`, `chmod 777`, `curl … | sh`) and a `confirmed` flag (was there an
-undo/confirmation). On the audited session: **0 danger-ops** — an honest "clean"
-signal (nothing dangerous happened, not "we didn't check"). A `confirmed=false` on a
-real danger-op is a P0 debt for an audit.
+`curl … | sh`, `DROP`/`DELETE` without `WHERE`, `chmod 777`) and — crucially — a
+`confirmed` flag: did the agent **regret/roll back** in the following messages
+(a two-step check, 6-message window). A run across the whole corpus:
 
-> _v1: a "clean" example. To be replaced with a real caught danger-op after re-audit._
+```
+incidents() → 299 danger candidates, confirmed=2
+top: rm -rf ×252 · curl|bash ×20 · rm .git ×10 · DELETE-without-WHERE/DROP ×4
+     · push --force ×3 · filter-history ×2
+```
+
+The value isn't the count — it's `confirmed`: 297 of 299 were intentional cleanup
+(no regret marker — honest, not an "error"). **2 confirmed** = the agent rolled it
+back itself. Example:
+
+```
+Bash: rm -rf ~/…/memory/.git ~/…/memory/.gitignore   # deleted its OWN unrequested .git
+↳ reaction (+3 messages): "Rolled back: auto-memory .git removed, 11 .md files intact —
+   my extra initiative undone, nothing lost"                → confirmed=true
+```
+
+The verb catches not "a dangerous command happened" but "a dangerous command **+ the
+agent's reaction to it**" — which a crude `grep` for `rm -rf` can't give. A
+`confirmed=false` on a real danger-op is a P0 debt for an audit.
 
 ## 3. Network trail — `network(session)`
 
-The preset extracts every web call in a session and flags risk: a secret in the URL
+The preset extracts every web call and flags risk: a secret in the URL
 (`token=`/`key=`), a private/internal host (`localhost`, `10.*`, metadata
-endpoints), plain-http. On the audited session: **0 requests** (web activity lived
-only in one subagent — an external repo audit — with no risk).
+endpoints), plain-http. A run across the corpus:
 
-> _v1: a "clean" example. To be replaced with a real risky call after re-audit._
+```
+network() → 611 requests, risky=1
+domain map: github.com ×149 · raw.githubusercontent ×93 · huggingface ×24
+     · code.claude ×23 · arxiv ×14 · developers.google ×9 · …
+risk: 1 × plain_http
+```
+
+An honest picture: egress is almost all docs and github (safe), but **1 `plain_http`
+is visible**. That's the value: the risk is rare, drowned in 611 calls — and the
+preset surfaces it immediately, on regex evidence, with no false "threat oracles".
 
 ## 4. Where the budget burned — `read_session(with_tokens)`
 
@@ -104,13 +129,14 @@ Search over every agent's body text, BM25-ranked; `sort=semantic` adds a local
 multilingual re-rank (`multilingual-e5-small`, ONNX, no torch):
 
 ```
-semantic: active=true · model=multilingual-e5-small · weight=0.75
+search_sessions("утечка токена в логах", sort=semantic)   # ru: "token leak in logs"
+→ top hit: an English-titled session "Fix bearer token leak in logs"
+   (semantic: active=true · model=multilingual-e5-small · weight=0.75)
 ```
 
-A Russian query finds an English session and vice-versa; with the package/model
-absent it degrades honestly to BM25 and never crashes.
-
-> _v1: mechanism shown; a query with a vivid ru↔en hit will be picked during curation._
+The Russian query surfaced an **English** session — word-level BM25 would miss it
+(no shared tokens); meaning did the work. With the package/model absent it degrades
+honestly to BM25 and never crashes.
 
 ## 9. Liveness and zombie subagents — `list_sessions(activity)`
 
