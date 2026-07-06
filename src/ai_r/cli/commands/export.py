@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
-from ai_r.cli.shared import _AGENT_CHOICES, resolve_session
+from ai_r.cli.shared import (
+    _add_redact_flag,
+    _AGENT_CHOICES,
+    _redact_str,
+    resolve_session,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -40,6 +45,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Include the structured Round block (requires read_messages).",
     )
+    _add_redact_flag(rounds_p)
     rounds_p.set_defaults(func=_run_export_rounds)
 
 
@@ -71,6 +77,10 @@ def _run_export_rounds(args: argparse.Namespace) -> int:
     from ai_r.exporters.rounds import session_to_rounds
 
     markdown = session_to_rounds(session, messages=messages)
+    # Emission-time redaction (F2.1): the rendered markdown carries the session
+    # title and message-derived text (goal / open / next actions) — mask
+    # secrets before it is written to stdout or a file.
+    markdown = _redact_str(markdown, args)
 
     output = getattr(args, "output", None)
     if output:
