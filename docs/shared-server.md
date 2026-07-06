@@ -58,6 +58,31 @@ to 2048 and is tunable with `AI_R_HAYSTACK_CACHE_MAX` (see
 [architecture.md](architecture.md) → *shared http transport* ADR). The
 memory win — N processes collapsing to 1 — holds regardless of the cache.
 
+### Under concurrency: the swarm collapses, the shared server stays flat
+
+A second measurement drove a mass-audit workload (per session:
+`read_session` + `incidents`) through a pool of concurrent workers, at rising
+concurrency. The stdio swarm's memory grows linearly with concurrency and then
+**thrashes to a standstill**; the shared server is one process at flat memory.
+
+| Concurrency | stdio swarm (before) | http shared (after) |
+|---|---|---|
+| 4 workers | 4 procs, **361 MB**, all done | 1 proc, ~**80 MB** |
+| 8 workers | 8 procs, **712 MB** | 1 proc, ~**80 MB** |
+| 16 workers | 16 procs, **1404 MB**, **0 completed** — CPU-contention collapse (the freeze mechanism) | 1 proc, ~**80 MB** |
+
+The shared server's resident memory is **flat** (~80 MB) no matter how many
+sessions or workers — one process, measured not to grow across a 200-session
+run. The real freeze incident was ~10 concurrent instances; the swarm column
+shows why the machine wedged there.
+
+The honest trade-off: the swarm gets true multi-core parallelism (separate
+processes) and is *faster* at low concurrency — but its memory explodes with
+concurrency and it seizes up past ~10. The shared server serializes CPU-bound
+work through one process (GIL), so raw throughput is lower, but memory stays
+bounded and it **never freezes the host** — the right choice for running a mass
+re-audit unattended on a laptop, throttled to a small worker pool.
+
 ## "http" here is **local**, not the network
 
 This is not a cloud service and nothing leaves your machine:
