@@ -186,6 +186,12 @@ cd ~/dev/ai-r && bash install.sh
 MCP に対して実行して検証します（pytest を補完します）。完全な一覧は
 [`docs/scenarios.md`](./docs/scenarios.md) を参照してください。
 
+<!-- gallery:start -->
+## 実例: ai-r の実力
+
+機能ごとに 1 つずつまとめた実例のギャラリー（エラー分析、危険なコマンド、ネットワークの軌跡、トークン消費、プラン内コメント、コミットのファントムチェック、エージェント横断のファイル履歴、言語横断検索、ゾンビサブエージェント、git なしの差分）: [`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md)。
+<!-- gallery:end -->
+
 ## 次に — ドキュメント
 
 - メソッド語彙（動詞 + プリセット）— [`docs/methods.md`](./docs/methods.md)

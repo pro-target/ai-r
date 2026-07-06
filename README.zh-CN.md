@@ -160,6 +160,12 @@ cd ~/dev/ai-r && bash install.sh
 
 整个公开接口都由端到端场景覆盖，这些场景由 LLM 智能体针对活跃的 MCP 逐一执行（对 pytest 形成补充）。完整清单见 [`docs/scenarios.md`](./docs/scenarios.md)。
 
+<!-- gallery:start -->
+## 示例：ai-r 实战
+
+一个真实示例画廊——每项能力一例（错误分析、危险命令、网络踪迹、令牌消耗、计划评注、提交幻影核查、跨智能体文件历史、跨语言搜索、僵尸子智能体、无 git 的 diff）：[`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md)。
+<!-- gallery:end -->
+
 ## 下一步——文档
 
 - 方法词汇表（动词 + 预设）—— [`docs/methods.md`](./docs/methods.md)

@@ -189,6 +189,12 @@ La superficie pública está cubierta por escenarios e2e que un agente LLM ejecu
 contra un MCP en vivo (complementan a pytest, no lo reemplazan). La lista completa
 está en [`docs/scenarios.md`](./docs/scenarios.md).
 
+<!-- gallery:start -->
+## Ejemplo: ai-r en acción
+
+Una galería de ejemplos reales — uno por capacidad (análisis de errores, comandos peligrosos, rastro de red, gasto de tokens, comentarios de plan, verificación de commits fantasma, historial de archivos entre agentes, búsqueda multilingüe, subagentes zombis, diff sin git): [`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md).
+<!-- gallery:end -->
+
 ## Siguiente — documentación
 
 - Vocabulario de métodos (verbos + presets) — [`docs/methods.md`](./docs/methods.md)
