@@ -629,7 +629,7 @@ def test_reload_after_idle_release_through_fake_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """After an idle release the next request re-probes and re-loads cleanly."""
-    fake_ort = _fake_runtime_modules(monkeypatch)
+    _fake_runtime_modules(monkeypatch)
     monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
     monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
 

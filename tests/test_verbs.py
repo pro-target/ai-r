@@ -27,7 +27,7 @@ import pytest
 from ai_r.events import aggregate, detect_current, diff, query
 from ai_r.file_frequency import file_frequency
 from ai_r.find_file_edits import find_file_edits
-from ai_r.parsers import PARSERS, iso, target_agents
+from ai_r.parsers import PARSERS, target_agents
 from ai_r.session_diff import session_diff
 from ai_r.session_stats import group_key, session_stats
 

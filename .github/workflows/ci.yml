@@ -70,7 +70,7 @@ jobs:
           python -c "import ai_r.legacy_compat"
       - name: Ruff lint
         run: |
-          ruff check src/
+          ruff check src/ tests/
       - name: Mypy type-check
         run: |
           mypy src/
