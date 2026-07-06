@@ -109,5 +109,6 @@ select = ["F", "E9"]
 python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
-# Codebase is not fully annotated yet — opt into strictness per-module later.
-check_untyped_defs = false
+# Type-check the bodies of unannotated functions too (audit: without this
+# mypy silently skips them). Verified clean across src/, so it is now enforced.
+check_untyped_defs = true
