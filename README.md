@@ -251,6 +251,12 @@ many idle seconds (default `300`); the next request transparently re-loads it.
 
 The public surface is covered by end-to-end scenarios an LLM agent runs against the live MCP (complementing pytest). Full list — [`docs/scenarios.md`](./docs/scenarios.md).
 
+<!-- gallery:start -->
+## Example: ai-r in action
+
+A gallery of real examples — one per capability (error analysis, dangerous commands, network trail, token burn, plan comments, commit phantom-check, cross-agent file history, cross-lingual search, zombie subagents, git-less diff): [`docs/examples/showcase-gallery.md`](./docs/examples/showcase-gallery.md).
+<!-- gallery:end -->
+
 ## Next — documentation
 
 - Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
