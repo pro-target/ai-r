@@ -175,6 +175,16 @@ records adding an optional shared transport as the fix.
   `streamable-http` server (localhost, default `127.0.0.1:8756`, path `/mcp`)
   that every agent connects to over HTTP instead of spawning its own process.
   One process → one warm cache → the corpus is scanned once, not per agent.
+- **Cache must hold the corpus.** The warm-scan win is real only if the
+  body-search haystack cache can hold every session; a cap below the corpus
+  size makes a full-corpus `scope="body"` search thrash the LRU and re-parse
+  every file. Measured on a ~1492-session corpus: at the old 256 cap the
+  "warm" repeat was as slow as cold (1x); with the cap above the corpus it is
+  ~17× faster (~150 s → ~9 s). The cap default is raised to 2048 and tunable
+  via `AI_R_HAYSTACK_CACHE_MAX`; per-entry size stays bounded by
+  `_HAYSTACK_CHARS_CAP`. Independent of the cache, the transport's other win —
+  N resident processes collapsing to 1 (measured: 4 cold servers ≈ +1.2 GB
+  RSS) — holds unconditionally.
 - **Idle-off + respawn.** The server self-exits after `AI_R_MCP_IDLE_SEC`
   (default 900 s) with no in-flight and no recent request, and it accepts a
   systemd socket-activation fd (`LISTEN_FDS`/`LISTEN_PID`), so a `.socket` unit

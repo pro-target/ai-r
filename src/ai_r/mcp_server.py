@@ -126,7 +126,30 @@ _LIST_LIMIT_DEFAULT = 100
 # shared across all sessions, so a DB mtime bump invalidates every OpenCode
 # session's entry at once — which is the correct, safe behavior since any
 # session may have grown.
-_HAYSTACK_CACHE_MAX = 256
+# Cache size cap. The shared long-lived http server
+# (``AI_R_MCP_TRANSPORT=http``) holds ONE warm cache for every agent, so it
+# must be able to hold a whole corpus: a cap below the session count makes a
+# full-corpus ``scope="body"`` search thrash — it LRU-evicts the very entries
+# it is about to reuse and re-parses every file, erasing the warm-repeat win.
+# Measured on a ~1492-session corpus: at the old 256 cap the "warm" repeat was
+# as slow as cold (1x); with the cap above the corpus it is ~17x faster.
+# Default holds a large corpus; tune with ``AI_R_HAYSTACK_CACHE_MAX``. Each
+# entry is already bounded by ``_HAYSTACK_CHARS_CAP`` so total stays bounded.
+def _resolve_haystack_cache_max(env: Optional[dict] = None) -> int:
+    env = os.environ if env is None else env
+    raw = env.get("AI_R_HAYSTACK_CACHE_MAX")
+    if raw:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _HAYSTACK_CACHE_MAX_DEFAULT
+        if value > 0:
+            return value
+    return _HAYSTACK_CACHE_MAX_DEFAULT
+
+
+_HAYSTACK_CACHE_MAX_DEFAULT = 2048
+_HAYSTACK_CACHE_MAX = _resolve_haystack_cache_max()
 # Soft TTL is a defensive backstop only: if a source path cannot be statted
 # (OSError), we still serve a cached entry but bound its staleness so a
 # transiently-unreadable file does not pin stale content forever.
