@@ -26,6 +26,11 @@
 #   AI_R_SEMANTIC_MODEL_DIR
 #                  where the semantic model files are stored (default:
 #                  ~/.cache/ai-r/semantic/multilingual-e5-small)
+#   AI_R_MCP_SYSTEMD
+#                  =1 installs the systemd --user socket-activation units for
+#                  the shared streamable-http server (one warm process for all
+#                  agents, idle-off + respawn). Opt-in, non-destructive: copies
+#                  the units and prints the enable command, never auto-enables.
 #   DRY_RUN        if set to 1, the script prints what it would do and exits
 
 set -euo pipefail
@@ -235,6 +240,28 @@ if [[ ",${AI_R_EXTRAS:-}," == *",semantic,"* ]]; then
         warn "Manual download into $SEM_DIR :"
         warn "  $SEM_BASE/onnx/model_qint8_avx512_vnni.onnx"
         warn "  $SEM_BASE/tokenizer.json"
+    fi
+fi
+
+# --- 4c. optional systemd --user socket-activation (AI_R_MCP_SYSTEMD=1) ---
+# Installs the shared streamable-http server as a socket-activated user service
+# (one warm process for every agent, idle-off + respawn-on-demand) instead of
+# a per-agent stdio swarm. Opt-in and non-destructive: copies the units and
+# prints the enable command; never auto-enables, never touches running servers.
+if [[ "${AI_R_MCP_SYSTEMD:-}" == "1" ]]; then
+    hdr "Optional: systemd --user socket-activation (shared ai-r-mcp http server)"
+    UNIT_SRC="${REPO_DIR}/packaging/systemd"
+    UNIT_DST="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    if command -v systemctl >/dev/null 2>&1; then
+        run mkdir -p "$UNIT_DST"
+        run cp "$UNIT_SRC/ai-r-mcp.socket" "$UNIT_DST/"
+        run cp "$UNIT_SRC/ai-r-mcp.service" "$UNIT_DST/"
+        run systemctl --user daemon-reload
+        log "units installed: $UNIT_DST/ai-r-mcp.{socket,service}"
+        log "enable with:  systemctl --user enable --now ai-r-mcp.socket"
+        log "then set agent MCP configs to http://127.0.0.1:8756/mcp"
+    else
+        warn "systemctl not found — skipping units (http still works via AI_R_MCP_TRANSPORT=http)"
     fi
 fi
 
