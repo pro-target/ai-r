@@ -86,6 +86,7 @@ __all__ = [
     "COMPONENT_FIELDS",
     "component_tokens",
     "estimate_tokens",
+    "rollup_component_tokens",
     "session_tokens",
 ]
 
@@ -319,6 +320,98 @@ def component_tokens(
     block["source"] = "estimate"
     block["estimator"] = estimator
     return block
+
+
+def rollup_component_tokens(
+    parent: Optional[dict[str, Any]],
+    children: Sequence[Optional[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Fold a parent + its spawned children ``component_tokens`` blocks — SSOT.
+
+    This is the ONE place that knows the parent/child token relationship, so
+    both rollup callers (``read_session(include_subagents)`` and the CLI
+    ``ai-r read --with-tokens --subagents``) share identical semantics.
+
+    Two correctness rules baked in here:
+
+    * **No subagent double count (NIT 2).**  A subagent spawn writes its
+      input + returned report into the PARENT transcript as a ``task``-kind
+      tool call, and the SAME text is the child's own turns in the child
+      transcript.  Summing the parent block's ``tool_call["task"]`` *and*
+      every child block would count that subagent's work twice.  When at
+      least one child is rolled up, the parent's ``task`` bucket is therefore
+      dropped from the fold — the child blocks are the authoritative,
+      per-child accounting of exactly that work.  A childless rollup keeps
+      the parent ``task`` bucket (nothing else accounts for it — e.g. an
+      agent that records no ``parent_uuid`` and whose children are invisible).
+    * **Absence stays absent (NIT 3).**  When neither the parent nor any
+      child contributed a usable block, ``total`` is ``None`` (unknown), never
+      a fabricated ``0`` — mirrors :func:`component_tokens` returning ``None``
+      for an all-empty transcript.
+
+    Returns a fold with the same shape ``component_tokens`` emits plus two
+    provenance counters::
+
+        {"user_turn": n, ..., "tool_call": {<kind>: n, ...},
+         "total": <int|None>, "estimated": <#blocks>, "unknown": <#no-block>,
+         "source": "estimate"?, "estimator": <label>?}
+
+    ``source``/``estimator`` are present only when at least one block
+    contributed.  ``estimated + unknown == 1 + len(children)``.
+    """
+    has_children = len(children) > 0
+
+    scalars: dict[str, int] = {}
+    tool_call: dict[str, int] = {}
+    estimated = unknown = 0
+    estimator: Optional[str] = None
+
+    def _fold(block: Optional[dict[str, Any]], *, is_parent: bool) -> None:
+        nonlocal estimated, unknown, estimator
+        if isinstance(block, bool) or not isinstance(block, dict):
+            unknown += 1
+            return
+        if block.get("source") == "estimate":
+            estimated += 1
+        else:
+            unknown += 1
+        if estimator is None and isinstance(block.get("estimator"), str):
+            estimator = block["estimator"]
+        for field in COMPONENT_FIELDS:
+            val = block.get(field)
+            if isinstance(val, int) and not isinstance(val, bool):
+                scalars[field] = scalars.get(field, 0) + val
+        sub = block.get("tool_call")
+        if isinstance(sub, dict):
+            for kind, val in sub.items():
+                # Drop the parent's ``task`` bucket when children are rolled
+                # up separately (they already account for that work) — the
+                # NIT 2 double-count fix.
+                if is_parent and has_children and kind == "task":
+                    continue
+                if isinstance(kind, str) and isinstance(val, int) \
+                        and not isinstance(val, bool):
+                    tool_call[kind] = tool_call.get(kind, 0) + val
+
+    _fold(parent, is_parent=True)
+    for child in children:
+        _fold(child, is_parent=False)
+
+    out: dict[str, Any] = dict(scalars)
+    if tool_call:
+        out["tool_call"] = tool_call
+    # NIT 3: nothing measurable anywhere → total is unknown (None), not 0.
+    if estimated == 0:
+        out["total"] = None
+    else:
+        out["total"] = sum(scalars.values()) + sum(tool_call.values())
+    out["estimated"] = estimated
+    out["unknown"] = unknown
+    if estimated:
+        out["source"] = "estimate"
+    if estimator is not None:
+        out["estimator"] = estimator
+    return out
 
 
 def _empty_block() -> dict[str, Any]:
