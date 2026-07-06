@@ -82,6 +82,7 @@ from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
 from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
 from ai_r.resume import resume_command  # noqa: E402
 from ai_r.activity import session_activity, stall_seconds  # noqa: E402
+from ai_r.serve import resolve_transport, run_http  # noqa: E402
 from ai_r.redact import (  # noqa: E402
     merge_redaction_counts as _merge_redactions,
     redact_value as _redact_value,
@@ -2347,9 +2348,18 @@ def _extract_snippet(haystack: str, terms: list[str], max_len: int = 200) -> str
 
 
 def main() -> int:
-    """Entry point for the ``ai-r-mcp`` console script."""
-    mcp.run(transport="stdio")
-    return 0
+    """Entry point for the ``ai-r-mcp`` console script.
+
+    Transport is selected by ``AI_R_MCP_TRANSPORT`` (default ``stdio`` for full
+    back-compat).  ``http`` runs a single shared streamable-http server on
+    localhost — the fix for the per-agent stdio swarm that re-scans the corpus
+    N times (see :mod:`ai_r.serve`).
+    """
+    transport = resolve_transport()
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return 0
+    return run_http(mcp)
 
 
 if __name__ == "__main__":

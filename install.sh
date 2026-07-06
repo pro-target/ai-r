@@ -19,7 +19,10 @@
 #                  tiktoken for better token estimates in session_stats
 #                  with_tokens; "semantic" to add onnxruntime+tokenizers AND
 #                  download the local embedding model for sort="semantic";
-#                  default: none — ai-r works without extras)
+#                  "http" to add uvicorn for the shared streamable-http MCP
+#                  transport (AI_R_MCP_TRANSPORT=http, one server not a
+#                  per-agent stdio swarm); default: none — ai-r works without
+#                  extras)
 #   AI_R_SEMANTIC_MODEL_DIR
 #                  where the semantic model files are stored (default:
 #                  ~/.cache/ai-r/semantic/multilingual-e5-small)

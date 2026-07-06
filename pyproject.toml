@@ -44,6 +44,13 @@ semantic = [
     "tokenizers>=0.15",
     "numpy>=1.24",
 ]
+# Shared streamable-http MCP transport (`AI_R_MCP_TRANSPORT=http`): one
+# long-lived localhost server instead of a per-agent stdio swarm. Fully
+# optional — the default stdio transport needs nothing here. `uvicorn` is
+# imported lazily inside `ai_r.serve.run_http`, so stdio users never load it.
+http = [
+    "uvicorn>=0.30",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",

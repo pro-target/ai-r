@@ -117,6 +117,7 @@ Three cross-cutting modules sit beside the core:
 | `redact.py` | Secret redaction on every emitting surface (title, message content, intent, qa) as `[REDACTED_<TYPE>]`, with a `redactions` type→count report. On by default. |
 | `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. |
 | `semantic.py` | Optional relevance re-rank (see ADR below): re-ranks the BM25 top-50 with a local ONNX embedding model. Strictly opt-in, fail-soft to BM25. |
+| `serve.py` | MCP transport selection (see ADR below): `stdio` by default, opt-in shared `streamable-http` server with idle self-exit and systemd socket-activation support. Pure predicates (`resolve_transport`, `should_exit_idle`, `systemd_listen_sockets`) + a thin uvicorn runner. |
 
 ## Decisions
 
@@ -159,3 +160,32 @@ the reversal and its boundaries.
 - **Zero-LLM invariant preserved.** The embedder computes vector similarities;
   it generates no text and makes no model/network API call. The "no generative
   model in the read path" invariant holds — this is retrieval math, not an LLM.
+
+### ADR: shared http transport (one server, not a per-agent stdio swarm)
+
+The MCP server originally ran **stdio only**. Under stdio, every agent — and
+every *subagent* — spawns its own `ai-r-mcp` process, each with a cold,
+per-process cache, so N concurrent agents re-scan the whole session corpus N
+times. On a real multi-agent fan-out this exhausted host RAM (swap thrash →
+compositor starvation → graphical artifacts); a session audit measured ten
+`ai-r-mcp` instances alive at once, two of them pinned at 20 % CPU. This ADR
+records adding an optional shared transport as the fix.
+
+- **What changed.** `AI_R_MCP_TRANSPORT=http` runs a single long-lived
+  `streamable-http` server (localhost, default `127.0.0.1:8756`, path `/mcp`)
+  that every agent connects to over HTTP instead of spawning its own process.
+  One process → one warm cache → the corpus is scanned once, not per agent.
+- **Idle-off + respawn.** The server self-exits after `AI_R_MCP_IDLE_SEC`
+  (default 900 s) with no in-flight and no recent request, and it accepts a
+  systemd socket-activation fd (`LISTEN_FDS`/`LISTEN_PID`), so a `.socket` unit
+  keeps the listener and respawns the service on the next connection — zero
+  resident processes when idle. Idle-exit never fires while a request is in
+  flight (active-request counter).
+- **Boundaries.** Bind is localhost-only; `uvicorn` is imported lazily and
+  shipped as the optional `ai-r[http]` extra, so stdio users need nothing new.
+  The activity wrapper is raw-ASGI (not Starlette `BaseHTTPMiddleware`) so it
+  never buffers the long-lived streaming responses streamable-http relies on.
+- **Back-compat / fail-closed.** `stdio` stays the default — existing sessions
+  are unaffected until they opt in, with no mid-session break. An unrecognized
+  `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
+  transport.
