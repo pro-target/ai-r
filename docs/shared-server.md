@@ -100,9 +100,17 @@ This is not a cloud service and nothing leaves your machine:
 1. Install with the http extra and the units:
    `AI_R_EXTRAS=http AI_R_MCP_SYSTEMD=1 bash install.sh`
 2. Enable the socket: `systemctl --user enable --now ai-r-mcp.socket`
-3. Point each agent's MCP config at `http://127.0.0.1:8756/mcp`
-   (Claude: `{"type":"http","url":"http://127.0.0.1:8756/mcp"}`;
-   OpenCode: `{"type":"remote","url":"http://127.0.0.1:8756/mcp"}`).
+3. Point each agent at `http://127.0.0.1:8756/mcp` (Claude:
+   `{"type":"http","url":"…"}`; OpenCode: `{"type":"remote","url":"…"}`).
+   Prefer each tool's CLI over hand-editing its JSON — e.g.
+   `claude mcp add --transport http ai-r http://127.0.0.1:8756/mcp -s user` —
+   because Claude Code rewrites `~/.claude.json` from memory and can clobber a
+   hand-added entry (see [mcp-registration.md](mcp-registration.md)).
+
+The committed root `.mcp.json` stays **stdio** — the portable default for anyone
+who has not set up the shared server; don't commit the `127.0.0.1:8756` URL
+there. Enable http per machine at `user` or `local` scope (`local` overrides the
+committed `project` stdio in this repo).
 
 stdio stays the default and keeps working — http is strictly opt-in, and
 switching one agent does not affect any other. Running sessions keep their

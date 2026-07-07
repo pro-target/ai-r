@@ -10,6 +10,21 @@ path if your install lives elsewhere (`which ai-r-mcp` tells you).
 
 ## Claude Code
 
+> **Prefer the CLI over hand-editing.** Claude Code rewrites `~/.claude.json`
+> from its own in-memory state, so an `mcpServers` entry you add by hand can be
+> silently clobbered by a running instance. Register with the CLI instead — it
+> writes the app-managed config that survives:
+>
+> ```bash
+> # shared http server (see shared-server.md):
+> claude mcp add --transport http ai-r http://127.0.0.1:8756/mcp
+> # or stdio:
+> claude mcp add ai-r /home/USER/.local/bin/ai-r-mcp
+> ```
+>
+> The hand-written JSON below still works, but only if you fully quit Claude
+> Code first.
+
 Edit `~/.claude.json` (top-level `mcpServers` object):
 
 ```json
