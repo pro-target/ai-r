@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`query`'s `kind` fail-loud tombstone is scheduled for removal in `0.6.0`.**
+  The removed `kind` facet survives in the MCP wrapper only as a fail-loud
+  tombstone (any value → `invalid_argument` pointing at `noise`, see 0.4.0
+  *Removed*). It is kept through the `0.5.x` line as a migration window and
+  removed in `0.6.0`, by when callers have moved to `noise`.
+
 ### Fixed
 
 - **Unknown MCP tool arguments now fail loud instead of being silently

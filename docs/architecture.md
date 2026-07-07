@@ -292,6 +292,9 @@ records adding an optional shared transport as the fix.
   returns `invalid_argument` for any value, pointing the caller at `noise`. The
   core `query` (Python API) has no `kind` at all (a direct call raises
   `TypeError`).
+- **Tombstone lifespan.** The `kind` tombstone is kept through the `0.5.x` line
+  and removed in `0.6.0` — a bounded fail-loud window giving callers time to
+  migrate to `noise`, after which the dead parameter leaves the hot path.
 - **Boundaries / invariants.** Both facets are ignored on the `relative_to`
   walk (the anchor pins one session), consistent with `noise`/`project_dir`;
   validation still runs up-front so a malformed value fails loud even there.
