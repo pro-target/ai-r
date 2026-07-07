@@ -20,7 +20,11 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectControlGroups=true
 ProtectKernelTunables=true
-ProtectKernelModules=true
+# ProtectKernelModules is intentionally omitted: in a `systemd --user` service it
+# must drop CAP_SYS_MODULE from the bounding set, which needs CAP_SETPCAP the user
+# manager often lacks -> the unit fails at the CAPABILITIES exec step (status=218)
+# and, with Restart=on-failure, crash-loops. The server never loads modules, so
+# the remaining Protect*/Restrict* directives keep the hardening that matters.
 RestrictSUIDSGID=true
 RestrictRealtime=true
 # http transport; the server picks up the socket systemd passes via
@@ -31,9 +35,20 @@ Environment=AI_R_MCP_TRANSPORT=http
 # process when idle, respawn on demand.
 Environment=AI_R_MCP_IDLE_SEC=900
 ExecStart=%h/.local/bin/ai-r-mcp
-# Idle self-exit is normal, not a failure; let the socket (not systemd) drive
-# respawn, so do not auto-restart on clean exit.
-Restart=no
+# Idle self-exit (exit 0) is normal -> NOT restarted; the socket re-activates the
+# service on the next connection. But a crash or an OOM SIGKILL MUST self-heal:
+# under a memory-pressure spike systemd-oomd can SIGKILL this cgroup, and with
+# Restart=no that left the service stuck `failed` (socket listening, but the
+# next connection hit a dead service). Restart on failure only -> idle-off keeps
+# its zero-resident behavior, crashes recover.
+Restart=on-failure
+RestartSec=2
+# The shared server is tiny (~55M RSS) and every agent depends on it; it must not
+# be systemd-oomd's first victim while the per-agent process swarm it replaces is
+# what actually exhausts RAM. Deprioritize it for the OOM killer and give its
+# cgroup a low-memory protection floor.
+OOMScoreAdjust=-400
+MemoryLow=96M
 
 [Install]
 # Reached through the socket; no direct WantedBy needed.
