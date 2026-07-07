@@ -10,12 +10,15 @@ fastest path from idea to merge is:
    `fix/<short-name>`, `docs/<short-name>`.
 3. **Write the change + tests.** New parsers need unit tests with
    fixtures under `tests/fixtures/`.
-4. **Run the full test suite + linters locally:**
+4. **Run the full test suite + linters locally — before every push:**
    ```bash
    pip install -e ".[dev]"
    pytest --cov=src/ai_r
+   make lint          # import smoke + `ruff check src/` + `mypy src/`
    ```
    Coverage must stay ≥ 85% (`pyproject.toml` enforces this in CI).
+   `make lint` mirrors the CI `lint` job exactly, so a red lint (e.g. a
+   `mypy` type error) is caught here, not after the push.
 5. **Run the LLM e2e acceptance scenarios** whenever the change adds
    or modifies functionality (a new MCP tool or parameter, any
    behaviour change on the public surface). Both gates must pass —

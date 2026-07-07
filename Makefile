@@ -14,8 +14,12 @@ test-hermetic:
 test-host:
 	pytest -m host
 
+# Mirrors the CI `lint` job exactly (import smoke + ruff + mypy) so a red lint
+# is caught HERE, before push — not on CI. Run before every push.
 lint:
 	python -c "import ai_r, ai_r.cli, ai_r.mcp_server, ai_r.parsers"
+	ruff check src/
+	mypy src/
 
 # Self-referential usage audit (CONTRIBUTING → Releasing): which ai-r verbs/params were
 # actually called since the last release. Reads a real vault. Run once per
