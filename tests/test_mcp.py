@@ -2647,6 +2647,30 @@ def test_query_relative_prev_direct(
     assert [e["text"] for e in res["events"]] == ["Run the tests"]
 
 
+def test_query_n_schema_accepts_integer_default_one() -> None:
+    # ``n`` is a positive-int count OR the sentinel ``"all"``; the MCP schema
+    # must expose the integer arm (a string-only ``n`` misled LLM callers into
+    # quoting the count) and default to a real ``1``, not ``"1"``.
+    n_schema = mcp._tool_manager._tools["query"].parameters["properties"]["n"]
+    types = {arm.get("type") for arm in n_schema.get("anyOf", [])}
+    assert {"integer", "string"} <= types
+    assert n_schema["default"] == 1
+
+
+def test_query_n_accepts_int_all_and_str_equivalently(
+    fake_claude_session_with_tools: Path,
+) -> None:
+    anchor = query(type="tool_call", agent="claude")["events"][0]["id"]
+    walk = lambda nv: [  # noqa: E731 - terse local for the three-way parity check
+        e["text"] for e in query(relative_to=anchor, direction="prev", n=nv)["events"]
+    ]
+    # int 1 (new default type), legacy str "1", and the default all agree.
+    assert walk(1) == walk("1") == ["Run the tests"]
+    # "all" (sentinel) still walks; a bad value still fails loud.
+    assert query(relative_to=anchor, direction="prev", n="all")["count"] >= 1
+    assert query(relative_to=anchor, n="two")["error"] == "invalid_argument"
+
+
 def test_query_invalid_direction_returns_error_dict() -> None:
     res = query(relative_to="x:0", direction="sideways")
     assert res["error"] == "invalid_argument"

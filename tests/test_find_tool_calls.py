@@ -246,14 +246,42 @@ def _write_claude_session_with_outcomes(
 # ---------------------------------------------------------------------------
 
 
-def test_find_tool_calls_neither_set_raises() -> None:
-    with pytest.raises(ValueError, match="exactly one"):
+def test_find_tool_calls_no_filters_at_all_raises() -> None:
+    """A fully unfiltered call — no name, no pattern, no content filter —
+    stays a loud error (FTC-1 contract)."""
+    with pytest.raises(ValueError, match="at least one content filter"):
         find_tool_calls()
 
 
-def test_find_tool_calls_both_set_raises() -> None:
-    with pytest.raises(ValueError, match="exactly one"):
+def test_find_tool_calls_both_names_set_raises() -> None:
+    """``tool_name`` and ``tool_name_pattern`` together is still an error."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
         find_tool_calls(tool_name="X", tool_name_pattern="Y")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"input_contains": "git"},
+        {"output_contains": "boom"},
+        {"output_excludes": "noise"},
+        {"is_error": True},
+        {"is_error": False},
+    ],
+)
+def test_find_tool_calls_nameless_with_content_filter_is_valid(
+    kwargs: dict,
+) -> None:
+    """Omitting both name filters is allowed when at least one content
+    filter is present (FTC-3 "any tool with this signal" composition).
+
+    Runs against an empty hermetic corpus (no monkeypatched sessions):
+    the call must NOT raise on validation and must return the normal
+    empty-result envelope with ``diagnostics``.
+    """
+    result = find_tool_calls(agent="claude", **kwargs)
+    assert result["count"] == 0
+    assert "diagnostics" in result
 
 
 def test_find_tool_calls_empty_tool_name_raises() -> None:
@@ -832,6 +860,61 @@ def test_find_tool_calls_surfaces_is_error_and_output(
     assert err["output"] == "boom: command failed"
 
 
+def test_find_tool_calls_nameless_is_error_true_subset(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nameless call filtered only by ``is_error=True`` returns exactly
+    the failing calls across tools (FTC-3 "domain × error" composition).
+
+    The corpus has two ``Bash`` calls — one succeeding, one failing.  The
+    nameless ``is_error=True`` call must return only the failing one, and
+    ``is_error=False`` only the succeeding one.
+    """
+    _write_claude_session_with_outcomes(tmp_sessions_dir, "ftc-nameless-err")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir",
+        lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
+    )
+    failing = find_tool_calls(agent="claude", is_error=True)
+    assert failing["count"] == 1
+    assert failing["records"][0]["is_error"] is True
+    assert failing["records"][0]["input"] == {"command": "false"}
+
+    succeeding = find_tool_calls(agent="claude", is_error=False)
+    assert succeeding["count"] == 1
+    assert succeeding["records"][0]["is_error"] is False
+    assert succeeding["records"][0]["input"] == {"command": "true"}
+
+
+def test_find_tool_calls_nameless_and_composition_input_and_error(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nameless ``input_contains`` × ``is_error=True`` call is an AND:
+    it returns only calls whose input matches AND that failed.
+
+    The corpus has a failing ``false`` call and a succeeding ``true``
+    call.  ``input_contains="false"`` + ``is_error=True`` selects the
+    failing one; ``input_contains="true"`` + ``is_error=True`` selects
+    nothing (the ``true`` call succeeded).
+    """
+    _write_claude_session_with_outcomes(tmp_sessions_dir, "ftc-nameless-and")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir",
+        lambda bd=None: tmp_sessions_dir / ".claude" / "projects",
+    )
+    hit = find_tool_calls(
+        agent="claude", input_contains="false", is_error=True
+    )
+    assert hit["count"] == 1
+    assert hit["records"][0]["input"] == {"command": "false"}
+
+    miss = find_tool_calls(
+        agent="claude", input_contains="true", is_error=True
+    )
+    assert miss["count"] == 0
+    assert "diagnostics" in miss
+
+
 def test_find_tool_calls_no_result_defaults_to_not_error(
     tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1319,15 +1402,16 @@ def test_mcp_find_tool_calls_happy_path(
 
 
 def test_mcp_find_tool_calls_invalid_arg_returns_error_dict() -> None:
-    """Both/neither filter -> ``ValueError`` -> ``invalid_argument`` dict."""
+    """Fully unfiltered / both-names -> ``ValueError`` -> ``invalid_argument``."""
     neither = mcp_find_tool_calls()
     assert isinstance(neither, dict)
     assert neither.get("error") == "invalid_argument"
-    assert "exactly one" in neither["message"].lower()
+    assert "content filter" in neither["message"].lower()
 
     both = mcp_find_tool_calls(tool_name="X", tool_name_pattern="Y")
     assert isinstance(both, dict)
     assert both.get("error") == "invalid_argument"
+    assert "mutually exclusive" in both["message"].lower()
 
 
 def test_mcp_find_tool_calls_unknown_agent_returns_error_dict() -> None:
@@ -1459,7 +1543,7 @@ def test_cli_find_tool_calls_neither_exits_2(
         env={"AI_R_HOME": str(tmp_sessions_dir)},
     )
     assert rc == 2
-    assert "exactly one" in err.lower()
+    assert "content filter" in err.lower()
 
 
 def test_cli_find_tool_calls_both_exits_2(

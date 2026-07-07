@@ -16,8 +16,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every runnable scenario; `[needs-real-vault]` scenarios without vault
   data are skipped, not failed; a NO-GO blocks the merge).
 
+### Changed
+
+- **Coverage threshold unified at 85%.** `pyproject.toml` (`fail_under`) now
+  matches the CI gate (`--cov-fail-under=85`); `CONTRIBUTING.md`, the PR
+  template and `docs/parsers.md` no longer say 80% (the 5 READMEs already
+  said ≥85%). Actual coverage stays well above (~90%).
+- **`query`'s `n` parameter is integer-typed.** The MCP schema exposed `n`
+  as string-only (default `"1"`), pushing LLM callers to quote the count;
+  it is now `integer | "all"` with an integer default of `1` (the string
+  `"1"` and the `"all"` sentinel remain accepted — behaviour unchanged).
+- **Parser contract documented as five functions.** `docs/parsers.md` and
+  `CONTRIBUTING.md` now list all five parser functions
+  (`list_sessions` / `read_session` / `read_messages` / `search` /
+  `session_exists`, per `docs/architecture.md`) instead of four.
+
 ### Fixed
 
+- **`get_body` on a `tool_call` id returns the full call `input`** (was the
+  bare tool name). The reference-by-default route `find_file_edits` promises
+  (`input_sha256`) now resolves on demand — same payload, matching sha256 and
+  length — respecting `max_chars` and `redact`. Closed the FFE-3 scenario.
+- **`find_tool_calls` name filter is now optional.** A call may compose purely
+  by content filters (`input_contains` / `output_contains` / `output_excludes`
+  / `is_error`) with no `tool_name`/`tool_name_pattern` — the documented
+  "domain × error" pattern (FTC-3). Setting both names, or passing no filter at
+  all, still fails loud (FTC-1 unchanged).
+- **Claude parser detects format-only tool errors.** A failed `tool_result`
+  written as `<tool_use_error>…` content, or a record-level
+  `toolUseResult: "Error: …"`, is now derived as `is_error=true` even without
+  the explicit flag (real Claude Code transcripts write failures this way);
+  the explicit flag still wins. `incidents` / `outcome` /
+  `find_tool_calls(is_error=True)` no longer go blind on such sessions.
 - **`docs/scenarios.md` naming drift:** READ-4/READ-5 (and the summary
   table) referred to `summary.tokens` / `summary.component_tokens` /
   `summary.subagent_rollup`; the live MCP surface emits these as

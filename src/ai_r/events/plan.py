@@ -23,10 +23,10 @@ from typing import (
     Tuple,
 )
 
-from ai_r.parsers import PARSERS, target_agents
+from ai_r.parsers import PARSERS, coerce_agent, target_agents
 from ai_r.redact import merge_redaction_counts, redact_value
 
-from ai_r.events._common import _plan_ref_value
+from ai_r.events._common import _coerce_tool_input, _plan_ref_value
 from ai_r.events.model import (
     _PlanResponse,
     _PlanSignal,
@@ -572,6 +572,86 @@ def _feedback_body(
     return _redact_body_fields(result, redact)
 
 
+def _resolve_tool_use(event: Any, stream: Sequence[Any]) -> Optional[dict]:
+    """Return the raw ``tool_use`` dict that produced a ``tool_call`` event.
+
+    A single assistant message can host several tool calls, so the event id
+    alone does not name the tool.  We recover the ordinal the same way
+    :func:`ai_r.events.model._messages_to_events` assigns it: the position of
+    this event among the ``tool_call`` events sharing its ``message_index``,
+    then re-read the session and pick the Nth ``tool_use`` that passed the same
+    ``isinstance(dict)`` + non-empty-``name`` filter the event builder used.
+    Returns ``None`` when the message can't be read or the ordinal is out of
+    range (fail-soft — an audit tool prefers a partial answer to a crash).
+    """
+    ordinal = 0
+    for ev in stream:
+        if ev.id == event.id:
+            break
+        if ev.message_index == event.message_index and str(
+            ev.type
+        ).startswith("tool_call"):
+            ordinal += 1
+    try:
+        parser = PARSERS[coerce_agent(event.agent)]
+    except (KeyError, ValueError):
+        return None
+    try:
+        messages = parser.read_messages(event.session_id)
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    if not (0 <= event.message_index < len(messages)):
+        return None
+    msg = messages[event.message_index]
+    seen = 0
+    for tool in getattr(msg, "tool_use", ()) or ():
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name", "")
+        if not isinstance(name, str) or not name:
+            continue
+        if seen == ordinal:
+            return tool
+        seen += 1
+    return None
+
+
+def _tool_call_body(
+    event: Any,
+    stream: Sequence[Any],
+    *,
+    max_chars: int,
+    redact: bool,
+) -> dict[str, Any]:
+    """On-demand body for a ``tool_call`` event: the full call ``input``.
+
+    Reuses the shared input coerce (:func:`_coerce_tool_input`, the 1 MB
+    size-guarded JSON decode) so the returned ``body`` is byte-identical to the
+    payload :func:`ai_r.find_file_edits.find_file_edits` fingerprints as
+    ``input_sha256`` — for an edit/write call that is the exact content the
+    reference hashes (a dict input passes through unchanged; the same
+    canonical-JSON sha therefore round-trips).  Honours ``max_chars``
+    (``body_truncated``) and emission-time ``redact`` like every other body.
+    """
+    tool = _resolve_tool_use(event, stream)
+    out: dict[str, Any] = {"id": event.id, "type": event.type}
+    if tool is None:
+        # Couldn't recover the raw call (unreadable session / drifted stream):
+        # fall back to the event's tool name so the caller still gets a shape.
+        text, body_truncated = _cap_body(event.text, max_chars)
+        out["text"] = text
+        if body_truncated:
+            out["body_truncated"] = True
+        return _redact_body_fields(out, redact)
+    out["tool"] = tool.get("name", "") or None
+    body = _coerce_tool_input(tool.get("input", ""))
+    body, body_truncated = _cap_body(body, max_chars)
+    out["body"] = body
+    if body_truncated:
+        out["body_truncated"] = True
+    return _redact_body_fields(out, redact)
+
+
 def get_body(
     id: str,
     shallow: bool = False,
@@ -606,9 +686,12 @@ def get_body(
 
     Returns:
         ``{"id", "type", "title"?, "body"?, "steps"?, "status"?, "path"?,
-        "shallow", "body_truncated"?}`` for a plan, or ``{"id", "type",
-        "text", "body_truncated"?}`` for a turn.  ``{"error": ...}`` when the
-        id cannot be resolved.
+        "shallow", "body_truncated"?}`` for a plan, ``{"id", "type",
+        "text", "body_truncated"?}`` for a turn, or ``{"id", "type", "tool",
+        "body", "body_truncated"?}`` for a ``tool_call`` — where ``body`` is
+        the full call ``input`` (the same payload ``find_file_edits``
+        fingerprints as ``input_sha256``).  ``{"error": ...}`` when the id
+        cannot be resolved.
     """
     if not id or ":" not in id:
         return {"error": "invalid_argument", "message": f"invalid id {id!r}"}
@@ -626,8 +709,18 @@ def get_body(
     if event is None:
         return {"error": "not_found", "id": id}
 
+    if event.type.startswith("tool_call"):
+        # Tool-call body: the event only carries the tool NAME as ``text``
+        # (the reference-by-default shape).  Resolve the full call ``input``
+        # on demand here — the same body ``find_file_edits`` fingerprints as
+        # ``input_sha256`` — by re-reading the hosting message and reusing the
+        # shared input extractor (never a second parser).
+        return _tool_call_body(
+            event, stream, max_chars=max_chars, redact=redact
+        )
+
     if event.type != "plan_event":
-        # Turn/tool body: the text already lives on the event.
+        # Turn body: the text already lives on the event.
         text, body_truncated = _cap_body(event.text, max_chars)
         out: dict[str, Any] = {"id": id, "type": event.type, "text": text}
         if body_truncated:

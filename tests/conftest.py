@@ -132,6 +132,109 @@ def fake_claude_session(tmp_sessions_dir: Path) -> Path:
     return jsonl
 
 
+# The exact edit-tool input body shared by ``fake_claude_edit_session`` and its
+# consumers.  A test can import it to reproduce the JSON-canonical form
+# ``find_file_edits`` fingerprints as ``input_sha256`` (and ``get_body``
+# returns verbatim as the tool-call ``body``).
+CLAUDE_EDIT_INPUT: dict[str, str] = {
+    "file_path": "/repo/src/widget.py",
+    "old_string": "def old():\n    return 1\n",
+    "new_string": "def new():\n    return 2\n",
+}
+
+
+@pytest.fixture
+def fake_claude_edit_session(tmp_sessions_dir: Path) -> str:
+    """A Claude session JSONL whose assistant turn performs one ``Edit``.
+
+    Returns the session uuid so a test can scope the scan (``agent="claude"``
+    plus the ``file_path`` substring already isolates this record within the
+    hermetic temp home, but the uuid is handy for assertions).  The edit input
+    is :data:`CLAUDE_EDIT_INPUT` — shared so ``get_body``/``find_file_edits``
+    tests can fingerprint the SAME body.
+    """
+    session_id = "claude-edit-ref-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-a" / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Rename old to new"},
+                "timestamp": "2026-06-20T09:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Editing the widget."},
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": CLAUDE_EDIT_INPUT,
+                        },
+                    ],
+                },
+                "timestamp": "2026-06-20T09:00:05Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
+@pytest.fixture
+def fake_claude_secret_edit(tmp_sessions_dir: Path) -> str:
+    """A Claude ``Write`` whose input embeds a GitHub token (redaction probe).
+
+    Used to prove ``get_body`` masks secrets inside a tool-call ``body`` on
+    output (``redact=True`` default) while ``redact=False`` returns them raw.
+    Returns the session uuid.
+    """
+    session_id = "claude-secret-edit-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-a" / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Save the config"},
+                "timestamp": "2026-06-21T09:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Writing the config file."},
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/repo/.env",
+                                "content": (
+                                    "GITHUB_TOKEN="
+                                    "ghp_0123456789abcdef0123456789abcdef0123\n"
+                                ),
+                            },
+                        },
+                    ],
+                },
+                "timestamp": "2026-06-21T09:00:05Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
 @pytest.fixture
 def fake_claude_subagent(tmp_sessions_dir: Path) -> Path:
     """A Claude subagent session under ``<parent-uuid>/subagents/agent-*.jsonl``.

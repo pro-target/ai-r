@@ -19,7 +19,7 @@
 
 - [ ] `pytest --cov=src/ai_r` passes locally
 - [ ] New tests added (if applicable)
-- [ ] Coverage stays ≥ 80% (`pyproject.toml` enforces this)
+- [ ] Coverage stays ≥ 85% (`pyproject.toml` enforces this)
 - [ ] LLM e2e scenarios pass for changed functionality — GO / GO-with-caveats
       on every runnable scenario ([docs/scenarios.md](./docs/scenarios.md);
       required when the public surface changed)

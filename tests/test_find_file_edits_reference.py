@@ -23,68 +23,20 @@ This module covers the three contract points:
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from ai_r.find_file_edits import find_file_edits as _core
 from ai_r.mcp_server import find_file_edits as _mcp
 
 
-# ---------------------------------------------------------------------------
-# Fixture: a Claude session with one real ``Edit`` tool_use.
-# ---------------------------------------------------------------------------
-
-
+# The ``fake_claude_edit_session`` fixture (a Claude session with one real
+# ``Edit`` tool_use) lives in ``conftest.py`` — shared with the ``get_body``
+# tool-call body tests so both fingerprint the SAME edit input.  ``_EDIT_INPUT``
+# mirrors ``conftest.CLAUDE_EDIT_INPUT`` (kept in step with that fixture).
 _EDIT_INPUT: dict[str, str] = {
     "file_path": "/repo/src/widget.py",
     "old_string": "def old():\n    return 1\n",
     "new_string": "def new():\n    return 2\n",
 }
-
-
-@pytest.fixture
-def fake_claude_edit_session(tmp_sessions_dir: Path) -> str:
-    """A Claude session JSONL whose assistant turn performs one ``Edit``.
-
-    Returns the session uuid so a test can scope the scan (``agent="claude"``
-    plus the ``file_path`` substring already isolates this record within the
-    hermetic temp home, but the uuid is handy for assertions).
-    """
-    session_id = "claude-edit-ref-1"
-    jsonl = (
-        tmp_sessions_dir / ".claude" / "projects" / "proj-a" / f"{session_id}.jsonl"
-    )
-    records = [
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "Rename old to new"},
-            "timestamp": "2026-06-20T09:00:00Z",
-            "sessionId": session_id,
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "Editing the widget."},
-                    {
-                        "type": "tool_use",
-                        "name": "Edit",
-                        "input": _EDIT_INPUT,
-                    },
-                ],
-            },
-            "timestamp": "2026-06-20T09:00:05Z",
-            "sessionId": session_id,
-        },
-    ]
-    jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with jsonl.open("w", encoding="utf-8") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec, ensure_ascii=False))
-            fh.write("\n")
-    return session_id
 
 
 def _widget_records(result: dict) -> list[dict]:

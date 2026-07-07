@@ -91,7 +91,7 @@ exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
 ]
-fail_under = 80
+fail_under = 85
 
 # Lint config — lenient by design so `ruff check` / `mypy src` run clean on
 # the current codebase and tighten incrementally. Enforced in CI (the `lint`

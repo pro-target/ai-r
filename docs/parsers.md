@@ -317,10 +317,10 @@ Use the existing `tests/conftest.py` helpers if it provides
 - [ ] Parser is pure (no network, no global state)
 - [ ] `list_sessions()` returns `[]` on missing root, never raises
 - [ ] `read_session()` raises `FileNotFoundError` for unknown uuid
-- [ ] All four functions honour `base_dir` and `$AI_R_HOME`
+- [ ] All five functions honour `base_dir` and `$AI_R_HOME`
 - [ ] Tests cover: happy path, missing root, missing uuid, search
 - [ ] Title truncated to 100 chars, newlines collapsed
 - [ ] `AgentName` extended; `parsers/__init__.py` updated
 - [ ] `cli.py`, `mcp_server.py` `_PARSERS` updated
-- [ ] Coverage stays ≥ 80% (`pytest --cov`)
+- [ ] Coverage stays ≥ 85% (`pytest --cov`)
 - [ ] Docs (README, CONTEXT, CHANGELOG) updated

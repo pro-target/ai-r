@@ -139,7 +139,9 @@ class Message:
         tool_result: Tuple of ``{"content": str, "is_error": bool}`` dicts
             for tool return values.  ``is_error`` is ``True`` when the
             agent flagged the call as failed.  It is a *real* signal for
-            Claude (``tool_result.is_error``) and OpenCode
+            Claude (the ``tool_result.is_error`` flag, else derived from a
+            ``<tool_use_error>`` content prefix or a record-level
+            ``toolUseResult: "Error: …"``) and OpenCode
             (``state.status == "error"``); for Codex, Antigravity and Pi
             no per-result error flag exists in the source records, so it
             is best-effort and defaults to ``False`` there.  May also carry
