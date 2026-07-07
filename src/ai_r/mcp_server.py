@@ -270,7 +270,7 @@ class _StrictArgsFastMCP(FastMCP):
     answer.  An unknown *tool name* falls through to the base class unchanged.
     """
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):  # type: ignore[override]
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
         tool = self._tool_manager.get_tool(name)
         if tool is not None and isinstance(arguments, dict):
             unknown = _unknown_tool_args(tool.parameters, arguments)
