@@ -444,6 +444,58 @@ def fake_codex_subagent_nested_only(tmp_sessions_dir: Path) -> Path:
 
 
 @pytest.fixture
+def fake_codex_subagent_depth2(tmp_sessions_dir: Path) -> Path:
+    """A depth-2 Codex subagent: its parent is ``test-codex-sub-1`` (itself a
+    subagent of ``test-codex-1``).  Gives a two-level ``parent_uuid`` tree
+    (``test-codex-1`` → ``test-codex-sub-1`` → ``test-codex-sub-3``) so the
+    ``parent`` facet's transitive-closure walk has something to descend."""
+    uuid = "test-codex-sub-3"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T13-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T13:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "cwd": "/tmp/work",
+                    "timestamp": "2026-06-14T13:00:00Z",
+                    "thread_source": "subagent",
+                    "parent_thread_id": "test-codex-sub-1",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "test-codex-sub-1",
+                                "depth": 2,
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-06-14T13:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Deep nested work"}],
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
 def fake_pi_subagent(tmp_sessions_dir: Path) -> Path:
     """A Pi session whose header carries ``parentSession`` (spawned child)."""
     uuid = "test-pi-sub-1"

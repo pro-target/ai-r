@@ -44,7 +44,7 @@ Full spec: [docs/scenarios.md](docs/scenarios.md) — 84 LLM-executed end-to-end
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 12 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; unimplemented facets `kind`/`parent`/`group` **fail loud** ("not yet supported"), never a silent result; session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
+| `query` | 15 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; the `parent` facet scopes to a session's subagent subtree (transitive `parent_uuid` descendants, root excluded, per-agent; unknown uuid → honest empty) and the `group` facet scopes `plan_event`s to one plan-task `task_id` (non-plan events never match) — the former `kind` facet was removed as a duplicate of `noise` (`noise="exclude"`≡top-level, `noise="only"`≡subagents) and now fails loud pointing at `noise` (a fail-loud tombstone, so the transport never silently drops it into an unfiltered scan); session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
 | `get_body` | 6 | Body fetched on-demand by id (turn text / plan text / codex steps / a `tool_call` id → its full call `input` under `body`, the same payload `find_file_edits` references as `input_sha256`, reproducing its sha256/length); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated; a plan-feedback `ref` (`"<session>:pf<N>"`) resolves to the FULL raw plan response (type `plan_feedback`, redacted, capped), out-of-range/unknown refs are `not_found`. |
 | `aggregate` | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
 | `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
@@ -126,13 +126,13 @@ fetched on demand via `get_body(id)`.
 - **Expected:** Survivors are ranked by BM25 (same scorer as `search_sessions`), not by date; the top event is genuinely the most relevant to the term.
 - **Pass criteria:** GO when the top-ranked event is clearly the strongest textual match (relevance ordering, not chronological).
 
-### QRY-7 — fail-loud on unimplemented facets
+### QRY-7 — `parent` facet → a session's subagent subtree
 - **Function:** `query`
-- **Goal:** The not-yet-implemented facets (`kind`/`parent`/`group`) MUST error, not silently return.
-- **Preconditions:** none. `[hermetic-ok]`.
-- **Steps:** `mcp__ai-r__query(kind="subagent")`; also `mcp__ai-r__query(parent="…")` and `mcp__ai-r__query(group="…")`.
-- **Expected:** An error dict `{error:"invalid_argument", message:"… not yet supported …"}` (or equivalent) — **not** an events list.
-- **Pass criteria:** GO only when each of the three facets returns a loud error mentioning "not yet supported". A silent (empty or unfiltered) result is NO-GO.
+- **Goal:** `parent=<uuid>` returns the events of every session spawned under `<uuid>` (transitive `parent_uuid` descendants — direct children AND nested), with the `<uuid>` session itself excluded.
+- **Preconditions:** A vault (or hermetic seed) with a session that spawned subagents, ideally nested (a child that itself spawned a grandchild). `[hermetic-ok]` (subagent fixtures).
+- **Steps:** `mcp__ai-r__query(agent="<a>", parent="<root_uuid>")`; also removed-`kind` sanity: `mcp__ai-r__query(kind="subagent")` must return `{error:"invalid_argument"}` naming `noise` (the facet was removed; it survives only as a fail-loud tombstone so the transport never silently drops it — `noise="only"` is the supported way to isolate subagents).
+- **Expected:** Events come only from descendant sessions of `<root_uuid>` (direct + nested), none from `<root_uuid>` itself; passing `kind` returns the `invalid_argument` error pointing at `noise`, never a silent (unfiltered) events list.
+- **Pass criteria:** GO when the returned session set equals the transitive descendant set (root absent) and `kind=` returns the loud `noise`-pointing error. A missing nested grandchild, `<root_uuid>`'s own events leaking in, or `kind` silently returning events is NO-GO.
 
 ### QRY-8 — `tool_call` events carry an `is_error` outcome (cross-agent best-effort)
 - **Function:** `query`
@@ -175,6 +175,30 @@ fetched on demand via `get_body(id)`.
 - **Steps:** `mcp__ai-r__query(agent="claude", type="user_turn", session=["<A>", "<B>"])`; then the scalar `session="<A>"`; then `session=["<A>", "<A>", "no-such-uuid"]`; then `session=[]`; then `session=["no-such-1", "no-such-2"]`.
 - **Expected:** The list call returns exactly the events of `<A>` and `<B>` — `<C>` never leaks in — in chronological order across both sessions; the scalar call behaves exactly as before (backward compat); duplicates collapse and the unknown uuid contributes nothing (the result equals the scalar `<A>` call — honest empty-miss semantics, no error); `session=[]` → `{error: "invalid_argument", …}` naming `session` (an empty list is ambiguous, never a silent full-corpus scan); the all-unknown list returns `count=0` with the list echoed in `diagnostics.filters.session`.
 - **Pass criteria:** GO when the union is exact (no third-session leak), the scalar form is unchanged, dedup + unknown-uuid semantics hold, the empty list is a loud error, and the zero-match diagnostics echo the list value.
+
+### QRY-13 — `parent` unknown uuid → honest empty
+- **Function:** `query`
+- **Goal:** An unknown `parent` uuid is an honest empty result, never an error and never an unfiltered scan.
+- **Preconditions:** none. `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__query(parent="no-such-uuid")`; then the empty-string form `mcp__ai-r__query(parent="")`.
+- **Expected:** The unknown uuid returns `{"events": [], "count": 0}` (with zero-result `diagnostics`), no `error`; the **empty string** fails loud (`{error:"invalid_argument", …}`).
+- **Pass criteria:** GO when an unknown uuid yields `count=0` with no error and no leak, while the empty string is a loud argument error.
+
+### QRY-14 — `group` facet → one plan-task's revisions
+- **Function:** `query`
+- **Goal:** `group=<task_id>` returns only the `plan_event`s of that plan-task (all its draft+final revisions), excluding other tasks.
+- **Preconditions:** A session with ≥2 plan tasks (distinct `task_id`s). `[hermetic-ok]` (multi-task plan fixture) / `[needs-real-vault]` variant.
+- **Steps:** read a `task_id` from `mcp__ai-r__plan(session="<s>")`; then `mcp__ai-r__query(type="plan_event", session="<s>", group="<task_id>")`.
+- **Expected:** Every returned event is a `plan_event` whose `task_id` equals `<task_id>` (its draft + final revisions); a second task's plan_events are absent. `task_id` is derived from the SSOT plan grouping, not hard-coded.
+- **Pass criteria:** GO when the result is exactly that task's plan_events and no other task's ids appear. Leaking another task, or dropping a revision of the requested one, is NO-GO.
+
+### QRY-15 — `group` with a non-plan type → honest empty
+- **Function:** `query`
+- **Goal:** `group` is a plan-only facet; combined with a non-plan `type` it yields an honest empty result, not an error and not an unfiltered scan.
+- **Preconditions:** none. `[hermetic-ok]`.
+- **Steps:** `mcp__ai-r__query(type="user_turn", group="<any>")`; then the empty-string form `mcp__ai-r__query(group="")`.
+- **Expected:** The non-plan `type` returns `{"events": [], "count": 0}` (no `plan_event` can match a group filter); the **empty string** fails loud.
+- **Pass criteria:** GO when a non-plan type under `group` returns `count=0` with no error, and the empty string is a loud argument error.
 
 ---
 
