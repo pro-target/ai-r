@@ -6,6 +6,8 @@
 >
 > **MCP surface invariant:** 15 tools = 7 legacy + 5 event-core verbs + 3 presets (`plan`, `incidents`, `network`).
 > Source of truth is the code (`@mcp.tool()` in `mcp_server.py`); guarded by `tests/test_docs_sync.py`.
+>
+> **Fail-loud arguments:** every tool rejects an **undeclared** argument with `invalid_argument` (listing the accepted parameters) before running — the transport would otherwise silently drop it and return an unfiltered result (`_StrictArgsFastMCP`, generalizing the `kind` tombstone to the whole surface). Guarded by `tests/test_mcp_strict_args.py`.
 
 <!-- methods:start -->
 

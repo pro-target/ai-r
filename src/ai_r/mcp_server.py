@@ -242,7 +242,51 @@ def _preview_event_texts(
             ev["text_truncated"] = True
 
 
-mcp = FastMCP(
+def _unknown_tool_args(
+    tool_params: Mapping[str, Any], arguments: Mapping[str, Any]
+) -> list[str]:
+    """Argument keys the caller passed that the tool's schema does not declare.
+
+    The FastMCP transport validates arguments against a pydantic model built
+    from each tool's signature, and pydantic *silently drops* unknown keys
+    before the function runs — so a caller that mistypes a facet or invents a
+    parameter (e.g. ``plan(limit=…)`` or ``list_sessions(since=…)``, both seen
+    in real usage) gets a misleadingly successful, unfiltered result.  This is
+    the same silent-drop failure the retired ``kind`` facet was tombstoned to
+    avoid; the check below closes it for the whole surface.  Returns the sorted
+    unknown keys (``[]`` when every key is declared).
+    """
+    allowed = set((tool_params or {}).get("properties", {}))
+    return sorted(k for k in arguments if k not in allowed)
+
+
+class _StrictArgsFastMCP(FastMCP):
+    """FastMCP that fails loud on unknown tool arguments instead of dropping them.
+
+    Overrides :meth:`call_tool` to reject any argument key absent from the
+    tool's declared schema with the project's standard
+    ``{"error": "invalid_argument", ...}`` envelope, *before* the tool runs —
+    so a silently-ignored typo can never masquerade as a real, unfiltered
+    answer.  An unknown *tool name* falls through to the base class unchanged.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):  # type: ignore[override]
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None and isinstance(arguments, dict):
+            unknown = _unknown_tool_args(tool.parameters, arguments)
+            if unknown:
+                allowed = sorted((tool.parameters or {}).get("properties", {}))
+                return {
+                    "error": "invalid_argument",
+                    "message": (
+                        f"unknown argument(s): {', '.join(unknown)}. "
+                        f"{name} accepts: {', '.join(allowed) or '(none)'}."
+                    ),
+                }
+        return await super().call_tool(name, arguments)
+
+
+mcp = _StrictArgsFastMCP(
     name="ai-r",
     instructions=(
         "ai-r: read Claude, Codex, OpenCode, Antigravity and Pi session "

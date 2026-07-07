@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unknown MCP tool arguments now fail loud instead of being silently
+  dropped.** FastMCP validated arguments against each tool's pydantic schema
+  and *ignored* undeclared keys, so a caller passing a parameter a verb does
+  not have — `plan(limit=…)`, `list_sessions(since=…)`, both seen in real
+  usage — got an unfiltered result that looked scoped. `_StrictArgsFastMCP`
+  now rejects any undeclared argument with `invalid_argument` (listing the
+  accepted parameters) before the tool runs, generalizing the `kind` fail-loud
+  tombstone to the whole surface. Found by dogfooding: ai-r read its own dev
+  history (`find_tool_calls tool_name_pattern="mcp__ai-r__"`) to see which
+  parameters callers actually passed.
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

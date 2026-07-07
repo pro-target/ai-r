@@ -297,3 +297,27 @@ records adding an optional shared transport as the fix.
   validation still runs up-front so a malformed value fails loud even there.
   `iter_events` gained a `parent` parameter. `plan()` and `incidents` keep their
   own independent `kind`/`group` parameters — different verbs, unaffected.
+
+### ADR: fail-loud on unknown MCP arguments (surface-wide)
+
+- **What.** `mcp_server.mcp` is a `_StrictArgsFastMCP` subclass; its `call_tool`
+  rejects any argument key absent from the called tool's declared schema with
+  `{"error": "invalid_argument", …}` (listing the accepted parameters) *before*
+  the tool runs. Unknown *tool names* fall through to the base class; declared
+  arguments are never short-circuited.
+- **Why.** FastMCP builds a pydantic model per tool from its signature and
+  pydantic **silently drops** unknown keys, so an invented/mistyped parameter
+  produced a successful-looking but **unfiltered** result — the same "never a
+  silent wrong answer" failure the `kind` tombstone (ADR above) was created to
+  avoid, but `kind` covered only one facet. This closes the class for every
+  tool with one transport-seam check (`set(arguments) − schema.properties`),
+  not a per-tool guard.
+- **How it was found.** A self-referential usage audit — ai-r reading its own
+  development history (`find_tool_calls tool_name_pattern="mcp__ai-r__"`, 236
+  calls) — surfaced two real phantom-parameter calls (`plan(limit=…)`,
+  `list_sessions(since=…)`) that had returned unfiltered results with no error.
+  This is exactly the "why / was-it-needed" audit the project sells, applied to
+  the project itself.
+- **Boundaries.** Deterministic, no data read on rejection. Pure helper
+  `_unknown_tool_args` is unit-tested; `tests/test_mcp_strict_args.py` covers
+  the phantom cases and declared-argument passthrough.

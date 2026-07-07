@@ -6,6 +6,8 @@
 >
 > **Инвариант MCP-поверхности:** 15 тулов = 7 legacy + 5 event-core вербов + 3 пресета (`plan`, `incidents`, `network`).
 > Источник истины — код (`@mcp.tool()` в `mcp_server.py`); стережёт `tests/test_docs_sync.py`.
+>
+> **Аргументы с отказом-закрытием (fail-loud):** каждый тул отвергает **необъявленный** аргумент с `invalid_argument` (перечисляя принятые параметры) до запуска — иначе транспорт молча его дропнет и вернёт неотфильтрованный результат (`_StrictArgsFastMCP`, обобщает `kind`-tombstone на всю поверхность). Стережёт `tests/test_mcp_strict_args.py`.
 
 <!-- methods:start -->
 
