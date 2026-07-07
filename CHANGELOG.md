@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Model dimension: which model produced what.** Parsers extract the
+  per-message `model` where the format records one — Claude assistant
+  `message.model` (`<synthetic>` stubs mapped to absence; the Desktop
+  overlay's session-level `model` stays in the desktop extras, not in
+  the transcript-evidenced rollup), Codex `turn_context.model` inherited
+  by that turn's assistant items, OpenCode `message.data.modelID`, Pi
+  assistant `message.model`; Antigravity has no structured signal —
+  honest absence, never fabricated. Sessions roll up `models` (unique,
+  in order of first appearance) and events inherit the producing
+  message's model (a `tool_call` carries its assistant turn's model).
+  Public surface on the existing verbs only, no new preset or
+  classifier: `query` gains a `model` facet (exact, case-insensitive;
+  empty string fails loud) and its events carry a top-level `model`
+  field when known; `aggregate` accepts `group_by="model"` with an
+  honest `"(unknown)"` bucket for no-signal rows; `list_sessions` /
+  `read_session` / `search_sessions` summaries carry `models`;
+  `detect_current` reports the detected transcript's last assistant
+  model (`null` when unresolvable). Acceptance per the contribution
+  gate: the hermetic pytest suite plus the new AGG-6 scenario executed
+  in two independent LLM runs against a live MCP server — both GO.
+
 ### Deprecated
 
 - **`query`'s `kind` fail-loud tombstone is scheduled for removal in `0.6.0`.**
