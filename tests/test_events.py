@@ -547,6 +547,31 @@ def test_query_group_with_non_plan_type_is_empty(
     got = query(type="user_turn", session=fake_claude_plan_multitask,
                 group=target)
     assert got == []
+def test_negative_limit_rejected(multi_turn_claude: str) -> None:
+    # Regression (audit PR#4 defect #5): a negative ``limit`` used to slip
+    # through the ``if limit and len(survivors) > limit`` guard and silently
+    # slice ``survivors[:-1]`` — dropping the NEWEST event without a word.
+    # It must now fail loud, symmetric with network/incidents/find_file_edits.
+    for bad in (-1, -25):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            query(type="user_turn", session=multi_turn_claude, limit=bad)
+    # bool is not a valid int limit either (True == 1 would be a silent cap).
+    with pytest.raises(ValueError, match="non-negative integer"):
+        query(type="user_turn", session=multi_turn_claude, limit=True)  # type: ignore[arg-type]
+
+
+def test_valid_limit_unchanged(multi_turn_claude: str) -> None:
+    # The fix must NOT alter valid values.  Three user turns in date order:
+    # "first request" / "second request please" / "third and final".
+    all_turns = query(type="user_turn", session=multi_turn_claude, limit=0)
+    texts = [e["text"] for e in all_turns]
+    assert texts == ["first request", "second request please", "third and final"]
+    # limit=0 == no cap (returns all three).
+    assert query(type="user_turn", session=multi_turn_claude) == all_turns
+    # A positive cap keeps the oldest N; the newest is what falls off — the
+    # exact opposite of what limit=-1 silently did (it dropped the newest).
+    capped = query(type="user_turn", session=multi_turn_claude, limit=2)
+    assert [e["text"] for e in capped] == ["first request", "second request please"]
 
 
 # ---------------------------------------------------------------------------
