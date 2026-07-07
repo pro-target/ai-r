@@ -35,6 +35,24 @@ fastest path from idea to merge is:
 7. **Open a PR.** The PR template will guide you. CI must be green.
    A maintainer will review within a few days.
 
+## Releasing
+
+Once per release (not per PR), run the **self-referential usage audit** —
+ai-r reading its own development history to see which verbs/parameters callers
+actually used since the last tag:
+
+```bash
+make usage-audit SINCE=<previous-release-date>   # e.g. 2026-07-05
+```
+
+A zero-call declared parameter is a tombstone *candidate*, not an automatic
+deletion — a human decides, and the tool already excludes safety-default
+parameters (`redact` and kin) and flags thin samples / single-agent coverage.
+An `!! UNDECLARED PARAMS USED` line means a caller passed a parameter a verb
+does not declare; post the fail-loud fix (`_StrictArgsFastMCP`) live calls are
+rejected, so any such line is historical. Rationale: the *ADR: fail-loud on
+unknown MCP arguments* in [docs/architecture.md](./docs/architecture.md).
+
 ## Local-dev MCP setup
 
 For local-dev MCP setup (registering `ai-r-mcp` so your editor can
