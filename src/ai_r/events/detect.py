@@ -31,11 +31,17 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
             session cascade yields no agent context.
 
     Returns:
-        ``{"session_id": str|None, "agent": str|None, "candidates": [...],
-        "verified": bool, "self": bool}`` where:
+        ``{"session_id": str|None, "agent": str|None, "model": str|None,
+        "candidates": [...], "verified": bool, "self": bool}`` where:
 
         * ``session_id`` / ``agent`` describe the FIRST (highest-priority)
           candidate — the same one the CLI's default ``list`` mode returns.
+        * ``model`` is the model of the current session — the LAST
+          assistant ``model`` recorded in its transcript (the runtime
+          environment itself carries no model signal, so this is a
+          transcript read of the detected session).  ``None`` when no
+          session/agent was detected, the transcript is unreadable, or
+          the format records no model — absence is honest.
         * ``candidates`` is the full cascade (each ``{id, agent, source,
           verified, self, fingerprint}``), so a caller can disambiguate.
         * ``verified`` / ``self`` mirror the first candidate's flags.
@@ -80,7 +86,36 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
     return {
         "session_id": session_id,
         "agent": agent_str,
+        "model": _current_session_model(session_id, agent_str),
         "candidates": candidate_dicts,
         "verified": first.verified if first is not None else False,
         "self": first.is_self if first is not None else False,
     }
+
+
+def _current_session_model(
+    session_id: Optional[str], agent: Optional[str]
+) -> Optional[str]:
+    """The LAST assistant ``model`` of the detected session's transcript.
+
+    The runtime environment (env vars / flag files) records no model, so
+    the current model is read from the detected session's own transcript —
+    the most recent assistant message that carries one.  Honest ``None``
+    when identity is incomplete, the session is unreadable, or the format
+    records no model signal (never guessed).
+    """
+    if not session_id or not agent:
+        return None
+    from ai_r.parsers import PARSERS, coerce_agent
+
+    try:
+        parser = PARSERS[coerce_agent(agent)]
+        messages = parser.read_messages(session_id)
+    except (FileNotFoundError, ValueError, OSError, KeyError):
+        return None
+    for msg in reversed(messages):
+        model = getattr(msg, "model", None)
+        if getattr(msg, "role", None) == "assistant" \
+                and isinstance(model, str) and model:
+            return model
+    return None

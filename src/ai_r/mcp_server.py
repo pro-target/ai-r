@@ -305,6 +305,9 @@ def _session_summary(
     ``project_dir`` / ``launch_surface`` are top-level fields (next to
     ``kind`` / ``parent_uuid``) and stay ``None`` when the source format
     carries no signal — absence is honest, never fabricated (F1.4).
+    ``models`` lists the session's unique model ids in order of first
+    appearance (``Session.models``); ``[]`` without a signal — same
+    honesty rule.
     ``resume_command`` (F2.2) is the ready-to-run shell one-liner that
     reopens the session in its agent's CLI, ``None`` when no real
     command exists (Antigravity, subagent sessions, reference-only
@@ -337,6 +340,10 @@ def _session_summary(
         "parent_uuid": session.parent_uuid,
         "project_dir": session.project_dir,
         "launch_surface": session.launch_surface,
+        # Unique models observed in the session, in order of first
+        # appearance (see Session.models); [] when the format carries no
+        # signal — honest absence, never fabricated (model dimension).
+        "models": list(session.models),
         "resume_command": resume_command(session),
     }
     if now is not None:
@@ -858,6 +865,13 @@ def list_sessions(
       ``originator``, e.g. ``"codex_vscode"``; Antigravity:
       ``"antigravity-ide"`` | ``"antigravity-cli"``; OpenCode/Pi: no
       signal).
+
+    Each summary also carries ``models`` — the unique model ids observed
+    in the session, in order of first appearance (Claude: assistant
+    ``message.model``; Codex: ``turn_context.model``; OpenCode:
+    ``message.data.modelID``; Pi: assistant ``message.model``;
+    Antigravity records no model signal).  ``[]`` when the format carries
+    no signal — honest absence, never fabricated.
 
     Each summary also carries the A3 recency signal, measured against a
     single wall-clock ``now`` sampled once for the whole call:
@@ -1913,6 +1927,7 @@ def query(
     file: Optional[str] = None,
     tool: Optional[str] = None,
     tool_kind: Optional[str] = None,
+    model: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -1963,6 +1978,15 @@ def query(
       ``"<server>:<tool>"`` for a Claude-style ``mcp__<server>__<tool>``
       call.  No signal → no ``tool_resolved`` (never guessed).  An
       unknown ``tool_kind`` value is a fail-loud ``invalid_argument``.
+    * ``model`` — exact, case-insensitive match against the model that
+      produced the event's message: an ``assistant_turn`` /
+      ``tool_call`` / ``plan_event`` inherits the model of the assistant
+      message behind it and carries it as a top-level ``model`` field
+      (absent without a signal — user turns, Antigravity — so
+      ``aggregate(group_by="model")`` buckets those under
+      ``"(unknown)"``).  Model ids are agent-defined strings (no fixed
+      vocabulary); events without a signal never match; an empty string
+      is a fail-loud ``invalid_argument``.
     * ``text`` — substring matched against event text.  With
       ``sort="relevance"`` survivors are BM25-ranked using the **same
       scorer** as ``search_sessions``; ``sort="semantic"`` (F5.1,
@@ -2067,6 +2091,7 @@ def query(
             file=file,
             tool=tool,
             tool_kind=tool_kind,
+            model=model,
             text=text,
             sort=sort,
             relative_to=relative_to,
@@ -2107,6 +2132,7 @@ def query(
                 "file": file,
                 "tool": tool,
                 "tool_kind": tool_kind,
+                "model": model,
                 "text": text,
                 "relative_to": relative_to,
                 # "include" is the no-op default — never a cause of emptiness.
@@ -2294,8 +2320,9 @@ def aggregate(
         rows: The row dicts to fold (``query`` output, ``find_file_edits``
             records, or a session inventory).
         group_by: The bucket key — a row field name (``agent`` / ``dir`` /
-            ``date`` / ``kind`` / ``file`` / …).  Missing/empty values bucket
-            under ``"(unknown)"``.
+            ``date`` / ``kind`` / ``file`` / ``model`` — query rows carry
+            the producing ``model`` where the format records one / …).
+            Missing/empty values bucket under ``"(unknown)"``.
         metrics: Which numbers each bucket carries.  One or more of
             ``count`` / ``sessions`` / ``edits`` / ``intents`` / ``agents`` /
             ``messages`` / ``files`` / ``tokens`` / ``component_tokens``.
@@ -2387,11 +2414,14 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
             deprecated ``--agent`` flag); the cascade scans all agents.
 
     Returns:
-        ``{"session_id", "agent", "candidates": [...], "verified", "self"}``
-        where ``session_id`` / ``agent`` describe the highest-priority
-        candidate and ``candidates`` is the full cascade for disambiguation.
-        Returns ``{"error": ..., "message": ...}`` on an unknown ``agent``
-        hint.
+        ``{"session_id", "agent", "model", "candidates": [...], "verified",
+        "self"}`` where ``session_id`` / ``agent`` describe the
+        highest-priority candidate, ``model`` is the current session's
+        model — the LAST assistant ``model`` recorded in its transcript
+        (``null`` when identity is incomplete or the format records no
+        model signal — never guessed) — and ``candidates`` is the full
+        cascade for disambiguation.  Returns ``{"error": ...,
+        "message": ...}`` on an unknown ``agent`` hint.
     """
     try:
         return _detect_current_core(agent=agent)

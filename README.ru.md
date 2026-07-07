@@ -296,7 +296,7 @@ cd ~/dev/ai-r && bash install.sh
 
 - Словарь методов (вербы + пресеты) — [`docs/methods.md`](./docs/methods.md)
   (англ. SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (рус. зеркало)
-- Приёмочные сценарии (95 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Приёмочные сценарии (96 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Архитектура и слои — [`docs/architecture.md`](./docs/architecture.md)
 - Операторы поиска — [`docs/search-operators.md`](./docs/search-operators.md)
 - Регистрация MCP по агентам — [`docs/mcp-registration.md`](./docs/mcp-registration.md)

@@ -52,8 +52,12 @@ def _claude_assistant(text: str, ts: str, session_id: str, model=None) -> dict:
 @pytest.fixture
 def claude_two_models(tmp_sessions_dir: Path) -> str:
     """A Claude session whose assistant turns come from TWO models,
-    plus a ``<synthetic>`` stub and a model-less record."""
-    session_id = "claude-models-1"
+    plus a ``<synthetic>`` stub and a model-less record.
+
+    The uuid is UUID-shaped so the ``detect_current`` cascade (which
+    validates Claude ids against the UUID pattern) accepts it too.
+    """
+    session_id = "cafe0001-2222-4333-8444-555555555555"
     jsonl = (
         tmp_sessions_dir / ".claude" / "projects" / "proj-m"
         / f"{session_id}.jsonl"
@@ -529,3 +533,127 @@ def test_events_model_none_without_signal(fake_claude_session: Path) -> None:
     events = list(iter_events("claude", session="test-claude-1"))
     assert events
     assert all(ev.model is None for ev in events)
+
+
+# ---------------------------------------------------------------------------
+# Surface — query facet, event dicts, aggregate, summary, detect_current
+# ---------------------------------------------------------------------------
+
+
+def test_query_rows_carry_model_only_when_present(
+    claude_model_events: str,
+) -> None:
+    from ai_r.events import query
+
+    rows = query(session=claude_model_events)
+    by_type = {r["type"]: r for r in rows}
+    assert by_type["assistant_turn"]["model"] == "model-alpha-1"
+    assert by_type["tool_call(edit)"]["model"] == "model-alpha-1"
+    assert by_type["plan_event"]["model"] == "model-beta-2"
+    # No signal → no key at all (base event shape unchanged).
+    assert "model" not in by_type["user_turn"]
+
+
+def test_query_model_facet_exact_case_insensitive(
+    claude_model_events: str,
+) -> None:
+    from ai_r.events import query
+
+    hits = query(session=claude_model_events, model="MODEL-ALPHA-1")
+    assert hits and all(r["model"] == "model-alpha-1" for r in hits)
+    # Exact match, not substring: a prefix must not match.
+    assert query(session=claude_model_events, model="model-alpha") == []
+    # Unknown model → honest empty.
+    assert query(session=claude_model_events, model="no-such-model") == []
+
+
+def test_query_model_facet_empty_string_fails_loud() -> None:
+    from ai_r.events import query
+
+    with pytest.raises(ValueError, match="model"):
+        query(model="   ")
+
+
+def test_aggregate_group_by_model(claude_model_events: str) -> None:
+    from ai_r.events import aggregate, query
+
+    rows = query(session=claude_model_events)
+    result = aggregate(rows, group_by="model", metrics=("count",))
+    counts = {g["group"]: g["count"] for g in result["groups"]}
+    # alpha: assistant_turn + tool_call(edit); beta: tool_call + plan_event;
+    # the user_turn has no model → the honest "(unknown)" bucket.
+    assert counts["model-alpha-1"] == 2
+    assert counts["model-beta-2"] == 2
+    assert counts["(unknown)"] == 1
+    assert sum(counts.values()) == len(rows)
+
+
+def test_mcp_session_summary_carries_models(claude_two_models: str) -> None:
+    from ai_r.mcp_server import list_sessions, read_session
+
+    listed = list_sessions(agent="claude")
+    by_uuid = {s["uuid"]: s for s in listed["sessions"]}
+    assert by_uuid[claude_two_models]["models"] == [
+        "model-alpha-1", "model-beta-2",
+    ]
+    read = read_session(claude_two_models, agent="claude")
+    assert read["models"] == ["model-alpha-1", "model-beta-2"]
+
+
+def test_mcp_session_summary_models_empty_without_signal(
+    fake_claude_session: Path,
+) -> None:
+    from ai_r.mcp_server import list_sessions
+
+    listed = list_sessions(agent="claude")
+    by_uuid = {s["uuid"]: s for s in listed["sessions"]}
+    assert by_uuid["test-claude-1"]["models"] == []
+
+
+def test_mcp_query_model_facet(claude_model_events: str) -> None:
+    from ai_r.mcp_server import query as mcp_query
+
+    result = mcp_query(session=claude_model_events, model="model-beta-2")
+    assert result["count"] == 2
+    assert all(e["model"] == "model-beta-2" for e in result["events"])
+    bad = mcp_query(model="")
+    assert bad["error"] == "invalid_argument"
+
+
+@pytest.fixture
+def _clean_detect_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Blank every env var + flag dir the detect cascade reads."""
+    for var in (
+        "AI_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+        "OPENCODE_SESSION_ID", "AGENT_NAME", "AI_AGENT", "CODING_AGENT",
+        "CODEX_HOME", "CLAUDECODE", "OPENCODE", "AI_SESSION_OUTPUT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(tmp_path / "identity"))
+
+
+def test_detect_current_reads_last_assistant_model(
+    _clean_detect_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    claude_two_models: str,
+) -> None:
+    from ai_r.events import detect_current
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", claude_two_models)
+    r = detect_current()
+    assert r["session_id"] == claude_two_models
+    # The LAST assistant message carrying a model (the trailing model-less
+    # stub is skipped, never guessed into a value).
+    assert r["model"] == "model-beta-2"
+
+
+def test_detect_current_model_none_when_unresolvable(
+    _clean_detect_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_r.events import detect_current
+
+    # No session detected at all → model is honestly None.
+    assert detect_current()["model"] is None
+    # A detected id whose transcript does not exist → still None, no crash.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "no-such-session-1")
+    assert detect_current()["model"] is None

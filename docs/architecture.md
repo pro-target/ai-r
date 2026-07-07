@@ -110,6 +110,19 @@ every agent's messages into one agent-neutral `Event` stream
 `network`) are thin readers over that stream — `query` is the workhorse;
 a preset wires a fixed chain of base verbs, never a second engine.
 
+The **model dimension** rides on that same taxonomy, not beside it: parsers
+extract the producing model where the format records one (`Message.model`,
+rolled up per session as `Session.models`; Claude assistant
+`message.model` with the `<synthetic>` stub mapped to `null`, Codex
+`turn_context.model`, OpenCode `message.data.modelID`, Pi assistant
+`message.model`; Antigravity has no structured signal), every event
+inherits the model of the message behind it (a `tool_call`/`plan_event`
+carries its assistant turn's model), and the surface reuses the existing
+verbs — a `model` facet on `query`, `group_by="model"` on `aggregate`, a
+`models` list on session summaries, the current model on
+`detect_current`. No new event type, preset or classifier; absence is
+honest (`null`/`[]`, the `"(unknown)"` aggregate bucket), never guessed.
+
 Three cross-cutting modules sit beside the core:
 
 | Module | Responsibility |

@@ -72,6 +72,12 @@ def _event_to_dict(event: Event) -> dict[str, Any]:
     resolved = _ref_value(event.refs, "tool_resolved")
     if resolved is not None:
         out["tool_resolved"] = resolved
+    # Model dimension: emitted only when the format recorded one (mirrors
+    # the tool_kind hoisting — no-signal events keep the base shape), so
+    # ``aggregate(group_by="model")`` works on query rows directly and a
+    # row without a signal folds into the honest "(unknown)" bucket.
+    if event.model is not None:
+        out["model"] = event.model
     return out
 
 
@@ -196,6 +202,7 @@ def query(
     file: Optional[str] = None,
     tool: Optional[str] = None,
     tool_kind: Optional[str] = None,
+    model: Optional[str] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -238,6 +245,12 @@ def query(
       ``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
       ``web``/``other``).  Unknown values raise :class:`ValueError`
       (fail-loud, never a silent no-op).
+    * ``model`` — exact, case-insensitive match against the event's
+      inherited ``model`` (the model that produced the hosting message —
+      see :class:`~ai_r.events._common.Event`).  There is no fixed model
+      vocabulary (ids are agent-defined strings), so any non-empty string
+      is accepted; events without a model signal never match.  An
+      empty-string value is a fail-loud :class:`ValueError`.
     * ``text`` — substring matched against event ``text``
       (case-insensitive).  With ``sort="relevance"`` the survivors are
       BM25-ranked using the **same scorer** as ``search_sessions``.
@@ -332,6 +345,12 @@ def query(
                 f"tool_kind must be one of {sorted(TOOL_KIND)}, "
                 f"got {tool_kind!r}"
             )
+    if model is not None and (
+        not isinstance(model, str) or not model.strip()
+    ):
+        raise ValueError(
+            f"model must be a non-empty model-id string or None, got {model!r}"
+        )
     if project_dir is not None and (
         not isinstance(project_dir, str) or not project_dir.strip()
     ):
@@ -420,6 +439,7 @@ def query(
     until_dt = parse_iso_bound(until, "until")
     file_needle = file if file else None
     tool_needle = tool.lower() if tool else None
+    model_needle = model.strip().lower() if model else None
     text_needle = text.lower() if text else None
 
     # ``group`` is a plan-only facet: pre-restrict the type gate to
@@ -469,6 +489,12 @@ def query(
         if tool_kind is not None:
             kinds = [r.get("tool_kind") for r in ev.refs if "tool_kind" in r]
             if tool_kind not in kinds:
+                continue
+        if model_needle is not None:
+            # Exact, case-insensitive: model ids are identity-like values
+            # (typically taken from an ``aggregate(group_by="model")``
+            # bucket), not search patterns.  No signal → never matches.
+            if ev.model is None or ev.model.lower() != model_needle:
                 continue
         if text_needle is not None:
             if not ev.text or text_needle not in ev.text.lower():
