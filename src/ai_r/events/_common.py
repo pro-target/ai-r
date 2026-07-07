@@ -210,6 +210,14 @@ class Event:
         message_index: Index of the hosting :class:`Message` in the
             parser's message list (kept for backward-compat with the
             record shape ``find_file_edits`` emits).
+        model: The model that produced the hosting message, inherited
+            from :attr:`~ai_r.parsers.models.Message.model` — an
+            ``assistant_turn`` / ``tool_call`` / ``plan_event`` carries
+            the model of the assistant message behind it.  ``None``
+            where the format records no signal (user turns, Antigravity)
+            — absence is honest, never fabricated.  Provenance metadata
+            like ``agent``/``ts``: NOT part of the ``sha256`` content
+            hash.
     """
 
     id: str
@@ -222,6 +230,7 @@ class Event:
     source: str = ""
     sha256: str = ""
     message_index: int = -1
+    model: Optional[str] = None
 
 
 def _sha256(event_type: str, text: Optional[str], refs: Sequence[dict]) -> str:
@@ -243,6 +252,7 @@ def _mk_event(
     text: Optional[str],
     refs: Sequence[dict],
     message_index: int,
+    model: Optional[str] = None,
 ) -> Event:
     refs_tuple = tuple(refs)
     return Event(
@@ -256,6 +266,7 @@ def _mk_event(
         source=f"parser:{agent}",
         sha256=_sha256(event_type, text, refs_tuple),
         message_index=message_index,
+        model=model,
     )
 
 

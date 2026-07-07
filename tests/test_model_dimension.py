@@ -439,3 +439,93 @@ def test_antigravity_has_no_model_signal(fake_antigravity_brain: Path) -> None:
     messages = antigravity.read_messages("test-ag-1", base_dir=base)
     assert messages, "fixture should yield messages"
     assert all(m.model is None for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Event layer — events inherit the producing message's model
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_model_events(tmp_sessions_dir: Path) -> str:
+    """A Claude session mixing two models across a turn, a tool call and
+    a plan signal — the event-inheritance fixture."""
+    session_id = "claude-model-events-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-m"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "please edit"},
+                "timestamp": "2026-06-14T10:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "model-alpha-1",
+                    "content": [
+                        {"type": "text", "text": "editing now"},
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {
+                                "file_path": "/repo/a.py",
+                                "old_string": "x",
+                                "new_string": "y",
+                            },
+                        },
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "model-beta-2",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "ExitPlanMode",
+                            "input": {"plan": "# Beta Plan\n\n- step"},
+                        },
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:10Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
+def test_events_inherit_message_model(claude_model_events: str) -> None:
+    from ai_r.events.model import iter_events
+
+    events = list(iter_events("claude", session=claude_model_events))
+    by_type = {}
+    for ev in events:
+        by_type.setdefault(ev.type, []).append(ev)
+    # assistant_turn + its tool_call carry the producing model.
+    assert [e.model for e in by_type["assistant_turn"]] == ["model-alpha-1"]
+    assert [e.model for e in by_type["tool_call(edit)"]] == ["model-alpha-1"]
+    # The plan tool_use AND the derived plan_event carry the second model.
+    assert [e.model for e in by_type["tool_call(other)"]] == ["model-beta-2"]
+    assert [e.model for e in by_type["plan_event"]] == ["model-beta-2"]
+    # User turns have no producing model — honest None.
+    assert [e.model for e in by_type["user_turn"]] == [None]
+
+
+def test_events_model_none_without_signal(fake_claude_session: Path) -> None:
+    from ai_r.events.model import iter_events
+
+    events = list(iter_events("claude", session="test-claude-1"))
+    assert events
+    assert all(ev.model is None for ev in events)

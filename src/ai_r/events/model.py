@@ -645,6 +645,11 @@ def _messages_to_events(
     ``is_error`` ref — the success/error outcome is thus visible on the
     existing ``tool_call`` events WITHOUT introducing a new event type
     (so ``type`` filters and event counts are unchanged).
+
+    Every emitted event inherits the hosting message's ``model`` (a
+    ``tool_call``/``plan_event`` carries the model of the assistant turn
+    that produced it); a file-based plan signal (Antigravity) has no
+    hosting message → ``model=None``, like any absent signal.
     """
     events: List[Event] = []
     seq = 0
@@ -693,13 +698,17 @@ def _messages_to_events(
         text = getattr(msg, "text", "") or ""
         msg_ts = to_utc_aware(getattr(msg, "timestamp", None))
         ts_iso = iso(msg_ts) if msg_ts is not None else session_iso
+        # Model dimension: every event inherits the producing message's
+        # ``model`` (None where the format has no signal — never guessed).
+        msg_model = getattr(msg, "model", None)
+        msg_model = msg_model if isinstance(msg_model, str) and msg_model else None
 
         if role == "user":
             if isinstance(text, str) and text.strip():
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=ts_iso,
                     event_type="user_turn", text=text, refs=(),
-                    message_index=idx,
+                    message_index=idx, model=msg_model,
                 ))
                 seq += 1
             continue
@@ -709,7 +718,7 @@ def _messages_to_events(
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=ts_iso,
                     event_type="assistant_turn", text=text, refs=(),
-                    message_index=idx,
+                    message_index=idx, model=msg_model,
                 ))
                 seq += 1
             for tool in getattr(msg, "tool_use", ()) or ():
@@ -745,7 +754,7 @@ def _messages_to_events(
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=tool_iso,
                     event_type=f"tool_call({sub})", text=name, refs=refs,
-                    message_index=idx,
+                    message_index=idx, model=msg_model,
                 ))
                 seq += 1
             # Emit any plan_event(s) triggered by this assistant message,
@@ -756,7 +765,7 @@ def _messages_to_events(
                     event_type="plan_event",
                     text=sig.title,
                     refs=_plan_refs(sig),
-                    message_index=idx,
+                    message_index=idx, model=msg_model,
                 ))
                 seq += 1
             continue
