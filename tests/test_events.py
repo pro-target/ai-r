@@ -417,14 +417,136 @@ def test_invalid_n_raises() -> None:
         query(relative_to="x:0", n=0)
 
 
-def test_phase2_facets_rejected(multi_turn_claude: str) -> None:
-    # kind/parent/group are Phase 2/3 stubs — passing a non-None value must
-    # fail loud rather than silently return an unfiltered result (a silent
-    # no-op would mislead an external caller into trusting a wrong result).
-    query(session=multi_turn_claude)  # baseline: omitting them is fine.
-    for facet in ("kind", "parent", "group"):
-        with pytest.raises(ValueError, match="not yet supported"):
-            query(session=multi_turn_claude, **{facet: "x"})
+def test_query_kind_facet_removed() -> None:
+    # ``kind`` was a duplicate of ``noise`` (noise=exclude≡top-level,
+    # noise=only≡subagents) — it is gone from the ``query`` signature.
+    with pytest.raises(TypeError):
+        query(kind="subagent")  # type: ignore[call-arg]
+
+
+def test_query_parent_empty_string_rejected() -> None:
+    # A non-None parent must be a non-empty uuid; an empty string is a caller
+    # mistake, fail loud (not a silent "match nothing").
+    with pytest.raises(ValueError, match="parent"):
+        query(parent="")
+
+
+def test_query_group_empty_string_rejected() -> None:
+    with pytest.raises(ValueError, match="group"):
+        query(group="")
+
+
+# ---------------------------------------------------------------------------
+# ``parent`` — session-level subtree filter (spawned-subagent tree)
+# ---------------------------------------------------------------------------
+
+
+def _session_ids(events: list[dict]) -> set[str]:
+    return {e["session_id"] for e in events}
+
+
+def test_query_parent_returns_direct_children(
+    fake_codex_session: Path, fake_codex_subagent: Path
+) -> None:
+    # Tree: test-codex-1 (root) → test-codex-sub-1 (direct child).
+    # parent=root returns the child's events; the root itself is excluded.
+    got = query(agent="codex", parent="test-codex-1")
+    ids = _session_ids(got)
+    assert "test-codex-sub-1" in ids
+    assert "test-codex-1" not in ids  # the root's own events → session=root
+
+
+def test_query_parent_returns_full_subtree_transitively(
+    fake_codex_session: Path,
+    fake_codex_subagent: Path,
+    fake_codex_subagent_depth2: Path,
+) -> None:
+    # Tree: test-codex-1 → test-codex-sub-1 → test-codex-sub-3.
+    # parent=root returns BOTH the direct child and the nested grandchild.
+    got = query(agent="codex", parent="test-codex-1")
+    ids = _session_ids(got)
+    assert {"test-codex-sub-1", "test-codex-sub-3"} <= ids
+    assert "test-codex-1" not in ids
+    # parent=direct-child returns only its own subtree (the grandchild),
+    # never the sibling root — the closure is anchored, not global.
+    nested = query(agent="codex", parent="test-codex-sub-1")
+    nids = _session_ids(nested)
+    assert nids == {"test-codex-sub-3"}
+
+
+def test_query_parent_unknown_uuid_is_empty(
+    fake_codex_session: Path, fake_codex_subagent: Path
+) -> None:
+    # An unknown / childless parent matches nothing — an honest empty result,
+    # never an error.
+    assert query(agent="codex", parent="no-such-session") == []
+
+
+# ---------------------------------------------------------------------------
+# ``group`` — event-level plan-task filter (plan_event only)
+# ---------------------------------------------------------------------------
+
+
+def _task_ids(session_id: str) -> dict[str, str]:
+    """Map plan_event id → task_id for a session (via the SSOT grouper)."""
+    from ai_r.events.plan import _assign_plan_kinds
+
+    events = query(type="plan_event", session=session_id, redact=False)
+    return {p.id: p.task_id for p in _assign_plan_kinds(events)}
+
+
+def test_query_group_keeps_only_matching_task(
+    fake_claude_plan_multitask: str,
+) -> None:
+    # Two distinct plan-file slugs → two task_ids; group=<one> returns only
+    # that task's plan_events, the other task is excluded.
+    tasks = _task_ids(fake_claude_plan_multitask)
+    distinct = set(tasks.values())
+    assert len(distinct) >= 2  # multitask fixture yields >1 task
+    target = sorted(distinct)[0]
+    got = query(type="plan_event", session=fake_claude_plan_multitask,
+                group=target)
+    got_ids = {e["id"] for e in got}
+    assert got_ids  # non-empty
+    assert got_ids == {pid for pid, tid in tasks.items() if tid == target}
+    # every excluded plan_event belonged to a different task
+    excluded_tasks = {tasks[e["id"]] for e in got}
+    assert excluded_tasks == {target}
+
+
+def test_query_group_all_revisions_of_one_task(
+    fake_claude_plan_redraft: str,
+) -> None:
+    # A single-slug redraft chain is ONE task — group=<its task_id> returns
+    # every revision (drafts + final), and there is exactly one task.
+    tasks = _task_ids(fake_claude_plan_redraft)
+    (only_task,) = set(tasks.values())
+    got = query(type="plan_event", session=fake_claude_plan_redraft,
+                group=only_task)
+    assert {e["id"] for e in got} == set(tasks)
+
+
+def test_query_group_excludes_non_plan_events(
+    fake_claude_plan_multitask: str,
+) -> None:
+    # group is a plan-only facet: with a task_id set, non-plan_event events
+    # are dropped even without an explicit type filter.
+    tasks = _task_ids(fake_claude_plan_multitask)
+    target = sorted(set(tasks.values()))[0]
+    got = query(session=fake_claude_plan_multitask, group=target)
+    assert got  # the plan_events of the task survive
+    assert all(e["type"] == "plan_event" for e in got)
+
+
+def test_query_group_with_non_plan_type_is_empty(
+    fake_claude_plan_multitask: str,
+) -> None:
+    # Contradictory facets (group + a non-plan type) → honest empty result.
+    tasks = _task_ids(fake_claude_plan_multitask)
+    target = sorted(set(tasks.values()))[0]
+    got = query(type="user_turn", session=fake_claude_plan_multitask,
+                group=target)
+    assert got == []
 
 
 # ---------------------------------------------------------------------------

@@ -202,3 +202,39 @@ records adding an optional shared transport as the fix.
   are unaffected until they opt in, with no mid-session break. An unrecognized
   `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
   transport.
+
+### ADR: `query` Phase-2/3 facets — `parent`/`group` landed, `kind` removed
+
+- **What changed.** The `query` verb's stubbed forward-compat facets (which
+  previously fail-loud-raised on any value) are resolved. `parent` (session
+  subtree) and `group` (plan-task) are implemented; `kind` is removed from the
+  core `query` and kept in the MCP wrapper **only as a fail-loud tombstone**
+  (see below).
+- **`parent`** — a session-level filter (like `noise`/`project_dir`, applied in
+  `iter_events` before any message is read): keep events of every session that
+  is a transitive `parent_uuid` descendant of the given uuid. Closure is built
+  per-agent via `ai_r.events.model._descendant_uuids` (`parent_uuid` never
+  crosses agents), cycle-safe, and the root session itself is excluded (its own
+  events are reachable via `session=<uuid>`). An unknown uuid → honest empty
+  result; an empty-string value fails loud.
+- **`group`** — an event-level `plan_event` filter applied after collection:
+  keep only plan_events whose `task_id` equals the value, reusing the SSOT
+  `_assign_plan_kinds` grouping (no second grouper). Non-plan events never match
+  a `group` filter; an empty-string value fails loud.
+- **Why drop `kind`.** It 100 % duplicated `noise` (`noise="exclude"`≡top-level,
+  `noise="only"`≡subagents; `is_noise()` = `kind=="subagent" or parent_uuid`).
+  A second facet over the same signal violates the project's DRY rule, so the
+  redundant facet was removed rather than implemented as an alias.
+- **`kind` tombstone (fail-loud, not silent).** Simply deleting `kind` from the
+  MCP wrapper is unsafe: the MCP transport silently drops a truly-unknown
+  argument, so a stale client passing `kind="subagent"` would get an
+  **unfiltered** result — a silent wrong answer, exactly what the project's
+  "never silent" rule forbids. So the wrapper keeps a `kind` parameter that
+  returns `invalid_argument` for any value, pointing the caller at `noise`. The
+  core `query` (Python API) has no `kind` at all (a direct call raises
+  `TypeError`).
+- **Boundaries / invariants.** Both facets are ignored on the `relative_to`
+  walk (the anchor pins one session), consistent with `noise`/`project_dir`;
+  validation still runs up-front so a malformed value fails loud even there.
+  `iter_events` gained a `parent` parameter. `plan()` and `incidents` keep their
+  own independent `kind`/`group` parameters — different verbs, unaffected.

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`query` `parent` and `group` facets** (Phase 2/3 stubs resolved). `parent=<uuid>`
+  scopes to a session's subagent subtree — every transitive `parent_uuid`
+  descendant (direct + nested), root excluded, closure built per-agent
+  (`_descendant_uuids`), applied before any message is read like `noise`.
+  `group=<task_id>` scopes `plan_event`s to one plan-task, reusing the SSOT
+  `_assign_plan_kinds` grouping; non-plan events never match. Unknown `parent`
+  uuid / non-plan `group` → honest empty result; empty-string values fail loud.
 - **Contribution gate: LLM e2e scenarios are mandatory for functionality
   changes.** `CONTRIBUTING.md` and the PR template now require that any
   change touching the public surface passes BOTH gates: the pytest suite
@@ -30,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md` now list all five parser functions
   (`list_sessions` / `read_session` / `read_messages` / `search` /
   `session_exists`, per `docs/architecture.md`) instead of four.
+
+### Removed
+
+- **`query`'s `kind` facet** — it 100 % duplicated `noise`
+  (`noise="exclude"`≡top-level sessions, `noise="only"`≡subagents). Removed
+  from the core verb rather than implemented as an alias (DRY). It survives in
+  the MCP wrapper only as a **fail-loud tombstone**: passing any value returns
+  `invalid_argument` pointing at `noise` (the transport would otherwise
+  silently drop the unknown argument and return an unfiltered result). A direct
+  Python `query(kind=…)` raises `TypeError`. `plan()`/`incidents` keep their own
+  independent `kind` parameters.
 
 ### Fixed
 

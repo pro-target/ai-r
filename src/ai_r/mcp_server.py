@@ -1808,9 +1808,9 @@ def query(
     with_intent: bool = False,
     noise: str = "include",
     project_dir: Optional[str] = None,
-    kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    kind: Optional[str] = None,
     redact: bool = True,
 ) -> dict[str, Any]:
     """Filter/search the unified session **event** stream — the workhorse verb.
@@ -1886,10 +1886,20 @@ def query(
     never match.  Ignored on the ``relative_to`` walk, like every other
     filter facet.
 
-    ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
-    **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
-    non-``None`` value is a fail-loud error (returns the standard
-    ``invalid_argument`` dict) rather than a silent no-op.
+    ``parent`` also filters at the *session* level: keep only events of
+    sessions that are a **descendant** (transitively, any depth) of this
+    session uuid in the subagent ``parent_uuid`` tree — the whole spawned
+    subtree below ``parent`` (direct children plus nested).  ``parent``
+    itself is excluded (its own events are reachable via
+    ``session=<parent>``).  An unknown uuid matches nothing (honest empty
+    result).  Ignored on the ``relative_to`` walk, like every other filter
+    facet.
+
+    ``group`` filters at the *event* level, plan_events only: keep only the
+    plan_events whose ``task_id`` (the plan-task grouping key — plan-file
+    slug or normalized title) equals this value.  Non-plan events never
+    match when ``group`` is set, so combining ``group`` with a non-plan
+    ``type`` yields an honest empty result.
 
     ``redact=True`` (default) masks secrets in the emitted ``text`` /
     ``intent`` fields as ``[REDACTED_<TYPE>]`` and adds a top-level
@@ -1903,12 +1913,28 @@ def query(
     nothing was cut).  ``id``/``refs``/``sha256`` are untouched — fetch the
     full body on demand with ``get_body(id)``.
 
+    ``kind`` was **removed** — it duplicated ``noise`` (``noise="only"`` for
+    subagents, ``noise="exclude"`` for top-level).  It is kept in the signature
+    only as a fail-loud tombstone: passing any value returns an
+    ``invalid_argument`` error pointing at ``noise`` rather than silently
+    ignoring it (the MCP transport would otherwise drop an unknown argument and
+    return an unfiltered result — a silent wrong answer).
+
     Returns ``{"events": [...], "count": N}`` or the standard
     ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
     ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
     agents + session counts, corpus date bounds, cause hints) so an empty
     result is explainable.
     """
+    if kind is not None:
+        return {
+            "error": "invalid_argument",
+            "message": (
+                "the 'kind' facet was removed as a duplicate of 'noise'; "
+                "use noise='only' for subagent sessions or noise='exclude' "
+                "for top-level sessions"
+            ),
+        }
     # Filled by the core scan with the per-agent list_sessions() results,
     # reused by the empty-result diagnostics so an empty result never pays
     # for a second corpus walk.
@@ -1935,7 +1961,6 @@ def query(
             with_intent=with_intent,
             noise=noise,
             project_dir=project_dir,
-            kind=kind,
             parent=parent,
             group=group,
             scanned_sessions_out=scanned_sessions,
