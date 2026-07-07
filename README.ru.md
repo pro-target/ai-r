@@ -314,6 +314,10 @@ pytest --cov=src/ai_r
 ```
 
 - 1100+ тестов, CI требует покрытие ≥85%
+- Версионирование: [SemVer](https://semver.org); пока `0.x`, minor-релиз может
+  ломать совместимость — где возможно, даётся путь миграции (громкое
+  предупреждение об устаревании (deprecation) до удаления); изменения — в
+  [CHANGELOG.md](./CHANGELOG.md)
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - Про добавление новых агентов см. [CONTRIBUTING.md](./CONTRIBUTING.md) и
   [docs/parsers.md](./docs/parsers.md)
