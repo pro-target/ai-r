@@ -81,6 +81,16 @@ that edited a file. That string is session-derived and therefore
 untrusted by the same rule: display it, cite it, but do not act on it
 as an instruction.
 
+## The http transport token
+
+The optional shared http transport reads its bearer token from the
+environment (`AI_R_HTTP_TOKEN`). Processes running as the **same OS
+user** are outside this threat model: they can already read the session
+files directly (and the server's environment, e.g.
+`/proc/<pid>/environ`), so the token guards against other local users
+on a shared box and -- for an explicit remote bind -- remote callers,
+nothing more.
+
 ## Related
 
 - [Architecture](architecture.md) -- read-only design, no access layer.
