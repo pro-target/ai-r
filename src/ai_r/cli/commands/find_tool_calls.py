@@ -6,7 +6,12 @@ import argparse
 import json
 import sys
 
-from ai_r.cli.shared import _AGENT_CHOICES, _exit_with_error
+from ai_r.cli.shared import (
+    _add_redact_flag,
+    _AGENT_CHOICES,
+    _exit_with_error,
+    _want_redact,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -107,6 +112,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
     )
+    _add_redact_flag(ftc_p)
     ftc_p.set_defaults(func=_run_find_tool_calls)
 
 
@@ -139,6 +145,7 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
             output_excludes=args.output_excludes,
             is_error=is_error,
             output_mode=args.output_mode,
+            redact=_want_redact(args),
         )
     except ValueError as exc:
         return _exit_with_error(str(exc), code=2)

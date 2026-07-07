@@ -10,11 +10,13 @@ from typing import Any, List
 
 from ai_r.cli.shared import (
     _add_filter_group,
+    _add_redact_flag,
     _AGENT_CHOICES,
     _exit_with_error,
     _format_table,
     _passes_date_filters,
     _validate_date_args,
+    _want_redact,
 )
 from ai_r.parsers import AgentName, Session, target_agents as _target_agents
 
@@ -52,6 +54,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Emit JSON instead of a human-readable table.",
     )
     _add_filter_group(search_p)
+    _add_redact_flag(search_p)
     search_p.set_defaults(func=_run_search)
 
 
@@ -106,6 +109,7 @@ def _run_search(args: argparse.Namespace) -> int:
         operator=operator,
         limit=0,
         sort=sort,
+        redact=_want_redact(args),
     )
 
     if isinstance(raw, dict) and raw.get("error") == "invalid_argument":

@@ -386,7 +386,7 @@ def test_plan_atoms_carry_chronological_versions(
     fake_claude_plan_redraft: str,
 ) -> None:
     plans = plan(session=fake_claude_plan_redraft, bodies="none")
-    # One task, 4 revisions → v1..v4 in (ts, seq) order; the final is vN.
+    # One task, 4 revisions → v1..v4 in file/append order; the final is vN.
     assert [p["version"] for p in plans] == [1, 2, 3, 4]
     final = [p for p in plans if p["kind"] == "final"][0]
     assert final["version"] == 4
@@ -534,6 +534,309 @@ def test_plan_events_normalized_across_agents(
     assert "codex:update_plan" in signals
     assert "antigravity:implementation_plan.md" in signals
     assert all(e["type"] == "plan_event" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Regression — PR#4 audit defects #3 (redact-then-cap order) and #4
+# (file/append-order signal binding under NON-monotonic timestamps).
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+def _write_jsonl_local(path: Path, records: "list[dict]") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _exit_plan_rec(plan_text: str, tool_use_id: str, ts: str) -> dict:
+    """A Claude assistant record with one ``ExitPlanMode`` (carrying an id)."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": "ExitPlanMode",
+                "input": {"plan": plan_text},
+            }],
+        },
+        "timestamp": ts,
+    }
+
+
+def _tool_result_rec(tool_use_id: str, content: str, ts: str) -> dict:
+    """A Claude user record carrying one ``tool_result``."""
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+            }],
+        },
+        "timestamp": ts,
+    }
+
+
+@pytest.fixture
+def fake_claude_plan_nonmonotonic(tmp_sessions_dir: Path) -> str:
+    """Claude plan session whose plan_event timestamps are NON-monotonic.
+
+    Two ExitPlanMode revisions of ONE task, emitted in file order rev1→rev2,
+    but the SECOND revision's timestamp is EARLIER than the first (clock skew
+    / out-of-order write — happens on real vaults).  Each revision carries a
+    distinct body so a mis-binding (ts order instead of file order) is
+    detectable: ``plan()`` would hand the final atom the WRONG revision's body
+    and version, and ``plan_feedback`` would correlate the rejection to the
+    wrong revision.
+    """
+    session_id = "plan-nonmono-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    reject_boiler = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected. To tell you how to proceed, the "
+        "user said:\n"
+    )
+    _write_jsonl_local(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan it"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            # rev1 (file order first) — LATER timestamp.
+            _exit_plan_rec("# Feature Plan\n\nFIRST revision body.",
+                           "tu-a", "2026-06-14T10:05:00Z"),
+            _tool_result_rec(
+                "tu-a",
+                reject_boiler + "Rework the FIRST revision.\n",
+                "2026-06-14T10:05:01Z"),
+            # rev2 (file order second) — EARLIER timestamp (non-monotonic).
+            _exit_plan_rec("# Feature Plan\n\nSECOND revision body.",
+                           "tu-b", "2026-06-14T10:01:00Z"),
+        ],
+    )
+    return session_id
+
+
+def test_plan_nonmonotonic_binds_body_by_file_order(
+    fake_claude_plan_nonmonotonic: str,
+) -> None:
+    """Defect #4: the FINAL plan atom must carry the file-last revision's body.
+
+    In file order rev2 ("SECOND revision body.") is the final revision; its
+    later, earlier-stamped timestamp must not hand the final atom rev1's body.
+    """
+    final = plan(session=fake_claude_plan_nonmonotonic, kind="final")[0]
+    assert "SECOND revision body." in final["body"]
+    assert "FIRST revision body." not in (final["body"] or "")
+
+
+def test_plan_nonmonotonic_get_body_agrees_with_plan(
+    fake_claude_plan_nonmonotonic: str,
+) -> None:
+    """Defect #4: ``plan()`` body and ``get_body()`` body must not diverge.
+
+    ``get_body`` already resolves signals by file order; before the fix
+    ``plan`` bound them by ts order, so the two disagreed on a non-monotonic
+    session.  Assert every plan atom's inlined/final body matches ``get_body``
+    for the same id.
+    """
+    plans = plan(session=fake_claude_plan_nonmonotonic)
+    for p in plans:
+        body = get_body(p["id"], redact=False)
+        if p.get("kind") == "final":
+            assert p["body"] == body.get("body")
+    # And the final atom's body is the file-last revision's.
+    final = [p for p in plans if p["kind"] == "final"][0]
+    assert "SECOND revision body." in get_body(final["id"])["body"]
+
+
+def test_plan_nonmonotonic_versions_follow_file_order(
+    fake_claude_plan_nonmonotonic: str,
+) -> None:
+    """Defect #4: version numbers follow file/append order, not ts order.
+
+    rev1 (file-first) = v1/draft, rev2 (file-last) = v2/final — even though
+    rev2 carries the earlier timestamp.
+    """
+    plans = plan(session=fake_claude_plan_nonmonotonic, bodies="none")
+    by_body = {p["id"]: p for p in plans}
+    # Resolve which id is which revision via get_body.
+    rev_of = {
+        pid: (
+            "first" if "FIRST revision body." in (get_body(pid)["body"] or "")
+            else "second"
+        )
+        for pid in by_body
+    }
+    ver = {rev_of[p["id"]]: p["version"] for p in plans}
+    kind = {rev_of[p["id"]]: p["kind"] for p in plans}
+    assert ver == {"first": 1, "second": 2}
+    assert kind == {"first": "draft", "second": "final"}
+
+
+def test_plan_feedback_nonmonotonic_correlates_to_right_revision(
+    fake_claude_plan_nonmonotonic: str,
+) -> None:
+    """Defect #4: the rejection binds to rev1 (which it answered), by call-id.
+
+    The signal→plan_id map is built over the file-order id list; a ts-order
+    list would attach the rejection's ``plan_id``/``plan_version`` to the
+    wrong revision.
+    """
+    pairs = plan_feedback(session=fake_claude_plan_nonmonotonic)
+    assert len(pairs) == 1
+    p = pairs[0]
+    assert p["comment"] == "Rework the FIRST revision."
+    # The rejection answered rev1 → its plan_id resolves to the FIRST body.
+    assert "FIRST revision body." in get_body(p["plan_id"])["body"]
+    assert p["plan_version"] == 1
+
+
+@pytest.fixture
+def fake_claude_feedback_secret_at_cap(
+    tmp_sessions_dir: Path,
+) -> "tuple[str, str, int]":
+    """Claude plan session whose rejection blob puts a secret AT the cap edge.
+
+    The raw response is boilerplate + a GitHub token positioned so a naive
+    cap-BEFORE-redact would slice the token, leaking its unmasked prefix.
+    """
+    session_id = "plan-capsecret-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    reject_boiler = (
+        "The user doesn't want to proceed with this tool use. "
+        "The tool use was rejected. To tell you how to proceed, the "
+        "user said:\n"
+    )
+    # A well-formed GitHub token (ghp_ + 36 token chars) the redactor masks.
+    secret = "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"
+    assert len(secret) == 40
+    # Free-text comment: prefix padding then the secret, so the secret sits
+    # at a KNOWN raw offset (``prefix``) inside the raw response.
+    prefix = reject_boiler + ("X" * 30) + " see key "
+    body_txt = prefix + secret + " trailing\n"
+    _write_jsonl_local(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _exit_plan_rec("# Plan\n\nBody.", "tu-x",
+                           "2026-06-14T10:00:05Z"),
+            _tool_result_rec("tu-x", body_txt, "2026-06-14T10:00:06Z"),
+        ],
+    )
+    # The cut lands INSIDE the raw secret span: prefix + 10 chars of the token.
+    # cap-BEFORE-redact would slice the token here (leaving ``ghp_a1b2c3`` —
+    # too short to match the redactor → leaked); redact-BEFORE-cap masks the
+    # whole token first, so nothing raw survives.
+    cut_at = len(prefix) + 10
+    return session_id, secret, cut_at
+
+
+def test_feedback_body_redacts_secret_sliced_by_cap(
+    fake_claude_feedback_secret_at_cap: "tuple[str, str, int]",
+) -> None:
+    """Defect #3: a cap edge INSIDE a raw secret must NOT leak its prefix.
+
+    The cut offset lands mid-token in the RAW response.  With the correct
+    redact-THEN-cap order the whole token is masked to ``[REDACTED_*]`` before
+    the cap runs, so no raw fragment survives; the buggy cap-then-redact order
+    slices the raw token and emits its unmatched leading half verbatim.
+    """
+    session_id, secret, cut_at = fake_claude_feedback_secret_at_cap
+    ref = f"{session_id}:pf0"
+    capped = get_body(ref, max_chars=cut_at)
+    text = capped["text"]
+    # No fragment of the raw secret (prefix or otherwise) may appear.
+    assert secret not in text
+    assert secret[:12] not in text  # a mid-token leading fragment
+    assert "ghp_" not in text
+    assert capped.get("body_truncated") is True
+    # Sanity: without the cap the token IS present as a redaction marker
+    # (proves the cut really did land inside the masked span).
+    assert "[REDACTED_GITHUB_TOKEN]" in get_body(ref, max_chars=0)["text"]
+
+
+def test_get_body_turn_redacts_secret_sliced_by_cap(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Defect #3: same guarantee on the turn-text ``get_body`` path.
+
+    A user_turn whose text embeds a secret must never leak a raw fragment
+    when the char cap falls inside the secret span.
+    """
+    secret = "ghp_" + "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4j3i2"
+    assert len(secret) == 40
+    prefix = ("P" * 20) + " see key "
+    session_id = "turn-capsecret-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl_local(
+        jsonl,
+        [{
+            "type": "user",
+            "message": {"role": "user", "content": prefix + secret + " end"},
+            "timestamp": "2026-06-14T10:00:00Z",
+        }],
+    )
+    ev = query(type="user_turn", session=session_id, redact=False)[0]
+    capped = get_body(ev["id"], max_chars=len(prefix) + 10)
+    assert secret not in capped["text"]
+    assert "ghp_" not in capped["text"]
+    assert capped.get("body_truncated") is True
+    assert "[REDACTED_GITHUB_TOKEN]" in get_body(ev["id"], max_chars=0)["text"]
+
+
+def test_get_body_plan_body_redacts_secret_sliced_by_cap(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Defect #3: same guarantee on the plan-body ``get_body`` path."""
+    secret = "ghp_" + "q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8"
+    assert len(secret) == 40
+    session_id = "planbody-capsecret-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-plan"
+        / f"{session_id}.jsonl"
+    )
+    prefix = "# Plan\n\nSee key "
+    plan_text = prefix + secret + " for auth, then proceed."
+    _write_jsonl_local(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "plan"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            _exit_plan_rec(plan_text, "tu-p", "2026-06-14T10:00:05Z"),
+        ],
+    )
+    final = plan(session=session_id, kind="final")[0]
+    capped = get_body(final["id"], max_chars=len(prefix) + 10)
+    assert secret not in capped["body"]
+    assert "ghp_" not in capped["body"]
+    assert capped.get("body_truncated") is True
+    assert "[REDACTED_GITHUB_TOKEN]" in get_body(final["id"], max_chars=0)["body"]
 
 
 # ---------------------------------------------------------------------------

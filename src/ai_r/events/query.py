@@ -205,8 +205,6 @@ def query(
     with_intent: bool = False,
     noise: str = "include",
     project_dir: Optional[str] = None,
-    # --- Phase-2/3 placeholders (accepted, TODO not-yet-implemented) ---
-    kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
     scanned_sessions_out: Optional[dict[str, Any]] = None,
@@ -276,6 +274,25 @@ def query(
       without a ``project_dir`` signal never match.  Like ``noise``,
       applied before any message is read, and ignored on the
       ``relative_to`` walk.
+    * ``parent`` — session-level subtree filter: keep events of every
+      session that is a **descendant** (transitively, any depth) of this
+      session uuid in the ``parent_uuid`` tree — the whole spawned-subagent
+      subtree below ``parent`` (direct children plus nested).  ``parent``
+      itself is excluded (its own events are reachable via
+      ``session=<parent>``).  Closure SSOT:
+      :func:`ai_r.events.model._descendant_uuids` (built per-agent —
+      ``parent_uuid`` never crosses agents).  An unknown uuid matches
+      nothing (honest empty result, never an error); an empty-string value
+      is a fail-loud :class:`ValueError`.  Like ``noise``, applied before
+      any message is read, and ignored on the ``relative_to`` walk.
+    * ``group`` — event-level ``plan_event`` filter: keep only the
+      plan_events whose ``task_id`` equals this value (the plan-task
+      grouping key computed by the SSOT :func:`_assign_plan_kinds` — the
+      plan-file slug when the agent has one, else the normalized title).
+      NON-plan_event events never match when ``group`` is set (it is a
+      plan-only facet), so combining ``group`` with a non-plan ``type`` is
+      an honest empty result.  Applied AFTER the events are collected.  An
+      empty-string value is a fail-loud :class:`ValueError`.
 
     ``scanned_sessions_out`` is a caller-owned out-dict forwarded to
     :func:`iter_events` — it collects the per-agent ``list_sessions()``
@@ -293,12 +310,6 @@ def query(
     active-ranking report (``active``/``model``/``candidates``/``weight``)
     or the honest degradation notice (``active: false`` + plain-words
     ``reason`` + ``fallback: "bm25"``).
-
-    ``kind`` / ``parent`` / ``group`` are **not yet implemented** (Phase 2/3
-    — plan/subagent facets).  They are accepted in the signature for forward
-    compatibility, but passing a non-``None`` value raises
-    :class:`ValueError` (fail-loud) rather than silently no-op'ing, so an
-    external client is never misled into thinking a filter was applied.
 
     Returns a list of event dicts (see :func:`_event_to_dict`).  Invalid
     arguments raise :class:`ValueError` (the MCP wrapper converts these
@@ -329,6 +340,14 @@ def query(
         )
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
+    # Symmetric with the other record-capping tools (network/incidents/
+    # find_file_edits): ``limit`` is a non-negative record cap (``0`` = no
+    # cap).  Fail loud on negatives instead of the silent ``survivors[:-1]``
+    # slice that would drop the newest event.
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError(
+            f"limit must be a non-negative integer, got {limit!r}"
+        )
     # F3.2: validate the session facet up front (single uuid or a list of
     # uuids), so a malformed value fails loud even on the ``relative_to``
     # walk — where, like every other facet, it may otherwise go unused.
@@ -353,12 +372,17 @@ def query(
     if not n_all and n_int < 1:
         raise ValueError(f"n must be >= 1 or 'all', got {n!r}")
 
-    # Phase 2/3 facets (kind=subagent + parent tree, group for plan_event) are
-    # not implemented yet.  Fail loud rather than silently ignore, so a caller
-    # is never misled into thinking the filter took effect.
-    if kind is not None or parent is not None or group is not None:
+    # ``parent`` (session-subtree) and ``group`` (plan-task) facets: if given
+    # they must be non-empty strings (an empty string is a caller mistake, not
+    # "match nothing" — fail loud, consistent with the other facets).
+    if parent is not None and (not isinstance(parent, str) or not parent.strip()):
         raise ValueError(
-            "kind/parent/group not yet supported (Phase 2/3 stub)"
+            f"parent must be a non-empty session-uuid string or None, "
+            f"got {parent!r}"
+        )
+    if group is not None and (not isinstance(group, str) or not group.strip()):
+        raise ValueError(
+            f"group must be a non-empty task-id string or None, got {group!r}"
         )
 
     # --- relative_to walk: needs a single, contiguous, ordered stream ----
@@ -388,6 +412,15 @@ def query(
     tool_needle = tool.lower() if tool else None
     text_needle = text.lower() if text else None
 
+    # ``group`` is a plan-only facet: pre-restrict the type gate to
+    # plan_event so a non-plan event never survives (and it composes with an
+    # explicit ``type`` — a contradictory ``type != plan_event`` then yields an
+    # honest empty result).
+    if group is not None and type is not None and not _type_matches(
+        "plan_event", type
+    ):
+        return []
+
     survivors: List[Event] = []
     score_texts: List[str] = []
     for ev in iter_events(
@@ -395,8 +428,11 @@ def query(
         session=session,
         noise=noise,
         project_dir=project_dir,
+        parent=parent,
         scanned_sessions_out=scanned_sessions_out,
     ):
+        if group is not None and ev.type != "plan_event":
+            continue
         if type is not None and not _type_matches(ev.type, type):
             continue
         if since_dt is not None or until_dt is not None:
@@ -429,6 +465,26 @@ def query(
                 continue
         survivors.append(ev)
         score_texts.append((ev.text or "").lower())
+
+    if group is not None and survivors:
+        # Plan-task grouping SSOT: run the SAME ``_assign_plan_kinds`` the
+        # ``plan`` preset uses over the collected plan_events, map each id to
+        # its ``task_id``, and keep only the requested task.  Lazy import — the
+        # plan module imports ``query`` (avoid the package-load cycle).
+        from ai_r.events.plan import _assign_plan_kinds
+
+        plan_dicts = [_event_to_dict(ev) for ev in survivors]
+        task_by_id = {
+            p.id: p.task_id for p in _assign_plan_kinds(plan_dicts)
+        }
+        keep = {ev.id for ev in survivors if task_by_id.get(ev.id) == group}
+        paired = [
+            (ev, txt)
+            for ev, txt in zip(survivors, score_texts)
+            if ev.id in keep
+        ]
+        survivors = [ev for ev, _ in paired]
+        score_texts = [txt for _, txt in paired]
 
     if sort_lc in ("relevance", "semantic") and text_needle and survivors:
         # Re-use the SAME BM25 scorer that backs search_sessions.

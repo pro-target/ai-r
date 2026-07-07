@@ -97,6 +97,30 @@ _PATTERNS: Tuple[Tuple[str, str], ...] = (
         "SLACK_TOKEN",
         r"\bxox[baprs]-(?=[A-Za-z0-9\-]*\d)[A-Za-z0-9\-]{10,}(?![A-Za-z0-9\-])",
     ),
+    # Stripe secret / restricted keys: ``sk_live_``/``sk_test_`` (and the
+    # restricted ``rk_`` variants).  The ``_live_``/``_test_`` infix + fixed
+    # ``[sr]k_`` prefix make these unambiguous secrets — no digit lookahead
+    # needed (a bare ``sk_live_`` prefix is never prose).  Placed above the
+    # ``sk-`` (hyphen) OpenAI/Anthropic patterns: different separator, so
+    # there is no overlap, but keeping vendor tokens grouped stays readable.
+    (
+        "STRIPE_KEY",
+        r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}\b",
+    ),
+    # JSON Web Tokens: three base64url segments joined by dots.  The literal
+    # ``eyJ`` prefix is base64url for ``{"`` — every JWT header starts with
+    # it, so it anchors the match cheaply.  Each segment is a single
+    # ``[A-Za-z0-9_-]+`` run with NO nested quantifier, so the alternation
+    # stays linear (no catastrophic backtracking).
+    (
+        "JWT",
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+    ),
+    # Google API keys: fixed ``AIza`` prefix + 35 url-safe chars (39 total).
+    (
+        "GOOGLE_API_KEY",
+        r"\bAIza[0-9A-Za-z_\-]{35}\b",
+    ),
     # ``user:password@`` inside a URL with an explicit scheme.  Only the
     # credentials span is replaced — scheme, host and path survive.
     (

@@ -302,6 +302,36 @@ def test_read_messages_desktop_only_is_empty(
     assert claude.read_messages(_GHOST_UUID) == []
 
 
+def test_ghost_listed_is_readable_with_explicit_roots(
+    dual_roots: tuple[str, str],
+) -> None:
+    """Defect #7-C: a Desktop-ghost surfaced by ``list_sessions(base, desktop)``
+    must be openable by ``read_session`` / ``read_messages`` under the SAME
+    explicit roots — list and read must agree, no 404.
+
+    Before the fix ``read_messages`` had no ``desktop_dir`` parameter, so a
+    ghost that ``list_sessions`` showed 404'd on read (passing only
+    ``base_dir`` disabled the Desktop overlay).
+    """
+    base, desktop = dual_roots
+    listed = {s.uuid for s in claude.list_sessions(base_dir=base, desktop_dir=desktop)}
+    assert _GHOST_UUID in listed  # the ghost is visible in list
+
+    # read_session must resolve it under the same explicit roots.
+    ghost = claude.read_session(_GHOST_UUID, base_dir=base, desktop_dir=desktop)
+    assert ghost.extra["source_root"] == "desktop"
+    assert ghost.message_count == 0
+
+    # read_messages (now threading desktop_dir) must NOT 404 — empty is fine.
+    msgs = claude.read_messages(_GHOST_UUID, base_dir=base, desktop_dir=desktop)
+    assert msgs == []
+
+    # Every listed session must be readable through read_messages — the
+    # list/read agreement invariant, checked over the whole corpus.
+    for uuid in listed:
+        claude.read_messages(uuid, base_dir=base, desktop_dir=desktop)
+
+
 def test_session_exists_covers_desktop(dual_roots: tuple[str, str]) -> None:
     base, desktop = dual_roots
     assert claude.session_exists(_GHOST_UUID, base_dir=base, desktop_dir=desktop)

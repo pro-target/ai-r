@@ -274,17 +274,35 @@ def extract_title(
     return title if title is not None else "Untitled"
 
 
-def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
+def _parent_uuid_from_subagent_path(
+    jsonl_path: Path, base_dir: Optional[Path] = None
+) -> Optional[str]:
     """Return the parent-session uuid for a ``subagents/`` file, else ``None``.
 
-    Claude stores spawned subagents under
-    ``projects/<slug>/<parent-uuid>/subagents/agent-*.jsonl`` *or*
-    ``projects/<slug>/subagents/agent-*.jsonl``.  When the file sits in a
-    ``subagents`` directory, the parent uuid is the name of the directory
-    holding ``subagents`` (the parent session's own folder).  Returns
-    ``None`` when the path is not a subagent file or the folder holding
-    ``subagents`` is the project slug itself (flat form, no per-session
-    wrapper) — there the ``sessionId`` scan supplies the spawner instead.
+    Claude stores spawned subagents under one of two on-disk shapes:
+
+    * **directory form** — ``<base>/<slug>/<parent-uuid>/subagents/agent-*.jsonl``:
+      the folder wrapping ``subagents/`` is the parent session's own uuid
+      folder, so its name IS the (immediate) parent uuid.
+    * **flat form** — ``<base>/<slug>/subagents/agent-*.jsonl``: the folder
+      wrapping ``subagents/`` is the project-*slug* dir, not a session uuid.
+      There is no per-path parent — the ``sessionId`` scan (top-level
+      spawner) supplies it instead, and this function returns ``None``.
+
+    Discriminating the two shapes must NOT hinge on a directory being
+    literally named ``projects`` (that breaks the moment a caller passes a
+    custom ``base_dir`` whose leaf is not ``projects`` — defect #7-B).  The
+    real signal is *structural depth relative to the scan root*: the slug
+    dir sits directly under ``base_dir``.  So:
+
+    * ``subagents/``'s parent's parent == ``base_dir``  → the wrapping
+      folder is the slug → **flat form** → ``None``;
+    * otherwise (a per-session uuid folder sits between slug and
+      ``subagents/``) → **directory form** → the wrapping folder name.
+
+    When ``base_dir`` is not supplied (legacy single-arg callers, e.g. unit
+    tests that hand a bare path), fall back to the historical literal-name
+    heuristic so their behaviour is unchanged.
     """
     parent = jsonl_path.parent
     if parent.name != "subagents":
@@ -293,12 +311,69 @@ def _parent_uuid_from_subagent_path(jsonl_path: Path) -> Optional[str]:
     grandparent_name = grandparent.name
     if not grandparent_name:
         return None
-    # Flat form: the folder wrapping ``subagents/`` is the ``projects/<slug>``
-    # dir (its own parent is literally ``projects``).  That name is the
-    # project slug, NOT a session uuid — no reliable parent from the path.
+    if base_dir is not None:
+        # Structural test: is the ``subagents/`` wrapper the slug dir
+        # (its own parent is the scan root)?  Then it is the flat form.
+        try:
+            base_resolved = base_dir.resolve()
+            wrapper_parent_resolved = grandparent.parent.resolve()
+        except OSError:
+            base_resolved = base_dir
+            wrapper_parent_resolved = grandparent.parent
+        if wrapper_parent_resolved == base_resolved:
+            return None
+        return grandparent_name
+    # Legacy fallback (no scan root known): the flat form's slug dir sits
+    # directly under a folder literally named ``projects``.
     if grandparent.parent.name == "projects":
         return None
     return grandparent_name
+
+
+def _read_subagent_meta(
+    jsonl_path: Path,
+) -> Tuple[Optional[str], Optional[int]]:
+    """Return ``(tool_use_id, spawn_depth)`` from a subagent's ``.meta.json``.
+
+    Claude writes a sidecar ``agent-*.meta.json`` next to every
+    ``subagents/agent-*.jsonl`` transcript.  Observed shape::
+
+        {"agentType": "...", "description": "...",
+         "toolUseId": "toolu_...", "spawnDepth": <int>}
+
+    ``toolUseId`` is the id of the ``Task``/``Agent`` ``tool_use`` block
+    that spawned THIS subagent — it appears verbatim in the *spawner's*
+    transcript, which is how a >1-level spawn chain is reconnected to its
+    true parent (defect #7-A: without it, every subagent collapses to the
+    top-level session).  ``spawnDepth`` is 1 for a subagent spawned by the
+    top-level session and increments per nesting level.
+
+    Returns ``(None, None)`` when the file is absent, unreadable, not a
+    JSON object, or carries no usable ``toolUseId`` — absence is honest and
+    the caller falls back to the folder/``sessionId`` parent signal.
+    """
+    if jsonl_path.suffix != ".jsonl":
+        return None, None
+    meta_path = jsonl_path.with_suffix(".meta.json")
+    try:
+        record = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(record, dict):
+        return None, None
+    raw_tuid = record.get("toolUseId")
+    tool_use_id = (
+        raw_tuid.strip()
+        if isinstance(raw_tuid, str) and raw_tuid.strip()
+        else None
+    )
+    raw_depth = record.get("spawnDepth")
+    spawn_depth = (
+        raw_depth
+        if isinstance(raw_depth, int) and not isinstance(raw_depth, bool)
+        else None
+    )
+    return tool_use_id, spawn_depth
 
 
 def _project_dir_from_slug(slug: str) -> Optional[str]:
@@ -351,8 +426,18 @@ def _project_dir_from_slug(slug: str) -> Optional[str]:
     return _resolve(1, "", tokens[0])
 
 
-def _scan_file(jsonl_path: Path) -> Optional[Session]:
+_SPAWN_TOOL_NAMES = ("Task", "Agent")
+
+
+def _scan_file(
+    jsonl_path: Path, base_dir: Optional[Path] = None
+) -> Optional[Session]:
     """Build a :class:`Session` from one Claude JSONL file.
+
+    ``base_dir`` (the scan root) is threaded through so subagent
+    flat/nested detection is structural, not tied to a directory literally
+    named ``projects`` (defect #7-B).  It is optional so existing
+    single-arg unit callers keep working.
 
     Returns ``None`` if the file yields no usable title/timestamp.
 
@@ -384,6 +469,11 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     is_sidechain = False
     record_session_id: Optional[str] = None
     record_cwd: Optional[str] = None
+    # Ids of ``Task``/``Agent`` ``tool_use`` blocks this session emitted —
+    # the spawn edges it is the PARENT of.  The list-level reconciliation
+    # pass maps a child's ``toolUseId`` (from its ``.meta.json``) back to
+    # whichever session emitted it, restoring >1-level hierarchy (#7-A).
+    spawn_tool_use_ids: List[str] = []
 
     for record in iter_jsonl_records(jsonl_path):
         ts = _parse_iso_timestamp(record.get("timestamp", ""))
@@ -410,6 +500,24 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
                     record_session_id = raw_sid.strip()
 
         rec_type = record.get("type")
+        # Harvest spawn-edge ids: an assistant ``Task``/``Agent`` tool_use
+        # block's ``id`` equals the ``toolUseId`` recorded in the spawned
+        # child's ``.meta.json``.  Collected here (cheap, id-only) so the
+        # list pass can rebuild the true parent for depth>1 subagents.
+        if rec_type == "assistant":
+            payload = record.get("message")
+            if isinstance(payload, dict):
+                content = payload.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if (
+                            isinstance(part, dict)
+                            and part.get("type") == "tool_use"
+                            and part.get("name") in _SPAWN_TOOL_NAMES
+                        ):
+                            tu_id = part.get("id")
+                            if isinstance(tu_id, str) and tu_id:
+                                spawn_tool_use_ids.append(tu_id)
         if rec_type == "custom-title" and custom_title is None:
             raw = record.get("customTitle", "")
             if isinstance(raw, str) and raw.strip():
@@ -455,8 +563,9 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     # Record-level ``parentUuid`` (a message uuid) is intentionally NOT a
     # source here — that was the A2 defect.
     own_uuid = jsonl_path.stem
-    path_parent_uuid = _parent_uuid_from_subagent_path(jsonl_path)
-    is_subagent = path_parent_uuid is not None or is_sidechain
+    path_parent_uuid = _parent_uuid_from_subagent_path(jsonl_path, base_dir)
+    in_subagents_dir = jsonl_path.parent.name == "subagents"
+    is_subagent = path_parent_uuid is not None or is_sidechain or in_subagents_dir
     if path_parent_uuid is not None:
         parent_uuid = path_parent_uuid
     elif record_session_id is not None and record_session_id != own_uuid:
@@ -465,14 +574,35 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         parent_uuid = None
 
     # project_slug is the first non-``subagents`` ancestor folder name.
+    # Directory form: ``<slug>/<uuid>/subagents/`` → skip TWO levels.
+    # Flat form:      ``<slug>/subagents/``        → skip ONE level.
+    # The two are told apart structurally by ``_parent_uuid_from_subagent_path``
+    # (non-``None`` == a per-session wrapper folder is present == directory form).
     slug_dir = jsonl_path.parent
     if slug_dir.name == "subagents":
-        slug_dir = slug_dir.parent.parent
+        slug_dir = slug_dir.parent
+        if path_parent_uuid is not None:
+            slug_dir = slug_dir.parent
     project_slug = slug_dir.name
 
     # project_dir: the record-level cwd is authoritative; the storage-slug
     # decode is a filesystem-verified fallback (see _project_dir_from_slug).
     project_dir = record_cwd or _project_dir_from_slug(project_slug)
+
+    extra: dict = {"project_slug": project_slug, "source_root": "cli"}
+    # Spawn hierarchy signals (defect #7-A): the child's own spawning
+    # ``toolUseId`` + ``spawnDepth`` from its ``.meta.json``, and the ids of
+    # the spawn calls THIS session emitted.  Stored so the list-level
+    # reconciliation pass can wire depth>1 subagents to their real parent
+    # instead of collapsing every subagent to the top-level session.
+    if in_subagents_dir:
+        spawn_tool_use_id, spawn_depth = _read_subagent_meta(jsonl_path)
+        if spawn_tool_use_id is not None:
+            extra["spawn_tool_use_id"] = spawn_tool_use_id
+        if spawn_depth is not None:
+            extra["spawn_depth"] = spawn_depth
+    if spawn_tool_use_ids:
+        extra["_emitted_spawn_ids"] = tuple(spawn_tool_use_ids)
 
     return Session(
         uuid=jsonl_path.stem,
@@ -485,7 +615,7 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         kind="subagent" if is_subagent else "agent",
         project_dir=project_dir,
         launch_surface="claude-cli",
-        extra={"project_slug": project_slug, "source_root": "cli"},
+        extra=extra,
     )
 
 
@@ -658,6 +788,62 @@ def _apply_desktop_overlay(
     return sessions
 
 
+def _reconcile_spawn_hierarchy(sessions: List[Session]) -> List[Session]:
+    """Rewire depth>1 subagents to their TRUE parent (defect #7-A).
+
+    Every subagent transcript lives in ONE flat ``subagents/`` folder under
+    the top-level session, and its ``sessionId`` / wrapper-folder name both
+    point at that top-level session — so on their own signals ALL
+    subagents, however deeply nested, collapse to the root.  Claude's
+    ``.meta.json`` breaks the tie: each child records the ``toolUseId`` of
+    the ``Task``/``Agent`` call that spawned it, and that id appears in the
+    *spawner's* transcript.  ``_scan_file`` already stashed, per session,
+    the child's own ``spawn_tool_use_id`` (``extra``) and the ids it
+    emitted (``extra["_emitted_spawn_ids"]``); here we join the two.
+
+    Only a subagent whose ``spawn_depth > 1`` (or, absent depth, whose
+    ``spawn_tool_use_id`` resolves to an emitter that is NOT its current
+    parent) is rewritten — a depth-1 subagent's top-level parent is already
+    correct.  The internal ``_emitted_spawn_ids`` bookkeeping key is
+    stripped from every session's ``extra`` on the way out so it never
+    leaks downstream.  ``kind``/subagent status is untouched — only
+    ``parent_uuid`` is corrected.
+    """
+    # Map every emitted spawn tool_use_id -> the session uuid that emitted it.
+    emitter_of: dict[str, str] = {}
+    for s in sessions:
+        emitted = s.extra.get("_emitted_spawn_ids")
+        if isinstance(emitted, tuple):
+            for tuid in emitted:
+                if isinstance(tuid, str) and tuid:
+                    emitter_of.setdefault(tuid, s.uuid)
+
+    out: List[Session] = []
+    for s in sessions:
+        extra = dict(s.extra)
+        emitted_present = "_emitted_spawn_ids" in extra
+        extra.pop("_emitted_spawn_ids", None)
+        new_parent = s.parent_uuid
+        spawn_tuid = extra.get("spawn_tool_use_id")
+        if isinstance(spawn_tuid, str) and spawn_tuid:
+            true_parent = emitter_of.get(spawn_tuid)
+            # Rewire only when the meta points at a real, different emitter
+            # that is not the session itself (self-parent guard).
+            if (
+                true_parent is not None
+                and true_parent != s.uuid
+                and true_parent != s.parent_uuid
+            ):
+                depth = extra.get("spawn_depth")
+                if not isinstance(depth, int) or depth > 1:
+                    new_parent = true_parent
+        if new_parent == s.parent_uuid and not emitted_present:
+            out.append(s)
+            continue
+        out.append(dataclasses.replace(s, parent_uuid=new_parent, extra=extra))
+    return out
+
+
 def list_sessions(
     base_dir: Optional[str] = None, desktop_dir: Optional[str] = None
 ) -> List[Session]:
@@ -689,9 +875,13 @@ def list_sessions(
                 if key in seen:
                     continue
                 seen.add(key)
-                session = _scan_file(jsonl_path)
+                session = _scan_file(jsonl_path, root)
                 if session is not None:
                     sessions.append(session)
+
+    # Rewire >1-level spawn chains to their real parent BEFORE the Desktop
+    # overlay/sort (needs the full CLI session set to resolve emitters).
+    sessions = _reconcile_spawn_hierarchy(sessions)
 
     if _desktop_scan_enabled(base_dir, desktop_dir):
         sessions = _apply_desktop_overlay(
@@ -726,6 +916,62 @@ def _find_session_file(uuid: str, base_dir: Optional[str]) -> Path:
     )
 
 
+def _emitter_of_tool_use_id(jsonl_path: Path, tool_use_id: str) -> bool:
+    """Whether ``jsonl_path`` emitted a spawn ``tool_use`` with this id."""
+    try:
+        for record in iter_jsonl_records(jsonl_path):
+            if record.get("type") != "assistant":
+                continue
+            payload = record.get("message")
+            if not isinstance(payload, dict):
+                continue
+            content = payload.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "tool_use"
+                    and part.get("name") in _SPAWN_TOOL_NAMES
+                    and part.get("id") == tool_use_id
+                ):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_spawn_parent_single(session: Session, path: Path) -> Session:
+    """Correct a single subagent's ``parent_uuid`` via its ``.meta.json``.
+
+    The list-level :func:`_reconcile_spawn_hierarchy` needs the full session
+    set; a lone :func:`read_session` does not have it, so it resolves the
+    emitter of this subagent's ``spawn_tool_use_id`` by scanning the sibling
+    ``subagents/`` transcripts.  Only depth>1 subagents are rewritten (a
+    depth-1 subagent's top-level parent is already correct); the self-parent
+    and same-parent guards mirror the list pass.  No-op when the session is
+    not a subagent, carries no ``spawn_tool_use_id``, or no sibling emits it.
+    """
+    spawn_tuid = session.extra.get("spawn_tool_use_id")
+    if not (isinstance(spawn_tuid, str) and spawn_tuid):
+        return session
+    depth = session.extra.get("spawn_depth")
+    if isinstance(depth, int) and depth <= 1:
+        return session
+    subagents_dir = path.parent
+    if subagents_dir.name != "subagents":
+        return session
+    for sibling in sorted(subagents_dir.glob("agent-*.jsonl")):
+        if sibling == path:
+            continue
+        if _emitter_of_tool_use_id(sibling, spawn_tuid):
+            true_parent = sibling.stem
+            if true_parent != session.uuid and true_parent != session.parent_uuid:
+                return dataclasses.replace(session, parent_uuid=true_parent)
+            return session
+    return session
+
+
 def read_session(
     uuid: str,
     base_dir: Optional[str] = None,
@@ -755,11 +1001,22 @@ def read_session(
                 if session is not None:
                     return session
         raise
-    session = _scan_file(path)
+    root = _resolve_base_dir(base_dir)
+    session = _scan_file(path, root)
     if session is None:
         raise FileNotFoundError(
             f"Claude session {uuid!r} at {path} yielded no parseable data"
         )
+    # Depth>1 spawn parent (defect #7-A): a single read has no session list
+    # to join against, so resolve the emitter of this subagent's
+    # ``spawn_tool_use_id`` directly against its sibling ``subagents/``
+    # transcripts.  Same rewrite rule as the list-level pass.
+    session = _resolve_spawn_parent_single(session, path)
+    # ``_emitted_spawn_ids`` is internal bookkeeping; never surface it.
+    if "_emitted_spawn_ids" in session.extra:
+        cleaned = dict(session.extra)
+        cleaned.pop("_emitted_spawn_ids", None)
+        session = dataclasses.replace(session, extra=cleaned)
     if desktop_enabled:
         index = _load_desktop_index(_resolve_desktop_dir(desktop_dir))
         entry = index.get(uuid)
@@ -1088,18 +1345,28 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
 
 
 def read_messages(
-    uuid: str, base_dir: Optional[str] = None
+    uuid: str,
+    base_dir: Optional[str] = None,
+    desktop_dir: Optional[str] = None,
 ) -> List[Message]:
     """Return the full message list for a Claude session.
 
-    Reuses :func:`read_session` for path resolution.  Tool calls and
-    tool results are preserved on the returned :class:`Message` objects.
+    Reuses :func:`read_session` for path resolution — and threads
+    ``desktop_dir`` through it so this call resolves EVERY session
+    :func:`list_sessions` surfaced under the same roots (defect #7-C: a
+    Desktop-ghost was listable but ``read_messages`` — lacking the
+    ``desktop_dir`` argument — 404'd, because passing only ``base_dir``
+    disables the Desktop overlay).  A Desktop-only session carries no
+    transcript, so its message list is legitimately empty (its ``path`` is
+    the metadata JSON, which yields no ``user``/``assistant`` records) —
+    an honest empty answer, never a crash.  Tool calls and tool results are
+    preserved on the returned :class:`Message` objects.
 
     Raises:
-        FileNotFoundError: the session does not exist.
+        FileNotFoundError: the session does not exist in either root.
         ValueError: ``uuid`` is malformed.
     """
-    session = read_session(uuid, base_dir)
+    session = read_session(uuid, base_dir, desktop_dir)
     return _extract_messages_from_jsonl(Path(session.path))
 
 

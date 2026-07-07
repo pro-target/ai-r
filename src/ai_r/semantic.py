@@ -53,6 +53,7 @@ No persistent index: texts are embedded at request time, nothing is stored.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
@@ -192,12 +193,26 @@ _STATE: dict[str, Any] = {
     "last_used": None,
 }
 
+# Guards every mutation of ``_STATE`` that the idle reaper races against.
+#
+# Under the http transport (:mod:`ai_r.serve`) a *sync* MCP tool runs in an
+# anyio worker thread — that is where ``_get_embedder`` probes and stamps
+# ``last_used`` — while the server's ``_idle_watch`` loop calls
+# :func:`release_if_idle` from the main event-loop thread.  Without this lock
+# the reaper could reset the dict mid-probe (torn load) or free an embedder a
+# request just started using.  A single non-reentrant lock is enough: the
+# guarded sections are trivial dict reads/writes; the *expensive* model build
+# in :func:`_load_embedder` runs OUTSIDE the lock (see :func:`_get_embedder`),
+# so one cold load never serializes the reaper or another reader.
+_STATE_LOCK = threading.Lock()
+
 
 def _reset_state() -> None:
     """Forget the probe result (tests; also after installing the model)."""
-    _STATE.update(
-        {"probed": False, "embedder": None, "reason": None, "last_used": None}
-    )
+    with _STATE_LOCK:
+        _STATE.update(
+            {"probed": False, "embedder": None, "reason": None, "last_used": None}
+        )
 
 
 def release_if_idle(now: Optional[float] = None) -> bool:
@@ -210,20 +225,34 @@ def release_if_idle(now: Optional[float] = None) -> bool:
     "unavailable" outcome is left untouched (nothing to free, and re-probing
     it would just repeat the same filesystem/import work).
 
-    Mechanism note: this is a *pull* check, not a background timer — we never
-    spawn a reaper thread (that would leak threads and break test
-    hermeticity).  It is called opportunistically at the start of each
-    embedder access (:func:`_get_embedder`) and MAY also be called from the
-    server's own loop.  ``now`` defaults to the real monotonic clock but is
-    injectable for tests.
+    Mechanism note: this is a *periodic* check driven by a loop that ticks
+    even while the server is idle — :func:`ai_r.serve.run_http` calls it from
+    its ``_idle_watch`` task (the same loop that idle-exits the process).  It
+    is emphatically NOT called on the request path: freeing the model at the
+    moment a request needs it would only add a reload with no memory win.  We
+    never spawn a reaper thread of our own (that would leak threads and break
+    test hermeticity) — we borrow the server's existing loop.  ``now``
+    defaults to the real monotonic clock but is injectable for tests.
+
+    Thread-safety: the whole check-and-free runs under :data:`_STATE_LOCK`,
+    so it cannot race a concurrent probe/stamp in :func:`_get_embedder` (which
+    under the http transport runs in a different, worker thread).
     """
-    if _STATE["embedder"] is None:
+    with _STATE_LOCK:
+        if _STATE["embedder"] is None:
+            return False
+        current = time.monotonic() if now is None else now
+        if _is_idle(current, _STATE["last_used"], _idle_seconds()):
+            _STATE.update(
+                {
+                    "probed": False,
+                    "embedder": None,
+                    "reason": None,
+                    "last_used": None,
+                }
+            )
+            return True
         return False
-    current = time.monotonic() if now is None else now
-    if _is_idle(current, _STATE["last_used"], _idle_seconds()):
-        _reset_state()
-        return True
-    return False
 
 
 def model_dir() -> Path:
@@ -371,18 +400,37 @@ def _load_embedder() -> Tuple[Optional[_Embedder], Optional[str]]:
 def _get_embedder() -> Tuple[Optional[_Embedder], Optional[str]]:
     """Cached probe: load once per process, remember the outcome.
 
-    Before probing, an idle embedder from an earlier burst is released
-    (:func:`release_if_idle`) so a long-lived server hands the model's ~118 MB
-    back after a quiet stretch and re-loads it transparently on this call.
-    Every access stamps ``last_used`` so the idle clock tracks real usage.
+    Every access stamps ``last_used`` so the idle clock (:func:`release_if_idle`,
+    driven by the server's own loop) tracks real usage.  Releasing is NOT done
+    here on purpose: a request-path release would only reload the model it is
+    about to use — the reaper that frees an *idle* server lives in
+    :func:`ai_r.serve.run_http`.
+
+    Thread-safety: the cheap cache check + ``last_used`` stamp run under
+    :data:`_STATE_LOCK`, but the expensive one-shot :func:`_load_embedder`
+    (the ~118 MB model build) runs OUTSIDE the lock so it never serializes the
+    idle reaper or a concurrent reader.  A rare double build under a race is
+    harmless: last writer wins and both produce an equivalent embedder.
     """
-    release_if_idle()
-    if not _STATE["probed"]:
-        _STATE["probed"] = True
-        _STATE["embedder"], _STATE["reason"] = _load_embedder()
-    if _STATE["embedder"] is not None:
-        _STATE["last_used"] = time.monotonic()
-    return _STATE["embedder"], _STATE["reason"]
+    with _STATE_LOCK:
+        if _STATE["probed"]:
+            embedder, reason = _STATE["embedder"], _STATE["reason"]
+            if embedder is not None:
+                _STATE["last_used"] = time.monotonic()
+            return embedder, reason
+
+    # First probe: build outside the lock (the model load is the slow part).
+    embedder, reason = _load_embedder()
+
+    with _STATE_LOCK:
+        # Only publish the first result; if another thread already probed
+        # while we built, keep the stored outcome (last writer wins is fine).
+        if not _STATE["probed"]:
+            _STATE.update({"probed": True, "embedder": embedder, "reason": reason})
+        embedder, reason = _STATE["embedder"], _STATE["reason"]
+        if embedder is not None:
+            _STATE["last_used"] = time.monotonic()
+        return embedder, reason
 
 
 def semantic_status() -> dict[str, Any]:

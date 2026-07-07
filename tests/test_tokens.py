@@ -26,6 +26,7 @@ from ai_r.tokens import (
     TOKEN_FIELDS,
     component_tokens,
     estimate_tokens,
+    rollup_component_tokens,
     session_tokens,
 )
 
@@ -823,3 +824,86 @@ def test_aggregate_component_tokens_none_not_fabricated() -> None:
     assert "thinking" not in block
     assert "plan" not in block
     assert (block["estimated"], block["unknown"]) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# rollup_component_tokens — parent + spawned children (NIT 2 / NIT 3)
+# ---------------------------------------------------------------------------
+
+
+def _cblock(**over: object) -> dict:
+    """A minimal component_tokens-shaped block for rollup tests."""
+    base = {
+        "user_turn": 0, "assistant_turn": 0, "thinking": 0, "plan": 0,
+        "tool_call": {}, "total": 0, "source": "estimate",
+        "estimator": "chars/4",
+    }
+    base.update(over)  # type: ignore[arg-type]
+    return base
+
+
+def test_rollup_drops_parent_task_when_children_present() -> None:
+    """NIT 2: a subagent's tokens must not be counted in parent AND child.
+
+    The parent transcript records the spawn as a ``task`` tool call whose
+    tokens (spawn input + returned report) are the SAME text the child block
+    already accounts for in full.  With a child rolled up, the parent's
+    ``task`` bucket is dropped so the report is counted exactly once.
+    """
+    parent = _cblock(
+        user_turn=6, assistant_turn=2, tool_call={"task": 243}, total=251,
+    )
+    child = _cblock(user_turn=4, assistant_turn=229, total=233)
+
+    rolled = rollup_component_tokens(parent, [child])
+
+    # The child report (~229) is NOT double counted: parent task dropped.
+    assert rolled["total"] == 251 - 243 + 233
+    assert "task" not in rolled.get("tool_call", {})
+    assert rolled["assistant_turn"] == 2 + 229
+    assert (rolled["estimated"], rolled["unknown"]) == (2, 0)
+    assert rolled["source"] == "estimate"
+
+
+def test_rollup_keeps_parent_task_when_no_children() -> None:
+    """A childless rollup keeps the parent ``task`` bucket (nothing else has it)."""
+    parent = _cblock(user_turn=6, tool_call={"task": 243}, total=249)
+
+    rolled = rollup_component_tokens(parent, [])
+
+    assert rolled["tool_call"]["task"] == 243
+    assert rolled["total"] == 249
+    assert (rolled["estimated"], rolled["unknown"]) == (1, 0)
+
+
+def test_rollup_preserves_non_task_parent_tool_calls() -> None:
+    """Only the parent ``task`` bucket is dropped; real tool work survives."""
+    parent = _cblock(
+        user_turn=5, tool_call={"task": 100, "edit": 40}, total=145,
+    )
+    child = _cblock(assistant_turn=90, total=90)
+
+    rolled = rollup_component_tokens(parent, [child])
+
+    assert rolled["tool_call"] == {"edit": 40}
+    assert rolled["total"] == 5 + 40 + 90
+
+
+def test_rollup_all_unknown_total_is_none() -> None:
+    """NIT 3: no usable block anywhere → total is None (unknown), never 0."""
+    rolled = rollup_component_tokens(None, [None, None])
+
+    assert rolled["total"] is None
+    assert (rolled["estimated"], rolled["unknown"]) == (0, 3)
+    assert "source" not in rolled
+
+
+def test_rollup_partial_unknown_children() -> None:
+    """A missing child block counts as ``unknown`` but never breaks the sum."""
+    parent = _cblock(user_turn=10, total=10)
+    good_child = _cblock(assistant_turn=7, total=7)
+
+    rolled = rollup_component_tokens(parent, [good_child, None])
+
+    assert rolled["total"] == 17
+    assert (rolled["estimated"], rolled["unknown"]) == (2, 1)

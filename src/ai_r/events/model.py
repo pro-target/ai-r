@@ -823,12 +823,43 @@ def normalize_session_filter(
     )
 
 
+def _descendant_uuids(sessions: Sequence[Any], root_uuid: str) -> "frozenset[str]":
+    """All transitive descendants of ``root_uuid`` in a session's parent tree.
+
+    Builds the ``uuid -> parent_uuid`` map from ``sessions`` (one agent's
+    ``list_sessions()`` — ``parent_uuid`` only ever references a session of the
+    same agent) and returns every uuid whose ``parent_uuid`` chain reaches
+    ``root_uuid``: the ``parent`` facet's subtree.  ``root_uuid`` itself is NOT
+    included (its own events are addressable via ``session=<root_uuid>``).
+
+    Cycle-safe: a malformed parent cycle (a should-never-happen in real data)
+    can't wedge the walk — each uuid is visited at most once.  An unknown
+    ``root_uuid`` (absent from the corpus, or a leaf with no children) yields
+    an empty set — an honest empty result, never an error.
+    """
+    children: dict[str, list[str]] = {}
+    for sess in sessions:
+        parent = getattr(sess, "parent_uuid", None)
+        if parent:
+            children.setdefault(parent, []).append(sess.uuid)
+    descendants: set[str] = set()
+    frontier = list(children.get(root_uuid, ()))
+    while frontier:
+        uuid = frontier.pop()
+        if uuid in descendants or uuid == root_uuid:
+            continue
+        descendants.add(uuid)
+        frontier.extend(children.get(uuid, ()))
+    return frozenset(descendants)
+
+
 def iter_events(
     agent: Optional[str] = None,
     *,
     session: Optional[Any] = None,
     noise: str = "include",
     project_dir: Optional[str] = None,
+    parent: Optional[str] = None,
     scanned_sessions_out: Optional[dict[str, Any]] = None,
 ) -> Iterable[Event]:
     """Yield the normalized Event stream across sessions, cross-agent.
@@ -853,6 +884,15 @@ def iter_events(
             :func:`ai_r.parsers._common.project_dir_matches`); sessions
             without a ``project_dir`` signal never match.  Like ``noise``,
             applied *before* any message is read.
+        parent: Session-level subtree filter — keep only sessions that are a
+            **descendant** (transitively, any depth) of this session uuid in
+            the ``parent_uuid`` tree: every spawned subagent below ``parent``,
+            direct children plus nested.  ``parent`` itself is excluded (its
+            own events are reachable via ``session=<parent>``).  The closure
+            is built per-agent from ``list_sessions()`` (``parent_uuid`` only
+            references a same-agent session).  An unknown uuid matches nothing
+            (honest empty result).  Like ``noise``, applied *before* any
+            message is read.
         scanned_sessions_out: Optional out-parameter — a dict the caller
             owns, filled with ``{agent_label: list_sessions() result}`` as
             each agent is scanned.  Lets the caller reuse the enumeration
@@ -873,8 +913,15 @@ def iter_events(
         sessions = parser.list_sessions()
         if scanned_sessions_out is not None:
             scanned_sessions_out[agent_lc] = sessions
+        # ``parent`` subtree closure is per-agent (parent_uuid never crosses
+        # agents), computed once from this agent's session list.
+        parent_subtree = (
+            _descendant_uuids(sessions, parent) if parent is not None else None
+        )
         for sess in sessions:
             if wanted_sessions is not None and sess.uuid not in wanted_sessions:
+                continue
+            if parent_subtree is not None and sess.uuid not in parent_subtree:
                 continue
             if not noise_allows(sess, noise):
                 continue

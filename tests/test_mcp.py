@@ -2647,6 +2647,23 @@ def test_query_relative_prev_direct(
     assert [e["text"] for e in res["events"]] == ["Run the tests"]
 
 
+def test_query_kind_facet_is_a_fail_loud_tombstone() -> None:
+    # ``kind`` duplicated ``noise`` and no longer filters. It stays in the MCP
+    # signature ONLY as a fail-loud tombstone: the transport silently drops a
+    # truly-unknown argument (→ an unfiltered, silently-wrong result), so the
+    # param must survive and reject any value, pointing the caller at ``noise``.
+    # ``parent``/``group`` (the implemented Phase-2/3 facets) ARE real filters.
+    props = mcp._tool_manager._tools["query"].parameters["properties"]
+    assert "parent" in props
+    assert "group" in props
+    assert "kind" in props  # tombstone, not a silent drop
+    res = query(kind="subagent")
+    assert res["error"] == "invalid_argument"
+    assert "noise" in res["message"]
+    # A normal call (no kind) is unaffected.
+    assert "error" not in query(type="user_turn", agent="claude")
+
+
 def test_query_n_schema_accepts_integer_default_one() -> None:
     # ``n`` is a positive-int count OR the sentinel ``"all"``; the MCP schema
     # must expose the integer arm (a string-only ``n`` misled LLM callers into

@@ -73,7 +73,11 @@ from ai_r.session_stats import (  # noqa: E402
     children_of as _children_of,
     session_stats as _session_stats_core,
 )
-from ai_r.tokens import component_tokens, session_tokens  # noqa: E402
+from ai_r.tokens import (  # noqa: E402
+    component_tokens,
+    rollup_component_tokens,
+    session_tokens,
+)
 from ai_r.parsers import ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
@@ -150,12 +154,40 @@ def _resolve_haystack_cache_max(env: Optional[Mapping[str, str]] = None) -> int:
 
 _HAYSTACK_CACHE_MAX_DEFAULT = 2048
 _HAYSTACK_CACHE_MAX = _resolve_haystack_cache_max()
+# Second, size-based cap: the entry count alone lets a long-lived shared
+# server grow to (count × ``_HAYSTACK_CHARS_CAP``) ≈ multiple GiB of resident
+# haystack strings. Cap the *summed* haystack chars too so RSS stays bounded
+# regardless of how large individual sessions are. Default: 512M chars
+# (~0.5–1 GiB of str payload) — comfortably above a real warm corpus while
+# refusing unbounded growth. Tunable via ``AI_R_HAYSTACK_CACHE_CHARS_MAX``.
+_HAYSTACK_CACHE_CHARS_MAX_DEFAULT = 512_000_000
+
+
+def _resolve_haystack_cache_chars_max(
+    env: Optional[Mapping[str, str]] = None,
+) -> int:
+    env = os.environ if env is None else env
+    raw = env.get("AI_R_HAYSTACK_CACHE_CHARS_MAX")
+    if raw:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _HAYSTACK_CACHE_CHARS_MAX_DEFAULT
+        if value > 0:
+            return value
+    return _HAYSTACK_CACHE_CHARS_MAX_DEFAULT
+
+
+_HAYSTACK_CACHE_CHARS_MAX = _resolve_haystack_cache_chars_max()
 # Soft TTL is a defensive backstop only: if a source path cannot be statted
 # (OSError), we still serve a cached entry but bound its staleness so a
 # transiently-unreadable file does not pin stale content forever.
 _HAYSTACK_CACHE_TTL_SEC = 300
 
 _haystack_cache: "OrderedDict[tuple[str, str, float], tuple[str, bool]]" = OrderedDict()
+# Running sum of ``len(haystack)`` across cached entries, kept in lockstep with
+# ``_haystack_cache`` so the size-cap eviction never has to re-scan every value.
+_haystack_cache_chars = 0
 _haystack_cache_lock = threading.Lock()
 
 
@@ -697,11 +729,55 @@ def _get_cached_haystack(
     value = (haystack, body_truncated)
 
     with _haystack_cache_lock:
-        _haystack_cache[key] = value
-        _haystack_cache.move_to_end(key)
-        while len(_haystack_cache) > _HAYSTACK_CACHE_MAX:
-            _haystack_cache.popitem(last=False)
+        _haystack_store(key, value)
     return value
+
+
+def _haystack_store(
+    key: "tuple[str, str, float]", value: "tuple[str, bool]"
+) -> None:
+    """Insert ``value`` under ``key``, purging stale siblings and over-cap tail.
+
+    Caller must hold :data:`_haystack_cache_lock`. Three invariants:
+
+    * **No dead-key pileup on mtime change.** A rebuilt session (new mtime →
+      new key) would otherwise leave its previous ``(agent, uuid, old_mtime)``
+      entry wedged in the LRU until count-eviction reached it — the regression
+      fixed in 00e4248 re-appearing. We eagerly drop every prior entry for the
+      same ``(agent, uuid)`` so exactly one live version per session survives.
+    * **Count cap** (``_HAYSTACK_CACHE_MAX``): bound the number of entries.
+    * **Char cap** (``_HAYSTACK_CACHE_CHARS_MAX``): bound summed haystack size
+      so a long-lived shared server's RSS can't balloon to GiB from many large
+      sessions. Both caps evict oldest-first (LRU) until satisfied.
+    """
+    global _haystack_cache_chars
+    # Purge any stale-mtime sibling(s) for this (agent, uuid) before inserting.
+    agent_name, uuid = key[0], key[1]
+    stale = [
+        k for k in _haystack_cache
+        if k[0] == agent_name and k[1] == uuid and k != key
+    ]
+    for k in stale:
+        old = _haystack_cache.pop(k)
+        _haystack_cache_chars -= len(old[0])
+
+    prev = _haystack_cache.get(key)
+    if prev is not None:
+        _haystack_cache_chars -= len(prev[0])
+    _haystack_cache[key] = value
+    _haystack_cache.move_to_end(key)
+    _haystack_cache_chars += len(value[0])
+
+    # Never evict the entry we just stored, even if it alone exceeds the char
+    # cap (a single >cap session must still be servable); stop at 1 remaining.
+    while _haystack_cache and (
+        len(_haystack_cache) > _HAYSTACK_CACHE_MAX
+        or _haystack_cache_chars > _HAYSTACK_CACHE_CHARS_MAX
+    ):
+        if len(_haystack_cache) == 1:
+            break
+        _, evicted = _haystack_cache.popitem(last=False)
+        _haystack_cache_chars -= len(evicted[0])
 
 
 @mcp.tool()
@@ -1098,16 +1174,16 @@ def read_session(
             raw_messages, agent=session.agent
         )
     # Subagent rollup (F3.3, only when requested): parent's component_tokens +
-    # one per spawned child, folded via the aggregate ``component_tokens``
-    # metric.  Independent of ``with_tokens``.  A childless parent (or an
-    # agent that never records ``parent_uuid``) yields empty ``children`` and
-    # a ``total`` equal to the parent block.
+    # one per spawned child, folded via :func:`ai_r.tokens.rollup_component_tokens`
+    # (the SSOT that drops the parent's double-counted ``task`` bucket when
+    # children are present — NIT 2 — and yields ``total: None`` when nothing is
+    # measurable — NIT 3).  Independent of ``with_tokens``.  A childless parent
+    # (or an agent that never records ``parent_uuid``) yields empty ``children``
+    # and a ``total`` equal to the parent block.
     if include_subagents:
         parent_block = component_tokens(raw_messages, agent=session.agent)
-        rollup_rows: List[dict[str, Any]] = [
-            {"component_tokens": parent_block}
-        ]
         children_out: List[dict[str, Any]] = []
+        child_blocks: List[Optional[dict[str, Any]]] = []
         for child in _children_of(session.uuid):
             child_parser: Optional[ParserModule] = _PARSERS.get(child.agent)
             child_msgs: List[Any] = []
@@ -1122,16 +1198,11 @@ def read_session(
                 "agent": child.agent.value.lower(),
                 "component_tokens": child_block,
             })
-            rollup_rows.append({"component_tokens": child_block})
-        folded = _aggregate_core(
-            rollup_rows,
-            group_by=lambda _r: "all",
-            metrics=["component_tokens"],
-        )
+            child_blocks.append(child_block)
         summary["subagent_rollup"] = {
             "parent": parent_block,
             "children": children_out,
-            "total": folded["totals"]["component_tokens"],
+            "total": rollup_component_tokens(parent_block, child_blocks),
         }
     # Emission-time redaction (F2.1): after pagination so only the emitted
     # page pays; the raw transcript on disk is never touched.
@@ -1808,9 +1879,9 @@ def query(
     with_intent: bool = False,
     noise: str = "include",
     project_dir: Optional[str] = None,
-    kind: Optional[str] = None,
     parent: Optional[str] = None,
     group: Optional[str] = None,
+    kind: Optional[str] = None,
     redact: bool = True,
 ) -> dict[str, Any]:
     """Filter/search the unified session **event** stream — the workhorse verb.
@@ -1886,10 +1957,20 @@ def query(
     never match.  Ignored on the ``relative_to`` walk, like every other
     filter facet.
 
-    ``kind`` / ``parent`` / ``group`` are accepted for forward-compat but
-    **not yet implemented** (Phase 2/3: plan + subagent facets).  Passing a
-    non-``None`` value is a fail-loud error (returns the standard
-    ``invalid_argument`` dict) rather than a silent no-op.
+    ``parent`` also filters at the *session* level: keep only events of
+    sessions that are a **descendant** (transitively, any depth) of this
+    session uuid in the subagent ``parent_uuid`` tree — the whole spawned
+    subtree below ``parent`` (direct children plus nested).  ``parent``
+    itself is excluded (its own events are reachable via
+    ``session=<parent>``).  An unknown uuid matches nothing (honest empty
+    result).  Ignored on the ``relative_to`` walk, like every other filter
+    facet.
+
+    ``group`` filters at the *event* level, plan_events only: keep only the
+    plan_events whose ``task_id`` (the plan-task grouping key — plan-file
+    slug or normalized title) equals this value.  Non-plan events never
+    match when ``group`` is set, so combining ``group`` with a non-plan
+    ``type`` yields an honest empty result.
 
     ``redact=True`` (default) masks secrets in the emitted ``text`` /
     ``intent`` fields as ``[REDACTED_<TYPE>]`` and adds a top-level
@@ -1903,12 +1984,28 @@ def query(
     nothing was cut).  ``id``/``refs``/``sha256`` are untouched — fetch the
     full body on demand with ``get_body(id)``.
 
+    ``kind`` was **removed** — it duplicated ``noise`` (``noise="only"`` for
+    subagents, ``noise="exclude"`` for top-level).  It is kept in the signature
+    only as a fail-loud tombstone: passing any value returns an
+    ``invalid_argument`` error pointing at ``noise`` rather than silently
+    ignoring it (the MCP transport would otherwise drop an unknown argument and
+    return an unfiltered result — a silent wrong answer).
+
     Returns ``{"events": [...], "count": N}`` or the standard
     ``{"error": ..., "message": ...}`` dict on invalid arguments.  When
     ``count == 0`` the dict additionally carries ``diagnostics`` (scanned
     agents + session counts, corpus date bounds, cause hints) so an empty
     result is explainable.
     """
+    if kind is not None:
+        return {
+            "error": "invalid_argument",
+            "message": (
+                "the 'kind' facet was removed as a duplicate of 'noise'; "
+                "use noise='only' for subagent sessions or noise='exclude' "
+                "for top-level sessions"
+            ),
+        }
     # Filled by the core scan with the per-agent list_sessions() results,
     # reused by the empty-result diagnostics so an empty result never pays
     # for a second corpus walk.
@@ -1935,7 +2032,6 @@ def query(
             with_intent=with_intent,
             noise=noise,
             project_dir=project_dir,
-            kind=kind,
             parent=parent,
             group=group,
             scanned_sessions_out=scanned_sessions,

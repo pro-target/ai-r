@@ -20,6 +20,7 @@ from ai_r.parsers import (
     iso as _iso,
     target_agents as _target_agents,
 )
+from ai_r.redact import redact_text as _redact_text, redact_value as _redact_value
 
 
 _AGENT_CHOICES = tuple(a.value.lower() for a in _PARSERS.keys())
@@ -39,6 +40,58 @@ _TABLE_COLUMNS = ("uuid", "agent", "date", "title", "messages")
 def _exit_with_error(message: str, code: int = 1) -> int:
     print(f"ai-r: {message}", file=sys.stderr)
     return code
+
+
+# ---------------------------------------------------------------------------
+# Redaction (F2.1): mask secrets on output, mirroring the MCP default
+# ---------------------------------------------------------------------------
+#
+# Every CLI surface that emits session-derived text masks secrets on output by
+# default, exactly like the MCP wrappers (``redact=True``).  The masking reuses
+# ``ai_r.redact`` (the SAME functions the MCP server calls) — no duplicated
+# pattern logic.  ``--no-redact`` is a symmetric, deliberate opt-out that maps
+# to the MCP ``redact=False`` argument; it is never the default.
+
+
+def _add_redact_flag(parser: argparse.ArgumentParser) -> None:
+    """Attach the shared ``--no-redact`` opt-out flag.
+
+    Redaction is ON by default (``args.redact`` is ``True``); passing
+    ``--no-redact`` sets it to ``False``, mirroring the MCP ``redact=false``
+    argument.  ``--raw`` is accepted as an alias.
+    """
+    parser.add_argument(
+        "--no-redact",
+        "--raw",
+        dest="redact",
+        action="store_false",
+        default=True,
+        help=(
+            "Emit RAW session text without masking secrets. Off by default: "
+            "secrets are masked as [REDACTED_<TYPE>] (mirrors MCP redact=false)."
+        ),
+    )
+
+
+def _want_redact(args: argparse.Namespace) -> bool:
+    """Return the effective redaction flag for ``args`` (default: True)."""
+    return bool(getattr(args, "redact", True))
+
+
+def _redact_str(text: str, args: argparse.Namespace) -> str:
+    """Mask secrets in ``text`` unless ``args`` opts out (``--no-redact``)."""
+    if not _want_redact(args):
+        return text
+    out, _counts = _redact_text(text)
+    return out if isinstance(out, str) else text
+
+
+def _redact_obj(value: Any, args: argparse.Namespace) -> Any:
+    """Recursively mask secrets in ``value`` unless ``args`` opts out."""
+    if not _want_redact(args):
+        return value
+    out, _counts = _redact_value(value)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,13 @@ After=ai-r-mcp.socket
 Type=simple
 # Hardening. The server only READS local session files under $HOME and
 # serves localhost http, so it needs no privileges, no system writes, and
-# no extra address families. $HOME stays readable (that is its whole job);
-# writes (semantic model cache under ~/.cache) still work.
+# no extra address families. ProtectSystem=strict makes the whole
+# filesystem (including $HOME) read-only; $HOME stays *readable*, which is
+# all the server needs (that is its whole job). It does NOT write at
+# runtime: the optional semantic model cache under ~/.cache is populated
+# ahead of time by install.sh and only read here, so no ReadWritePaths=/
+# CacheDirectory= is required. (tiktoken, if used, degrades to the chars/4
+# estimator when its BPE cache is not writable — it never needs a write.)
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

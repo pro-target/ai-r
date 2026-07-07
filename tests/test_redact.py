@@ -45,6 +45,23 @@ GITLAB_TOKEN = "glpat-abc123def456ghi789jk"
 AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNO7"
 AWS_SECRET_LINE = 'aws_secret_access_key = "' + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY12" + '"'
 SLACK_TOKEN = "xoxb-1234567890-abcdefghij"
+# FAKE Stripe secret + restricted keys (structurally shaped, never real).
+# Prefix split off the body (like GOOGLE_API_KEY below) so the literal is not a
+# contiguous ``sk_live_<24+>`` span — GitHub push-protection flags that shape as
+# a real Stripe key; the concatenated runtime value is what the redaction needs.
+STRIPE_LIVE = "sk_live_" + "51ABCdefGHIjklMNOpqrSTUvwx0000000000"
+STRIPE_TEST = "sk_test_" + "51ABCdefGHIjklMNOpqrSTUvwx0000000000"
+STRIPE_RESTRICTED = "rk_live_" + "51ABCdefGHIjklMNOpqrSTUvwx0000000000"
+# FAKE JWT: three base64url segments joined by dots (header ``{"alg":"HS256"}``).
+JWT_TOKEN = (
+    "eyJhbGciOiJIUzI1NiJ9"
+    ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+    ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+)
+# FAKE Google API key: ``AIza`` + 35 url-safe chars = 39 total.  Split so the
+# literal is not a scannable ``API_KEY = "<long>"`` assignment (secret scanners
+# flag that shape); the runtime value is the full key the redaction test needs.
+GOOGLE_API_KEY = "AIza" + "SyD_FAKEfakeFAKEfake0123456789-abcd"
 BEARER_LINE = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload123.sig456"
 URL_CREDS = "postgres://alice:s3cretpass@db.example.com:5432/app"
 GENERIC_LINE = "PASSWORD=hunter2x9extra"
@@ -70,6 +87,11 @@ PRIVATE_KEY_BLOCK = (
         (AWS_KEY, "AWS_KEY"),
         (AWS_SECRET_LINE, "AWS_SECRET"),
         (SLACK_TOKEN, "SLACK_TOKEN"),
+        (STRIPE_LIVE, "STRIPE_KEY"),
+        (STRIPE_TEST, "STRIPE_KEY"),
+        (STRIPE_RESTRICTED, "STRIPE_KEY"),
+        (JWT_TOKEN, "JWT"),
+        (GOOGLE_API_KEY, "GOOGLE_API_KEY"),
         (BEARER_LINE, "BEARER_TOKEN"),
         (URL_CREDS, "URL_CREDENTIALS"),
         (GENERIC_LINE, "GENERIC_SECRET"),
@@ -126,6 +148,57 @@ def test_counter_counts_every_hit() -> None:
     text = f"{OPENAI_KEY} then {OPENAI_KEY} then {GITHUB_TOKEN}"
     _, counts = redact_text(text)
     assert counts == {"OPENAI_KEY": 2, "GITHUB_TOKEN": 1}
+
+
+def test_new_vendor_patterns_mask_value_and_context() -> None:
+    """JWT / Google / Stripe keys are masked whole, leaving surrounding prose."""
+    redacted, counts = redact_text(
+        f"jwt {JWT_TOKEN} google {GOOGLE_API_KEY} stripe {STRIPE_LIVE} done"
+    )
+    assert counts == {"JWT": 1, "GOOGLE_API_KEY": 1, "STRIPE_KEY": 1}
+    assert JWT_TOKEN not in redacted
+    assert GOOGLE_API_KEY not in redacted
+    assert STRIPE_LIVE not in redacted
+    # Surrounding words survive (whole-token replacement, not the line).
+    assert redacted.startswith("jwt [REDACTED_JWT] google [REDACTED_GOOGLE_API_KEY]")
+    assert redacted.endswith("stripe [REDACTED_STRIPE_KEY] done")
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        # ``sk_`` without the ``live``/``test`` infix is not a Stripe key.
+        "sk_foo_1234567890 is not a stripe secret",
+        # ``AIza`` prefix but wrong length (too short) — not a Google key.
+        "AIzaShort123 should stay",
+        # A two-segment dotted base64 is not a JWT (needs three segments).
+        "eyJhbGciOiJIUzI1NiJ9.onlyonesegment stays",
+        # Bare ``eyJ`` word without the dotted structure.
+        "eyJustAWordHere with no dots",
+    ],
+)
+def test_new_patterns_false_positive_guards(benign: str) -> None:
+    redacted, counts = redact_text(benign)
+    assert counts == {}
+    assert redacted == benign
+
+
+def test_new_patterns_no_catastrophic_backtracking() -> None:
+    """Pathological near-miss inputs stay linear (no regex blow-up)."""
+    import time
+
+    # Long ``eyJ``-prefixed base64 run with a single trailing dot (never a
+    # full 3-segment JWT) and a long ``AIza``-prefixed run — both would trip
+    # a nested-quantifier pattern into exponential backtracking.
+    payloads = [
+        "eyJ" + "A" * 5000 + ".",
+        "AIza" + "B" * 5000,
+        "sk_live_" + "C" * 5000 + " ",
+    ]
+    start = time.monotonic()
+    for p in payloads:
+        redact_text(p * 3)
+    assert time.monotonic() - start < 1.0
 
 
 def test_non_string_passthrough() -> None:

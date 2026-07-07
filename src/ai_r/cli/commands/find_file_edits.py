@@ -6,7 +6,12 @@ import argparse
 import json
 import sys
 
-from ai_r.cli.shared import _AGENT_CHOICES, _exit_with_error
+from ai_r.cli.shared import (
+    _add_redact_flag,
+    _AGENT_CHOICES,
+    _exit_with_error,
+    _want_redact,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -47,6 +52,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
     )
+    _add_redact_flag(ffe_p)
     ffe_p.set_defaults(func=_run_find_file_edits)
 
 
@@ -66,6 +72,7 @@ def _run_find_file_edits(args: argparse.Namespace) -> int:
             since=args.since,
             until=args.until,
             limit=args.limit,
+            redact=_want_redact(args),
         )
     except ValueError as exc:
         return _exit_with_error(str(exc), code=2)
