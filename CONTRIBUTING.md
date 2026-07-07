@@ -15,7 +15,7 @@ fastest path from idea to merge is:
    pip install -e ".[dev]"
    pytest --cov=src/ai_r
    ```
-   Coverage must stay ≥ 80% (`pyproject.toml` enforces this in CI).
+   Coverage must stay ≥ 85% (`pyproject.toml` enforces this in CI).
 5. **Run the LLM e2e acceptance scenarios** whenever the change adds
    or modifies functionality (a new MCP tool or parameter, any
    behaviour change on the public surface). Both gates must pass —
@@ -53,8 +53,9 @@ drive it), see **MCP registration** in [README.md](./README.md).
 
 See [docs/parsers.md](./docs/parsers.md). Summary:
 1. Add a value to `AgentName` in `src/ai_r/parsers/models.py`.
-2. Create `src/ai_r/parsers/<agent>.py` exporting `list_sessions`,
-   `read_session`, `search`, `session_exists`.
+2. Create `src/ai_r/parsers/<agent>.py` exporting the five parser
+   functions — `list_sessions`, `read_session`, `read_messages`,
+   `search`, `session_exists` (see [docs/architecture.md](./docs/architecture.md)).
 3. Re-export the module from `src/ai_r/parsers/__init__.py`.
 4. Add a `tests/test_parsers/test_<agent>.py` with fixtures.
 

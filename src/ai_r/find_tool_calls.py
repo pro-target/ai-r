@@ -244,17 +244,35 @@ def find_tool_calls(
         ``is_error=False`` with an empty ``output``.
 
     Raises:
-        ValueError: on invalid arguments (neither or both of
-            ``tool_name``/``tool_name_pattern`` set, ``limit``
-            negative, unparseable ``since``/``until``, unknown
-            ``agent``, empty ``*_contains``/``output_excludes``,
-            non-bool ``is_error``, unknown ``output_mode``).
+        ValueError: on invalid arguments — ``tool_name`` AND
+            ``tool_name_pattern`` set together; both name filters omitted
+            AND no content filter (none of ``input_contains``/
+            ``output_contains``/``output_excludes``/``is_error``) given;
+            ``limit`` negative; unparseable ``since``/``until``; unknown
+            ``agent``; empty ``*_contains``/``output_excludes``; non-bool
+            ``is_error``; unknown ``output_mode``.  A name filter is
+            OPTIONAL: omitting both ``tool_name`` and
+            ``tool_name_pattern`` is valid as long as at least one content
+            filter is present (the "any tool with this signal"
+            composition), but a fully unfiltered call stays a loud error.
     """
     name_exact = tool_name
     name_substr = tool_name_pattern
-    if (name_exact is None) == (name_substr is None):
+    if name_exact is not None and name_substr is not None:
         raise ValueError(
-            "exactly one of tool_name or tool_name_pattern must be set"
+            "tool_name and tool_name_pattern are mutually exclusive; "
+            "set at most one"
+        )
+    if name_exact is None and name_substr is None and not (
+        input_contains is not None
+        or output_contains is not None
+        or output_excludes is not None
+        or is_error is not None
+    ):
+        raise ValueError(
+            "provide tool_name, tool_name_pattern, or at least one content "
+            "filter (input_contains / output_contains / output_excludes / "
+            "is_error)"
         )
     if name_exact is not None and (
         not isinstance(name_exact, str) or not name_exact.strip()
@@ -345,10 +363,12 @@ def find_tool_calls(
                     if exact_lc is not None:
                         if name_lc != exact_lc:
                             continue
-                    else:
-                        assert substr_lc is not None
+                    elif substr_lc is not None:
                         if substr_lc not in name_lc:
                             continue
+                    # Neither name filter set: any tool name passes; the
+                    # content filters below (input/output/is_error) carry
+                    # the selection.
                     tool_ts: Optional[Any] = to_utc_aware(
                         tool.get("timestamp")
                     )

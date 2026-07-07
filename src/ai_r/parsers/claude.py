@@ -779,7 +779,8 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
     the record carries ``message.usage``.  User records yield
     ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
     they carry (Claude embeds tool results in user-role records); each
-    result carries ``is_error`` from the block's ``is_error`` flag.
+    result carries ``is_error`` derived from the block's ``is_error`` flag
+    with two format fallbacks (see :func:`_derive_tool_result_error`).
     """
     line = line.strip()
     if not line:
@@ -791,6 +792,61 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
     if not isinstance(record, dict):
         return None
     return _message_from_record(record)
+
+
+_TOOL_USE_ERROR_MARK = "<tool_use_error>"
+
+
+def _tool_result_content_starts_with(result_content, prefix: str) -> bool:
+    """Whether a raw ``tool_result`` content payload starts with ``prefix``.
+
+    Claude encodes the content of a ``tool_result`` block either as a plain
+    string or as a list of typed blocks (``{"type": "text", "text": ...}``).
+    Both encodings are checked against the RAW (unredacted) content: a
+    leading-string match on the string form, or on the first ``text`` block's
+    ``text`` when the content is a list.  Any other shape yields ``False``.
+    """
+    if isinstance(result_content, str):
+        return result_content.startswith(prefix)
+    if isinstance(result_content, list):
+        for piece in result_content:
+            if isinstance(piece, dict) and piece.get("type") == "text":
+                text = piece.get("text", "")
+                return isinstance(text, str) and text.startswith(prefix)
+    return False
+
+
+def _derive_tool_result_error(
+    part: dict, tool_use_result: object
+) -> bool:
+    """Resolve a ``tool_result`` block's error state, format-derive included.
+
+    Priority (an EXPLICIT flag always wins — a real ``is_error`` value is
+    never overridden by a format signal, so ``True`` stays ``True`` and an
+    explicit ``False`` stays ``False``):
+
+    1. the block's own ``is_error`` flag, when present (bool-coerced);
+    2. else DERIVE ``True`` from either Claude error-format signal:
+       * the RAW ``tool_result`` content starts with ``<tool_use_error>``
+         (string form, or the first ``text`` block of the list form), OR
+       * the record's top-level ``toolUseResult`` is a string starting with
+         ``"Error:"`` (Claude writes failed calls this way *without* setting
+         the per-block ``is_error`` flag — the defect this closes);
+    3. else ``False`` (no signal — honest absence).
+
+    Matching is on raw content (before any redaction pass) so a scrubbed
+    ``[redacted]`` prefix can never mask a real failure.
+    """
+    explicit = part.get("is_error")
+    if explicit is not None:
+        return bool(explicit)
+    if _tool_result_content_starts_with(
+        part.get("content", ""), _TOOL_USE_ERROR_MARK
+    ):
+        return True
+    if isinstance(tool_use_result, str) and tool_use_result.startswith("Error:"):
+        return True
+    return False
 
 
 def _message_from_record(record: dict) -> Optional[Message]:
@@ -872,10 +928,16 @@ def _message_from_record(record: dict) -> Optional[Message]:
                     result_str = result_content
                 else:
                     result_str = ""
-                is_error = part.get("is_error")
+                # is_error: explicit block flag wins; else derive from the
+                # Claude error-format signals (``<tool_use_error>`` content
+                # prefix, or a record-level ``toolUseResult: "Error: …"``),
+                # so failures recorded WITHOUT the flag are not lost.
+                is_error = _derive_tool_result_error(
+                    part, record.get("toolUseResult")
+                )
                 result_entry = {
                     "content": result_str,
-                    "is_error": bool(is_error),
+                    "is_error": is_error,
                 }
                 tuid = part.get("tool_use_id")
                 if isinstance(tuid, str) and tuid:

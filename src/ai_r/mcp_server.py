@@ -1802,7 +1802,7 @@ def query(
     sort: str = "date",
     relative_to: Optional[str] = None,
     direction: str = "prev",
-    n: str = "1",
+    n: Union[int, str] = 1,
     step_type: str = "user_turn",
     limit: int = 0,
     with_intent: bool = False,
@@ -1860,7 +1860,8 @@ def query(
       ``fallback: "bm25"`` — the order is then plain BM25, never a
       crash); ``sort="date"`` (default) orders by timestamp ascending.
     * ``relative_to`` (event id) + ``direction`` (``prev``|``next``) +
-      ``n`` (``"1"`` | ``"all"``) — the neighbouring-turn walk.
+      ``n`` (a positive integer, default ``1``, or ``"all"``) — the
+      neighbouring-turn walk.
       Generalises the ``previous_user_intent`` used by ``find_file_edits``
       to both directions and any count.  ``step_type`` chooses which
       event type to collect (default ``user_turn``).  When
