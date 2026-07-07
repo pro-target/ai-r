@@ -5,7 +5,7 @@
 > (`mcp__ai-r__*`) on a real vault, to validate the whole public surface. They **complement** the
 > Python pytest suite (`tests/`): pytest proves the internals byte-for-byte and hermetically; these
 > scenarios prove the *deployed* MCP surface behaves correctly and semantically end-to-end.
-> English SSOT. README frames the compact table below (marker block). Update on every functionality change.
+> English SSOT. READMEs link to this file; the summary table below is the in-doc menu. Update on every functionality change.
 
 ## How to run
 
@@ -36,38 +36,37 @@ Each scenario resolves to one of:
   sessions; on a bare host it is **skipped, not failed** (mirrors the pytest host-marker convention).
 - Scenarios with no tag are `[hermetic-ok]` by default.
 
-<!-- scenarios:start -->
 
 ## Acceptance summary
 
-Full spec: [docs/scenarios.md](docs/scenarios.md) — 90 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+Full spec: [docs/scenarios.md](docs/scenarios.md) — 95 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
-| `query` | 15 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; the `parent` facet scopes to a session's subagent subtree (transitive `parent_uuid` descendants, root excluded, per-agent; unknown uuid → honest empty) and the `group` facet scopes `plan_event`s to one plan-task `task_id` (non-plan events never match) — the former `kind` facet was removed as a duplicate of `noise` (`noise="exclude"`≡top-level, `noise="only"`≡subagents) and now fails loud pointing at `noise` (a fail-loud tombstone, so the transport never silently drops it into an unfiltered scan); session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
-| `get_body` | 6 | Body fetched on-demand by id (turn text / plan text / codex steps / a `tool_call` id → its full call `input` under `body`, the same payload `find_file_edits` references as `input_sha256`, reproducing its sha256/length); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated; a plan-feedback `ref` (`"<session>:pf<N>"`) resolves to the FULL raw plan response (type `plan_feedback`, redacted, capped), out-of-range/unknown refs are `not_found`. |
-| `aggregate` | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
-| `diff` | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
-| `detect_current` | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
-| `plan` | 12 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by **file (append) order** (`seq`), so non-monotonic timestamps still bind body/steps/version to the right revision and `plan` agrees with `get_body`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape; v2 — every atom carries `version` (v1…vN per task, chronological, final = vN), every pair carries `plan_version` + `round` + `section` (the quote anchored to its source-markdown section through markup-stripping normalization — miss or multi-section ambiguity is an honest `null`, never a nearest guess; a rejected plan-file `Write` correlates like an `ExitPlanMode` verdict), and `rounds=all\|last` filters to each session's final feedback round (unknown value fails loud). |
-| `session_stats` (preset) | 5 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
-| `session_diff` (preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
-| `incidents` (preset) | 4 | One call finds dangerous shell commands + regret reactions (F4.1) via a baked chain — ONE `query(type=tool_call, tool_kind=bash)` scan → deterministic danger dictionary on the extracted command (a Bash `description` alone never fires; `--force-with-lease` is not force-push) → bilingual (ru+en) regret-marker scan over the next `reaction_window` messages (default 6) — the two-step `confirmed` verdict, never guessed; each record carries the query event `id` (context on-demand via `relative_to`), `patterns`+`categories`, a char-capped `command` fragment centred on the hit, tri-state `is_error` (`null` where the agent's format has no correlated outcome signal) and `reaction` (marker labels + capped preview, `null` when unconfirmed); `count`/`confirmed_count`/`by_pattern` reflect the FULL match set independent of `limit`; `category`/`confirmed` filters fail loud on unknown values; emitted fields are redacted by default while matching runs on RAW text; zero incidents → `diagnostics`; documented dictionary caveat: quoting a dangerous string (echo/grep/test payloads) can still match — mention vs execution is not decidable by regex. |
-| `network` (preset) | 4 | One call audits network egress (F4.3) via a baked chain — ONE `query(type=tool_call, tool_kind=web)` scan (Claude `WebFetch`/`WebSearch`, OpenCode `webfetch`, Codex `web_search` surfaced from `web_search_call` rollout records, Gemini/Antigravity `web_fetch`/`google_web_search`; Pi records no web tool — honest absence) → the request target (`url`/`query`) extracted from the call's own input (never guessed from the tool name; no target → honest `null` fields, `kind: null`) → a deterministic **risk dictionary** (`plain_http`, `credentials_in_url`, `secret_in_url`/`secret_in_query` — the redaction patterns double as the detector, `ip_literal_host`, `private_or_local_host`, `punycode_host`); each record carries the query event `id` (context on-demand via `relative_to`), derived `kind` (`fetch`\|`search`), char-capped `url`/`query`, `domain`, `risks` and tri-state `is_error`; `count`/`risky_count`/`by_domain`/`by_risk` reflect the FULL match set independent of `limit`; `kind`/`risk` filters fail loud on unknown values, `domain` matches equals-or-subdomain; risk assessment runs on RAW strings while emitted fields are redacted by default (cap applied AFTER redaction — a boundary-sliced secret never leaks); zero requests → `diagnostics`; documented caveat: MCP-mediated network access stays under `tool_kind="mcp"` — never guessed into the audit. |
-| `find_file_edits` | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
-| `list_sessions` | 6 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant; each summary also carries the A3 recency signal `last_activity`+`age_sec`+`activity` (`fresh`/`stale` vs `AI_R_STALL_SEC`, default 600s) — record recency only, never a process-liveness claim. |
-| `outcome` (read_session field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
-| `resume_command` (summary field) | 1 | Every session summary carries `resume_command` — the ready-to-run CLI one-liner (`cd <project_dir> && claude --resume <uuid>` / `codex resume <uuid>` / `opencode --session <id>` / `pi --session <path>`), shell-quoted, `cd`-prefixed when `project_dir` is known; `null` exactly where no real command exists (Antigravity, subagent sessions, reference-only Desktop sessions) — text only, never executed. |
-| `find_tool_calls` | 5 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; the name is optional when a content filter carries the selection, but setting **both** names OR passing **no filter at all** **fails loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; each record also carries the wrapper-aware `tool_kind` + `tool_resolved` (the real name under a Skill/Task/MCP wrapper, `null` without a signal); `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
-| `read_session` | 5 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`; `with_tokens=true` (F3.3) attaches `tokens` (flat exact-or-estimate) + `component_tokens` — a per-component estimate over ai-r's existing event taxonomy (`user_turn`/`assistant_turn`/`thinking`/`plan`/`tool_call.<kind>`, `total`, always `source="estimate"`, plan-authoring calls under `plan` not `tool_call`, `total == sum(scalars)+sum(tool_call.values())`, empty transcript → `null`) plus per-message EXACT `tokens` blocks where the format records per-message usage (Claude deduped per API call before pagination, OpenCode, Pi; Codex/Antigravity/user turns carry no key — absent, not null); `include_subagents=true` attaches `subagent_rollup` (parent + one child per spawned subagent via `children_of(parent_uuid)` + folded `total`); CLI `ai-r read --with-tokens` prints a `COMPONENT \| TOKENS \| SOURCE` table; integers-and-labels only → outside redaction; default `false` is byte-identical to the historical output. |
-| `search_sessions` | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
-| empty-result diagnostics (cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
-| secret redaction (cross-cutting) | 5 | Every text-emitting method masks secrets on output as `[REDACTED_<TYPE>]` by default and carries a `redactions` type→count dict; `redact=false` returns the raw content; matching always runs on the RAW stored text (searching a literal secret finds its session, only the display is masked); a `[REDACTED_*]` placeholder or secret-looking filter value on an empty result earns a diagnostics hint suggesting `redact=false`; vendor formats an `sk-`/`AWS`-only table missed — Stripe `sk_`/`rk_`, `eyJ…` JWT, Google `AIza…` — are masked with their own type labels without over-masking look-alikes; and the **CLI** honours the same default (`ai-r read`/`export`/`list` mask on output, `--no-redact`/`--raw` opts out) so a secret never leaks through a default CLI print. |
-| MCP transport auth (cross-cutting) | 2 | The opt-in shared `streamable-http` transport carries access control the stdio path does not need: the `mcp` SDK's DNS-rebinding/Origin allowlist (always on for the loopback default) plus an opt-in bearer token (`AI_R_HTTP_TOKEN`, constant-time compared) — a missing/wrong token is a `401` that never reaches a tool, a correct token passes through; a non-loopback bind with no token is a **fail-closed hard refusal** naming `AI_R_HTTP_TOKEN`, while loopback-without-token still runs behind the rebinding allowlist. |
-| semantic sort (cross-cutting) | 3 | `sort="semantic"` on the text-search surface (`query` text facet, `search_sessions`) re-ranks the BM25 top-50 candidates by meaning with a local multilingual embedding model (`intfloat/multilingual-e5-small`, int8 ONNX, direct onnxruntime+tokenizers, mandatory `query:`/`passage:` prefixes applied internally, no persistent index); blended candidate score = 75 % meaning + 25 % word match (min–max normalized within the pool), no similarity cut-off — results are re-ordered, never dropped, the tail keeps BM25 order; the response carries a `semantic` report (`active: true` + model/candidates/weight, or `active: false` + plain-words `reason` + `fallback: "bm25"`); without the optional `ai-r[semantic]` deps/model files the order honestly falls back to plain BM25 — never a crash — and the default sorts never touch the module; cross-lingual ru↔en retrieval works both ways. |
-| CLI error contract | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
+| [`query`](#query) | 15 | Facet filters return correct event shape (references, no body inlined — `text` is a ~160-char preview, a real cut flagged `text_truncated: true`, full body via `get_body`); `relative_to`+`direction` walk yields the true prev/next turn (cross-checked vs `read_session`); `text sort=relevance` is BM25-ranked; `tool_call` events carry an `is_error` outcome (cross-agent best-effort) without changing counts; every `tool_call` event carries a wrapper-aware `tool_kind` (`edit\|write\|read\|bash\|task\|skill\|mcp\|web\|other`) and — when the wrapper's input names the real actor — `tool_resolved` (subagent type under Task/Agent/spawn_agent, skill name under Skill/SlashCommand, `server:tool` under `mcp__*`; no signal → no field, never guessed), the `tool_kind` facet filters by it (unknown value fails loud) and the `tool` facet also matches resolved names; session-level `noise=exclude\|include\|only` drops/isolates subagent sessions before any message is read, an unknown mode fails loud; the `parent` facet scopes to a session's subagent subtree (transitive `parent_uuid` descendants, root excluded, per-agent; unknown uuid → honest empty) and the `group` facet scopes `plan_event`s to one plan-task `task_id` (non-plan events never match) — the former `kind` facet was removed as a duplicate of `noise` (`noise="exclude"`≡top-level, `noise="only"`≡subagents) and now fails loud pointing at `noise` (a fail-loud tombstone, so the transport never silently drops it into an unfiltered scan); session-level `project_dir` filter scopes events to one project (exact-or-descendant, path-boundary aware); the `session` facet accepts a single uuid OR a list of uuids — the union of those sessions' events in one call (duplicates collapse, an unknown uuid contributes nothing, an empty list or non-string item fails loud — never a silent full-corpus scan). |
+| [`get_body`](#get_body) | 6 | Body fetched on-demand by id (turn text / plan text / codex steps / a `tool_call` id → its full call `input` under `body`, the same payload `find_file_edits` references as `input_sha256`, reproducing its sha256/length); `shallow=true` on a draft id returns the task's **final** body + `dropped_drafts`; codex plan `steps`/`status` populated; a plan-feedback `ref` (`"<session>:pf<N>"`) resolves to the FULL raw plan response (type `plan_feedback`, redacted, capped), out-of-range/unknown refs are `not_found`. |
+| [`aggregate`](#aggregate) | 5 | `sum(count) == len(rows)`; `rank_by=stats` order is `(-sessions,-edits,label)`; `kind_split=true` adds `kind_split_available`+`note`; empty rows → empty result, no crash; the `tokens` metric folds per-row `tokens` blocks into `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}` — sums stay `null` when no row carried the field (never a fabricated 0) and `exact + estimated + unknown == len(rows)` always holds. |
+| [`diff`](#diff) | 1 | Edit rows stitch into a per-file unified diff; bodies stay on-demand. |
+| [`detect_current`](#detect_current) | 1 | Returns a sensible runtime identity (`session_id`/`agent`/`candidates`/`verified`). |
+| [`plan`](#plan) | 12 | Tasks grouped by plan-file **slug**, not title (drifting titles stay ONE task, zero false `completed_major`); N draft + 1 final by **file (append) order** (`seq`), so non-monotonic timestamps still bind body/steps/version to the right revision and `plan` agrees with `get_body`; cross-agent codex `update_plan` normalized; no false positive from a quoted `update_plan`; empty (not error) for agents with no plan signal; F3.4 default schema — the **final** plan's full text inlined (`body` + `body_source`, the user-edited approval text is authoritative over the signal/file body; honest `null` for steps-only plans), drafts stay references, and `feedback` carries ALL «plan quote → user comment» pairs (chronological, `plan_id`-bound, `verdict ∈ rejected\|stay_in_plan_mode`, `quote=null` for free-text comments, raw response on-demand via `ref`); technical failures filtered; agents without an approval flow contribute an honest empty `feedback`; `bodies="none"`/`feedback=false` restore the historical shape; v2 — every atom carries `version` (v1…vN per task, chronological, final = vN), every pair carries `plan_version` + `round` + `section` (the quote anchored to its source-markdown section through markup-stripping normalization — miss or multi-section ambiguity is an honest `null`, never a nearest guess; a rejected plan-file `Write` correlates like an `ExitPlanMode` verdict), and `rounds=all\|last` filters to each session's final feedback round (unknown value fails loud). |
+| [`session_stats` (preset)](#session_stats-preset) | 5 | All 4 dims (agent/dir/date/kind) give sensible counts; degenerate kind split → `kind_split_available=false`+note; **byte-identical** to manual `aggregate(rank_by=stats, kind_split=true)` on a FROZEN snapshot; `with_tokens=true` (F3.3) reads token usage at request time and adds a folded `tokens` block to every group + totals — **exact** where the agent's files record usage (Claude `message.usage` deduped per API call, Codex last cumulative `token_count`, OpenCode `message.data.tokens`, Pi `usage`), a labeled `estimate` otherwise (optional tiktoken, else a rough chars/4 heuristic — degradation, never a crash), honest `unknown` without any signal; default `false` is byte-identical to the historical output. |
+| [`session_diff` (preset)](#session_diff-preset) | 2 | Claude session → per-file hunks in chronological order with intent attached (cross-checked vs `read_session`); codex session reconstructs targets from `printf >`/`cat > <<EOF`, with `tee`/`sed -i`/`cp`/`mv` documented as silently skipped. |
+| [`incidents` (preset)](#incidents-preset) | 4 | One call finds dangerous shell commands + regret reactions (F4.1) via a baked chain — ONE `query(type=tool_call, tool_kind=bash)` scan → deterministic danger dictionary on the extracted command (a Bash `description` alone never fires; `--force-with-lease` is not force-push) → bilingual (ru+en) regret-marker scan over the next `reaction_window` messages (default 6) — the two-step `confirmed` verdict, never guessed; each record carries the query event `id` (context on-demand via `relative_to`), `patterns`+`categories`, a char-capped `command` fragment centred on the hit, tri-state `is_error` (`null` where the agent's format has no correlated outcome signal) and `reaction` (marker labels + capped preview, `null` when unconfirmed); `count`/`confirmed_count`/`by_pattern` reflect the FULL match set independent of `limit`; `category`/`confirmed` filters fail loud on unknown values; emitted fields are redacted by default while matching runs on RAW text; zero incidents → `diagnostics`; documented dictionary caveat: quoting a dangerous string (echo/grep/test payloads) can still match — mention vs execution is not decidable by regex. |
+| [`network` (preset)](#network-preset) | 4 | One call audits network egress (F4.3) via a baked chain — ONE `query(type=tool_call, tool_kind=web)` scan (Claude `WebFetch`/`WebSearch`, OpenCode `webfetch`, Codex `web_search` surfaced from `web_search_call` rollout records, Gemini/Antigravity `web_fetch`/`google_web_search`; Pi records no web tool — honest absence) → the request target (`url`/`query`) extracted from the call's own input (never guessed from the tool name; no target → honest `null` fields, `kind: null`) → a deterministic **risk dictionary** (`plain_http`, `credentials_in_url`, `secret_in_url`/`secret_in_query` — the redaction patterns double as the detector, `ip_literal_host`, `private_or_local_host`, `punycode_host`); each record carries the query event `id` (context on-demand via `relative_to`), derived `kind` (`fetch`\|`search`), char-capped `url`/`query`, `domain`, `risks` and tri-state `is_error`; `count`/`risky_count`/`by_domain`/`by_risk` reflect the FULL match set independent of `limit`; `kind`/`risk` filters fail loud on unknown values, `domain` matches equals-or-subdomain; risk assessment runs on RAW strings while emitted fields are redacted by default (cap applied AFTER redaction — a boundary-sliced secret never leaks); zero requests → `diagnostics`; documented caveat: MCP-mediated network access stays under `tool_kind="mcp"` — never guessed into the audit. |
+| [`find_file_edits`](#find_file_edits) | 3 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`. |
+| [`list_sessions`](#list_sessions) | 6 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant; each summary also carries the A3 recency signal `last_activity`+`age_sec`+`activity` (`fresh`/`stale` vs `AI_R_STALL_SEC`, default 600s) — record recency only, never a process-liveness claim. |
+| [`outcome` (read_session field)](#outcome-read_session-field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
+| [`resume_command` (summary field)](#resume_command-session-summary-field) | 1 | Every session summary carries `resume_command` — the ready-to-run CLI one-liner (`cd <project_dir> && claude --resume <uuid>` / `codex resume <uuid>` / `opencode --session <id>` / `pi --session <path>`), shell-quoted, `cd`-prefixed when `project_dir` is known; `null` exactly where no real command exists (Antigravity, subagent sessions, reference-only Desktop sessions) — text only, never executed. |
+| [`find_tool_calls`](#find_tool_calls) | 5 | Exact `tool_name` vs substring `tool_name_pattern` search, cross-agent; the name is optional when a content filter carries the selection, but setting **both** names OR passing **no filter at all** **fails loud** (`invalid_argument`), never a silent empty result; each record surfaces the correlated `is_error` outcome + char-capped `output` (authoritative for Claude/OpenCode, best-effort elsewhere) + `is_error_reliable`; each record also carries the wrapper-aware `tool_kind` + `tool_resolved` (the real name under a Skill/Task/MCP wrapper, `null` without a signal); `input_contains`/`output_contains`/`output_excludes`/`is_error` filters compose by AND (domain × error without a special verb); adaptive `output_mode` (`smart` for errors) keeps a trailing error line that `head` would drop. |
+| [`read_session`](#read_session) | 5 | Reads one session into the compact `{role, content}` projection with metadata + pagination echo; `offset`/`limit` page a stable ordered list, `total` invariant across slices; `agent` is **optional** — an id resolves across every parser, a rare cross-agent id collision returns a `candidates` list (not an error), a miss names `agents_scanned`; `with_tokens=true` (F3.3) attaches `tokens` (flat exact-or-estimate) + `component_tokens` — a per-component estimate over ai-r's existing event taxonomy (`user_turn`/`assistant_turn`/`thinking`/`plan`/`tool_call.<kind>`, `total`, always `source="estimate"`, plan-authoring calls under `plan` not `tool_call`, `total == sum(scalars)+sum(tool_call.values())`, empty transcript → `null`) plus per-message EXACT `tokens` blocks where the format records per-message usage (Claude deduped per API call before pagination, OpenCode, Pi; Codex/Antigravity/user turns carry no key — absent, not null); `include_subagents=true` attaches `subagent_rollup` (parent + one child per spawned subagent via `children_of(parent_uuid)` + folded `total`); CLI `ai-r read --with-tokens` prints a `COMPONENT \| TOKENS \| SOURCE` table; integers-and-labels only → outside redaction; default `false` is byte-identical to the historical output. |
+| [`search_sessions`](#search_sessions) | 4 | Title/body/all scope; `AND` default, `OR` widens (`AND ⊆ OR`), negative `-term` excludes, quoted phrase is contiguous; `scope=body` returns a matching `snippet`; BM25 vs date sort; `noise=exclude` removes subagent matches before scanning, `noise=only` searches only the subagent tree. |
+| [empty-result diagnostics (cross-cutting)](#empty-result-diagnostics-cross-cutting) | 2 | A zero-result `query`/`search_sessions`/`find_tool_calls`/`find_file_edits`/`list_sessions` response carries `diagnostics` (per-agent scan counts + date bounds + `source_found`, corpus totals, cause hints: missing source dir / all-excluding `since`/`until` / remaining filters); a non-empty response never carries it. |
+| [secret redaction (cross-cutting)](#secret-redaction-cross-cutting) | 5 | Every text-emitting method masks secrets on output as `[REDACTED_<TYPE>]` by default and carries a `redactions` type→count dict; `redact=false` returns the raw content; matching always runs on the RAW stored text (searching a literal secret finds its session, only the display is masked); a `[REDACTED_*]` placeholder or secret-looking filter value on an empty result earns a diagnostics hint suggesting `redact=false`; vendor formats an `sk-`/`AWS`-only table missed — Stripe `sk_`/`rk_`, `eyJ…` JWT, Google `AIza…` — are masked with their own type labels without over-masking look-alikes; and the **CLI** honours the same default (`ai-r read`/`export`/`list` mask on output, `--no-redact`/`--raw` opts out) so a secret never leaks through a default CLI print. |
+| [MCP transport auth (cross-cutting)](#mcp-transport-auth-cross-cutting) | 2 | The opt-in shared `streamable-http` transport carries access control the stdio path does not need: the `mcp` SDK's DNS-rebinding/Origin allowlist (always on for the loopback default) plus an opt-in bearer token (`AI_R_HTTP_TOKEN`, constant-time compared) — a missing/wrong token is a `401` that never reaches a tool, a correct token passes through; a non-loopback bind with no token is a **fail-closed hard refusal** naming `AI_R_HTTP_TOKEN`, while loopback-without-token still runs behind the rebinding allowlist. |
+| [semantic sort (cross-cutting)](#semantic-sort-cross-cutting-f51) | 3 | `sort="semantic"` on the text-search surface (`query` text facet, `search_sessions`) re-ranks the BM25 top-50 candidates by meaning with a local multilingual embedding model (`intfloat/multilingual-e5-small`, int8 ONNX, direct onnxruntime+tokenizers, mandatory `query:`/`passage:` prefixes applied internally, no persistent index); blended candidate score = 75 % meaning + 25 % word match (min–max normalized within the pool), no similarity cut-off — results are re-ordered, never dropped, the tail keeps BM25 order; the response carries a `semantic` report (`active: true` + model/candidates/weight, or `active: false` + plain-words `reason` + `fallback: "bm25"`); without the optional `ai-r[semantic]` deps/model files the order honestly falls back to plain BM25 — never a crash — and the default sorts never touch the module; cross-lingual ru↔en retrieval works both ways. |
+| [CLI error contract](#cli-error-contract) | 1 | A failing `ai-r` CLI invocation exits non-zero with a structured error on stderr (single `ai-r: …` line, or one JSON `internal_error` line for unexpected failures) — never a Python traceback; `AI_R_DEBUG=1` re-raises for debugging. |
+| [unknown-argument fail-loud (cross-cutting)](#unknown-argument-fail-loud-cross-cutting) | 1 | An undeclared tool argument is rejected with `invalid_argument` (naming it, listing the accepted parameters) **before** the tool runs — the transport would otherwise silently drop it and return an unfiltered result; a fully-declared call passes through untouched. |
 
-<!-- scenarios:end -->
 
 ---
 
@@ -78,6 +77,9 @@ The workhorse verb: filters the unified, agent-neutral event stream
 parameters. Events carry **references** (`refs`), never inlined bodies: the emitted `text` is a
 ~160-char preview (a real cut ends with `…` and sets `text_truncated: true`); the full body is
 fetched on demand via `get_body(id)`.
+
+<details>
+<summary>Show 15 scenarios (QRY-1…QRY-15)</summary>
 
 ### QRY-1 — filter by agent + type
 - **Function:** `query`
@@ -201,11 +203,16 @@ fetched on demand via `get_body(id)`.
 - **Expected:** The non-plan `type` returns `{"events": [], "count": 0}` (no `plan_event` can match a group filter); the **empty string** fails loud.
 - **Pass criteria:** GO when a non-plan type under `group` returns `count=0` with no error, and the empty string is a loud argument error.
 
+</details>
+
 ---
 
 ## `get_body`
 
 Bodies are deliberately kept off the event stream; this verb fetches them on demand by id.
+
+<details>
+<summary>Show 6 scenarios (BODY-1…BODY-6)</summary>
 
 ### BODY-1 — turn text by id
 - **Function:** `get_body`
@@ -255,11 +262,16 @@ Bodies are deliberately kept off the event stream; this verb fetches them on dem
 - **Expected:** `{type:"tool_call(edit)", tool:"Edit", body:{…}}` — `body` is the full edit input; its JSON-canonical sha256 == the `input_sha256` and its length == the `input_chars` `find_file_edits` emitted; `max_chars` caps an over-long body (`body_truncated`); secrets in `body` are masked by default.
 - **Pass criteria:** GO when the returned `body` round-trips the `find_file_edits` reference (sha256 + length match) and is the input dict, NOT the tool name. Returning only the tool name is NO-GO.
 
+</details>
+
 ---
 
 ## `aggregate`
 
 Rolls up rows (from `query` / `find_file_edits` / session inventory) → `{groups, totals}`.
+
+<details>
+<summary>Show 5 scenarios (AGG-1…AGG-5)</summary>
 
 ### AGG-1 — `group_by=agent`, `metrics=[count, edits]`
 - **Function:** `aggregate`
@@ -301,11 +313,16 @@ Rolls up rows (from `query` / `find_file_edits` / session inventory) → `{group
 - **Expected:** Each group and `totals` carry a `tokens` block `{input, output, reasoning, cache_read, cache_write, total, exact, estimated, unknown}`; sums cover only rows that carried each field as an int; a field no row carried is `null` (not `0`); the bare-int row contributes to `total` but counts under `unknown` (provenance not claimed); the no-tokens row counts under `unknown`.
 - **Pass criteria:** GO when `exact + estimated + unknown == len(rows)` in every block, the sums match hand-computation, and no absent field surfaces as a fabricated `0`. A block claiming `exact` for an unlabeled total is NO-GO.
 
+</details>
+
 ---
 
 ## `diff`
 
 Stitches edit rows into a per-file unified diff; bodies fetched on demand.
+
+<details>
+<summary>Show 1 scenario (DIFF-1)</summary>
 
 ### DIFF-1 — rows → per-file unified diff
 - **Function:** `diff`
@@ -315,9 +332,14 @@ Stitches edit rows into a per-file unified diff; bodies fetched on demand.
 - **Expected:** `{files:[{file, edits, diff, hunks}], count, caveats}`; one entry per touched file; `diff` is a unified diff; rows without a file `ref` produce no phantom file.
 - **Pass criteria:** GO when each touched file has a unified `diff` and `hunks`, `count` matches the file count, and no body is inlined beyond the diff itself.
 
+</details>
+
 ---
 
 ## `detect_current`
+
+<details>
+<summary>Show 1 scenario (DET-1)</summary>
 
 ### DET-1 — runtime identity
 - **Function:** `detect_current`
@@ -327,12 +349,17 @@ Stitches edit rows into a per-file unified diff; bodies fetched on demand.
 - **Expected:** `{session_id, agent, candidates:[…], verified, self}`; when env carries a session id, `session_id`/`agent` are filled and `candidates[0].source` names the winning env var; empty env → all-null/false.
 - **Pass criteria:** GO when the reported identity is internally consistent (candidates cascade explains the chosen `session_id`/`agent`, `verified` reflects whether the id was confirmed). An unknown `agent` hint must error.
 
+</details>
+
 ---
 
 ## `plan`
 
 Normalized plan atoms of a session; agent differences hidden. Task grouping is by stable
 `task_id` (plan-file slug), not title.
+
+<details>
+<summary>Show 12 scenarios (PLAN-1…PLAN-12)</summary>
 
 ### PLAN-1 — grouped by slug, not title `[needs-real-vault]`
 - **Function:** `plan`
@@ -430,12 +457,17 @@ Normalized plan atoms of a session; agent differences hidden. Task grouping is b
 - **Expected:** The `final` revision is the last one in file order (rev2's successor by append, not the higher-`ts` one), its inlined body/steps/version come from that same revision, and `get_body` on the ref returns the identical body. `plan_feedback` correlates to the same revision `plan()` reported.
 - **Pass criteria:** GO when body/steps/version all come from one consistent revision and `plan()` and `get_body` agree. NO-GO if the body is from one revision while the version/steps are from another (the pre-fix `ts`-ordinal bug), or if `plan()` disagrees with `get_body`.
 
+</details>
+
 ---
 
 ## `session_stats` (preset)
 
 Thin preset: builds per-session inventory rows → `aggregate(rank_by=stats, kind_split=true)` →
 projected to the legacy totals shape.
+
+<details>
+<summary>Show 5 scenarios (STAT-1…STAT-5)</summary>
 
 ### STAT-1 — all 4 dims give sensible counts
 - **Function:** `session_stats`
@@ -477,12 +509,17 @@ projected to the legacy totals shape.
 - **Expected:** (1) returns `{"error":"scope_required", "matched_sessions":N, "token_scan_limit":400, "scoped":false}` fast, with NO usage file read (no hang); (2) runs normally, `tokens` block present; (3) cap disabled, scan runs; (4) result carries a `warning` about the large scan.
 - **Pass criteria:** GO when the unscoped over-limit call REFUSES fast with a structured `scope_required` (never hangs, never returns a partial token total), scope / `token_scan_limit=0` let it through, and a large permitted scan warns. A hang, a silent partial total, or a crash is NO-GO.
 
+</details>
+
 ---
 
 ## `session_diff` (preset)
 
 Thin preset: `diff(query(edit|write, session=<uuid>, with_intent=true))` for non-codex; codex keeps
 the legacy shell-scan branch.
+
+<details>
+<summary>Show 2 scenarios (SDIFF-1…SDIFF-2)</summary>
 
 ### SDIFF-1 — claude session → per-file hunks, chronological, intent attached `[needs-real-vault]`
 - **Function:** `session_diff`
@@ -500,6 +537,8 @@ the legacy shell-scan branch.
 - **Expected:** Targets recovered from `printf … > path` and `cat > path <<EOF`; edits via `tee` / `sed -i` / `cp` / `mv` are **silently skipped** (documented blind spots).
 - **Pass criteria:** GO when `printf >` / `cat > <<EOF` targets appear correctly. GO-with-caveats is the expected verdict when the session also contains `tee`/`sed -i`/`cp`/`mv` edits — their absence is a documented limitation, not a defect. An undocumented missing edit is NO-GO.
 
+</details>
+
 ---
 
 ## `incidents` (preset)
@@ -511,6 +550,9 @@ sets, calibrated on real host history 2026-07-04) selects dangerous commands →
 **regret dictionary** scans the following `reaction_window` messages (default 6) for an
 apology/rollback reaction — the two-step check behind `confirmed`. Zero LLM: no dictionary hit → no
 incident, no reaction → `confirmed: false`, never inferred.
+
+<details>
+<summary>Show 4 scenarios (INC-1…INC-4)</summary>
 
 ### INC-1 — dangerous command surfaces as an incident (two-step record shape) `[needs-real-vault]`
 - **Function:** `incidents`
@@ -544,6 +586,8 @@ incident, no reaction → `confirmed: false`, never inferred.
 - **Expected:** Records from every agent whose history has dangerous shell calls (not only Claude); `is_error` is `true`/`false` only where a correlated result outcome exists and `null` elsewhere (e.g. codex — no per-result flag), never fabricated; with `redact=true` (default) any secret in `command`/`reaction.preview`/`session_title` is masked as `[REDACTED_<TYPE>]` with a `redactions` type→count dict, while the SAME record is found either way (matching ran on RAW text).
 - **Pass criteria:** GO when non-Claude agents appear (given signal), no `is_error` is invented for formats without the flag, and redaction changes only the emitted fields — never the match set.
 
+</details>
+
 ---
 
 ## `network` (preset)
@@ -559,6 +603,9 @@ input → the deterministic **risk dictionary** (`plain_http`, `credentials_in_u
 a risk fires only on parse/regex evidence. MCP-mediated network access (browser-automation servers
 etc.) stays under `tool_kind="mcp"` — a name alone cannot prove an MCP server touches the network,
 so it is never guessed into this audit (documented boundary).
+
+<details>
+<summary>Show 4 scenarios (NET-1…NET-4)</summary>
 
 ### NET-1 — web calls surface as request records (target extraction + rollups) `[needs-real-vault]`
 - **Function:** `network`
@@ -592,11 +639,16 @@ so it is never guessed into this audit (documented boundary).
 - **Expected:** Records from every agent whose history has web calls (not only Claude; Codex `web_search` records appear when the rollouts contain `web_search_call`); `is_error` is `true`/`false` only where a correlated result outcome exists and `null` elsewhere, never fabricated; with `redact=true` (default) any secret in `url`/`query`/`session_title` is masked as `[REDACTED_<TYPE>]` with a `redactions` type→count dict, while the SAME record is found either way (assessment ran on RAW strings); MCP-mediated network calls (e.g. browser-automation servers) do NOT appear — they stay visible under `tool_kind="mcp"` in `query`, a documented boundary, not a blind spot.
 - **Pass criteria:** GO when non-Claude agents appear (given signal), no `is_error` is invented for formats without the flag, redaction changes only the emitted fields — never the match set — and no MCP call was guessed into the audit.
 
+</details>
+
 ---
 
 ## `find_file_edits`
 
 Cross-agent file-edit inventory. The MCP surface is **reference-by-default**.
+
+<details>
+<summary>Show 3 scenarios (FFE-1…FFE-3)</summary>
 
 ### FFE-1 — default MCP call is reference-by-default
 - **Function:** `find_file_edits`
@@ -622,11 +674,16 @@ Cross-agent file-edit inventory. The MCP surface is **reference-by-default**.
 - **Expected:** The full edit body is returned, and its size matches the earlier `input_chars` for that record.
 - **Pass criteria:** GO when the on-demand body matches the reference (size/hash) from FFE-1 — proving reference-then-fetch works end-to-end.
 
+</details>
+
 ---
 
 ## `list_sessions`
 
 Cross-agent session inventory: newest-first, paginated, each summary self-describing.
+
+<details>
+<summary>Show 6 scenarios (LIST-1…LIST-6)</summary>
 
 ### LIST-1 — paginated, date-sorted, agent-filterable inventory
 - **Function:** `list_sessions`
@@ -676,6 +733,8 @@ Cross-agent session inventory: newest-first, paginated, each summary self-descri
 - **Expected:** Every summary carries `last_activity` (equal to `date`), an integer `age_sec >= 0`, and `activity ∈ {"fresh","stale"}`; `age_sec > threshold ⇔ activity=="stale"`. With the huge threshold the session reads `"fresh"`; with `0.001` it reads `"stale"` (`age_sec > 0`); the blank threshold behaves as the 600 default (no crash). `date` is unchanged (backward compatible).
 - **Pass criteria:** GO when all three fields are present on every summary, `activity` is consistent with `age_sec` and the active threshold, the env override and default both take effect, and a clock-skew future timestamp would clamp `age_sec` to 0 (never negative). The verdict is a recency statement, not a liveness claim — no field asserts the process is alive.
 
+</details>
+
 ---
 
 ## `resume_command` (session summary field)
@@ -686,6 +745,9 @@ CLI, or `null` where no real command exists. Text only — **the scenario never 
 command**; it validates the string shape. Semantics SSOT: `src/ai_r/resume.py`;
 spec: `docs/methods.md` → *Resume command*.
 
+<details>
+<summary>Show 1 scenario (RES-1)</summary>
+
 ### RES-1 — per-agent command shape + honest nulls
 - **Function:** `list_sessions` (F2.2 `resume_command` in every summary)
 - **Goal:** Each agent's summary carries the correct resume command text — `cd`-prefixed when `project_dir` is known — and `null` exactly where no command exists (Antigravity always; subagent sessions; a reference-only Claude Desktop session). Nothing is executed.
@@ -693,6 +755,8 @@ spec: `docs/methods.md` → *Resume command*.
 - **Steps:** `mcp__ai-r__list_sessions()`; inspect `resume_command` on every summary. Do NOT run any of the returned commands.
 - **Expected:** Claude (a) → `cd /home/u/dev/x && claude --resume <uuid>`; Codex (c) → `cd <cwd> && codex resume <uuid>`; OpenCode (d) → `cd <directory> && opencode --session <id>`; Pi (e) → `cd <cwd> && pi --session <session-file-path>` (path form, not id); Antigravity (f) → `null`; the subagent session (b) → `null`; the Desktop-only reference (g) → `null`. A session without `project_dir` gets the bare command (no fabricated `cd`).
 - **Pass criteria:** GO when every non-null command matches its agent's documented shape with shell-quoted values, and `null` appears exactly on Antigravity / subagent / reference-only summaries — never an invented command. NO-GO if a command is fabricated where the CLI has no resume verb.
+
+</details>
 
 ---
 
@@ -705,6 +769,9 @@ calibrated bilingual (ru+en) success/failure word dictionary over the closing *h
 `unknown` — never a guess. Every deciding reason is spelled out in `signals` (empty ⇔ `unknown`).
 The block carries only ai-r-authored strings and dictionary marker labels, never raw session text.
 Semantics SSOT: `src/ai_r/outcome.py`.
+
+<details>
+<summary>Show 2 scenarios (OUT-1…OUT-2)</summary>
 
 ### OUT-1 — decision table: words × error rate, honest unknown
 - **Function:** `read_session` (F2.3 `outcome` block)
@@ -722,11 +789,16 @@ Semantics SSOT: `src/ai_r/outcome.py`.
 - **Expected:** `error_rate_reliable=false`, `tool_errors=null`, `error_rate=null` while `tool_results` still counts the outputs; the wordless session is `status="unknown"` (`signals=[]`); the «спасибо, работает» variant is `status="success"` on the word signal alone.
 - **Pass criteria:** GO when the error fields are `null` exactly for the unreliable-flag agent (no invented error rate), `tool_results` is still counted, and the status changes only on the word signal. A non-null `error_rate` for Codex/Pi/Antigravity is NO-GO.
 
+</details>
+
 ---
 
 ## `find_tool_calls`
 
 Cross-agent tool-call search by exact name or substring pattern; the name filter is optional (content filters can carry the selection), but a call with no filter at all fails loud.
+
+<details>
+<summary>Show 5 scenarios (FTC-1…FTC-5)</summary>
 
 ### FTC-1 — exact vs pattern search, cross-agent, fail-loud arg contract
 - **Function:** `find_tool_calls`
@@ -768,11 +840,16 @@ Cross-agent tool-call search by exact name or substring pattern; the name filter
 - **Expected:** The Skill record carries `tool_kind="skill"`, `tool_resolved="ai-local-reader"`; the MCP record `tool_kind="mcp"`, `tool_resolved="ai-r:query"` (`<server>:<tool>` from the `mcp__<server>__<tool>` name); every Bash record `tool_kind="bash"`, `tool_resolved=null` (nothing to resolve); the fields are additive — the pre-F3.1 record shape (`tool`/`input`/`is_error`/…) is unchanged.
 - **Pass criteria:** GO when both wrapper records resolve to the real names, non-wrapper records carry `tool_resolved=null` (never a guessed value), and existing record fields/counts are unaffected.
 
+</details>
+
 ---
 
 ## `read_session`
 
 Read one session by `uuid`+`agent`, projected to the compact `{role, content}` MCP shape, paginated.
+
+<details>
+<summary>Show 5 scenarios (READ-1…READ-5)</summary>
 
 ### READ-1 — read by uuid+agent → projected shape + pagination echo
 - **Function:** `read_session`
@@ -814,11 +891,16 @@ Read one session by `uuid`+`agent`, projected to the compact `{role, content}` M
 - **Expected:** The default call and the explicit `with_tokens=false` call are byte-identical, and neither carries a `tokens`/`component_tokens` block nor any per-message `tokens` key (historical shape unchanged). The `include_subagents=true` call carries `subagent_rollup` = `{parent, children:[{uuid, agent, component_tokens}], total}` — exactly ONE child (the seeded subagent, resolved via `children_of(parent_uuid)`) and a `total` that folds the parent's `component_tokens` with the child's; a childless parent — or Antigravity, which records no `parent_uuid` — would yield an honest empty `children` list, never a fabricated child. The Codex `with_tokens=true` call carries `tokens` + `component_tokens` (`source="estimate"`) but NO message entry carries a `tokens` key — Codex is cumulative-only, so per-message exact blocks are absent (not null), exactly like Antigravity and user turns.
 - **Pass criteria:** GO when omitting `with_tokens` (or passing `false`) reproduces the pre-feature output byte-for-byte, `include_subagents=true` returns a `subagent_rollup` with the single seeded child and a folded `total`, and the Codex session exposes zero per-message `tokens` keys. A per-message `tokens` key on a Codex message, a fabricated child on a childless parent, or any diff in the default output, is NO-GO.
 
+</details>
+
 ---
 
 ## `search_sessions`
 
 Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`OR`/`NOT` + negative `-term` + quoted phrases, BM25 or date sort.
+
+<details>
+<summary>Show 4 scenarios (SRCH-1…SRCH-4)</summary>
 
 ### SRCH-1 — title scope, AND default, relevance sort
 - **Function:** `search_sessions`
@@ -852,6 +934,8 @@ Case-insensitive cross-agent session search: `title`/`body`/`all` scope, `AND`/`
 - **Expected:** Default and `only` return the subagent session; `exclude` returns zero results (plus `diagnostics` echoing `noise`); `noise="bogus"` returns `{"error": "invalid_argument", …}` naming `noise`.
 - **Pass criteria:** GO when the subagent match is present under include/only, absent under exclude, and the unknown mode errors loudly instead of silently ignoring the filter.
 
+</details>
+
 ---
 
 ## Empty-result diagnostics (cross-cutting)
@@ -860,6 +944,9 @@ A zero-result response of a scanning method (`query` / `search_sessions` / `find
 `find_file_edits` / `list_sessions`) must explain itself: which agents were scanned (session
 counts, date bounds, `source_found`), the corpus totals, and cause hints. Non-empty responses
 never carry `diagnostics`.
+
+<details>
+<summary>Show 2 scenarios (DIAG-1…DIAG-2)</summary>
 
 ### DIAG-1 — zero-result response carries diagnostics; non-empty does not `[needs-real-vault]`
 - **Function:** `query` + `search_sessions` (representative of all scanning methods)
@@ -877,6 +964,8 @@ never carry `diagnostics`.
 - **Expected:** (a) `scanned[claude].source_found == false` and its `hint` names the missing path (`source not found: …/.claude/projects`); (b) the corpus is non-empty and a hint states that `since='2999-01-01'` is after the newest session and "excludes the entire corpus".
 - **Pass criteria:** GO when the missing-source case names the looked-at path and the date case names the excluding bound with the corpus boundary. A generic "no results" with no cause is NO-GO.
 
+</details>
+
 ---
 
 ## Secret redaction (cross-cutting)
@@ -886,6 +975,9 @@ replacements are `[REDACTED_<TYPE>]`, the response carries a per-type `redaction
 anything was masked, and `redact=false` returns the raw content. Redaction is **emission-time
 only** — filters and search always match the RAW stored text. Pattern SSOT: `src/ai_r/redact.py`;
 behaviour spec: `docs/methods.md` → *Redaction*.
+
+<details>
+<summary>Show 5 scenarios (RED-1…RED-5)</summary>
 
 ### RED-1 — secrets masked by default, counter present, `redact=false` returns raw
 - **Function:** `read_session` + `query` (representative of all emitting methods)
@@ -927,6 +1019,8 @@ behaviour spec: `docs/methods.md` → *Redaction*.
 - **Expected:** Every default CLI path prints `[REDACTED_GITHUB_TOKEN]` and NO raw token (including the `--output` file and the `list` title); `--no-redact`/`--raw` prints the raw token.
 - **Pass criteria:** GO when no default CLI surface leaks the secret and the opt-out flag round-trips raw. A raw secret in any default CLI output is NO-GO.
 
+</details>
+
 ---
 
 ## MCP transport auth (cross-cutting)
@@ -937,6 +1031,9 @@ DNS-rebinding/Origin allowlist (always on for the loopback default) and an opt-i
 (`AI_R_HTTP_TOKEN`, constant-time compared), **required (fail-closed) for any non-loopback bind**.
 Behaviour spec: `docs/architecture.md` → *ADR: shared http transport* (Transport auth). These
 scenarios drive `ai_r.serve` helpers directly (no live socket needed).
+
+<details>
+<summary>Show 2 scenarios (SRV-1…SRV-2)</summary>
 
 ### SRV-1 — bearer token gate: 401 without / pass-through with `[hermetic-ok]`
 - **Function:** `ai_r.serve` HTTP transport (bearer auth wrapper)
@@ -954,6 +1051,8 @@ scenarios drive `ai_r.serve` helpers directly (no live socket needed).
 - **Expected:** Remote-without-token raises a hard error naming `AI_R_HTTP_TOKEN`; loopback-without-token and remote-with-token both proceed.
 - **Pass criteria:** GO when the only refused combination is remote-without-token and the error is explicit and fail-closed. A remote server starting unauthenticated is NO-GO.
 
+</details>
+
 ---
 
 ## Semantic sort (cross-cutting, F5.1)
@@ -964,6 +1063,9 @@ BM25 supplies the top-50 candidate pool, a local multilingual embedding model
 prefixes applied internally) re-ranks it by meaning. Blended score = 75 % meaning + 25 % word match;
 no similarity cut-off (re-order, never drop); tail beyond the pool keeps BM25 order. Optional
 `ai-r[semantic]` extra; without it — honest BM25 fallback with a reason, never a crash.
+
+<details>
+<summary>Show 3 scenarios (SEM-1…SEM-3)</summary>
 
 ### SEM-1 — meaning beats word frequency `[needs-real-vault]` (requires `ai-r[semantic]` + model)
 - **Function:** `query` / `search_sessions` with `sort="semantic"`
@@ -989,9 +1091,14 @@ no similarity cut-off (re-order, never drop); tail beyond the pool keeps BM25 or
 - **Expected:** Under `sort="semantic"` the on-topic English session ranks above the off-topic noise even though the query is Russian (E5 cross-lingual embedding space); the reverse direction (English query, Russian session) behaves symmetrically.
 - **Pass criteria:** GO when the cross-language on-topic session demonstrably outranks off-topic same-language noise in at least one direction ru→en or en→ru (both preferred). NO-GO if semantic order equals BM25 order on a case where meaning and word frequency clearly disagree.
 
+</details>
+
 ---
 
 ## CLI error contract
+
+<details>
+<summary>Show 1 scenario (CLI-1)</summary>
 
 ### CLI-1 — structured errors, non-zero exit, never a traceback
 - **Function:** `ai-r` CLI (all subcommands)
@@ -1000,3 +1107,20 @@ no similarity cut-off (re-order, never drop); tail beyond the pool keeps BM25 or
 - **Steps:** run and capture `rc`/stderr for: `ai-r find-tool-calls --limit -1` (invalid argument); `ai-r read no-such-session-zzz --agent claude` (not found); `ai-r list --from-date junk` (bad date). Grep each stderr for `Traceback`.
 - **Expected:** Every invocation exits non-zero (invalid argument → 2, not found → 3, bad date → 1); stderr carries a single structured line — `ai-r: <message>` for expected failures, or one JSON `{"error": "internal_error", "type": …, "message": …}` line for an unexpected internal failure — and `Traceback` appears nowhere. With `AI_R_DEBUG=1` an unexpected failure re-raises (traceback allowed then, by request).
 - **Pass criteria:** GO when all failing invocations are traceback-free with a non-zero exit code and a parseable one-line error. Any Python traceback without `AI_R_DEBUG=1` is NO-GO.
+
+</details>
+
+## Unknown-argument fail-loud (cross-cutting)
+
+<details>
+<summary>Show 1 scenario (STRICT-1)</summary>
+
+### STRICT-1 — an undeclared tool argument is rejected, not silently dropped `[hermetic-ok]`
+- **Function:** every `mcp__ai-r__*` tool (transport-level `_StrictArgsFastMCP`)
+- **Goal:** A caller that passes a parameter a verb does not declare gets a loud `invalid_argument`, never a successful-looking but unfiltered result — the failure a self-referential usage audit found in real history (`plan(limit=…)`, `list_sessions(since=…)`).
+- **Preconditions:** a live ai-r MCP server; no vault data required (rejection happens before any read). `[hermetic-ok]`.
+- **Steps:** call `plan(session="anything", limit=1)`; call `list_sessions(since="2026-07-05")`; call a fully-declared control such as `list_sessions(limit=1)` or `detect_current()`.
+- **Expected:** Both phantom-argument calls return `{"error": "invalid_argument", "message": …}` whose message names the offending key (`limit` / `since`) and lists the accepted parameters; the message is returned **before** any session is read. The declared control call is NOT short-circuited — it reaches the tool and returns its normal result (or an empty-result `diagnostics`, never the unknown-argument error).
+- **Pass criteria:** GO when each undeclared argument yields the `invalid_argument` shape naming that argument, AND a fully-declared call passes through untouched. A silent success on a phantom argument (the pre-fix behaviour) is NO-GO.
+
+</details>
