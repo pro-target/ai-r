@@ -10,6 +10,8 @@
 > did it, under which plan — and whether it quietly dropped the plan it actually
 > settled on. Read-only, across all five coding agents, one interface.
 
+**Deterministic read path: extraction makes no LLM calls and no outbound network requests; the optional semantic re-rank is local too (embeddings, not an LLM).**
+
 An agent reports: "done X, per plan Y." You have no way to check. The plan lives
 in one format, the edits in another. And if two agents worked the task, their
 histories don't reconcile at all — each writes its own way, in its own place.

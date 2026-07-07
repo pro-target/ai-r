@@ -11,6 +11,8 @@
 > había acordado. Solo lectura, a través de los cinco agentes de programación, una
 > sola interfaz.
 
+**Ruta de lectura determinista: la extracción no hace llamadas a LLM ni peticiones de red salientes; el re-ranking semántico opcional también es local (embeddings, no un LLM).**
+
 Un agente informa: "hecho X, según el plan Y". No tienes forma de comprobarlo. El
 plan vive en un formato, las ediciones en otro. Y si dos agentes trabajaron la
 tarea, sus historiales no se reconcilian en absoluto — cada uno escribe a su
@@ -101,6 +103,51 @@ de formato se normalizan dentro de los parsers.
 - **Recordar qué hiciste y por qué.** ¿Por qué se editó este archivo? ¿Por qué se
   añadió esta regla? Encuentra la sesión donde el archivo cambió y lee la petición
   *anterior* a la edición.
+
+## En qué se diferencia de las herramientas de búsqueda de sesiones
+
+Un puñado de herramientas multiagente ya leen el historial de más de un agente
+(`jazzyalex/agent-sessions`, `Dicklesworthstone/coding_agent_session_search`,
+`hacktivist123/agent-session-resume`). Casi todas van de **búsqueda y línea de
+tiempo**: encontrar una *sesión*, recorrer el historial.
+
+`ai-r` va más profundo: extrae el **plan, la intención y la autoría como entidades
+listas para usar** sobre las que construyes memoria. La búsqueda encuentra texto —
+`ai-r` responde **por qué**. Técnicamente, una herramienta de búsqueda también
+podría desenterrar un plan del texto de una sesión, pero no lo devuelve parseado
+en una única forma normalizada — con `ai-r` esa es la superficie principal.
+
+| Capacidad | Visores de un solo agente | Herramientas de búsqueda multiagente | `ai-r` |
+|---|---|---|---|
+| Lee los logs de >1 agente | No | Sí | Sí — Claude, Codex, OpenCode, Antigravity, Pi |
+| Superficie programática | Mayormente GUI/TUI | Mayormente TUI/CLI/app | **MCP + CLI + SDK de Python** |
+| Atribución (edición/comando → agente + intención) | — | Parcial | Sí — `find-file-edits` / `find-tool-calls` |
+| Replay de auditoría (reconstruir los cambios de una sesión, sin git) | — | Rara vez | Sí — `session_diff` |
+| Extracción de plan (final vs borrador, normalizada) | — | — | Sí — `plan` |
+| Alcance | Visor | Búsqueda / reanudación / memoria | **Núcleo de extracción de solo lectura** |
+
+*Las columnas de la competencia reflejan su documentación pública a fecha de
+2026-07; donde una capacidad no está clara, subestimamos en lugar de exagerar.*
+
+Deliberadamente **no** competimos en amplitud de agentes, velocidad ni riqueza de
+la TUI. La ventaja de `ai-r` está en extraer el "por qué" y entidades
+estructuradas para consumo por máquinas.
+
+## Probado en la práctica
+
+`ai-r` ya lee su propio historial de desarrollo — a través de los cinco agentes.
+Sobre él corren herramientas reales (viven aparte, encima de su API de solo
+lectura):
+
+- **auditor** — un agente nuevo revisa fríamente lo que el anterior hizo y decidió
+  realmente. Esto pilló a agentes que mintieron discretamente sobre el plan.
+- **summarizer** (`export rounds`) — renderiza una sesión en un documento de
+  traspaso listo para usar.
+- **ai-local-reader** — un skill de solo lectura: audita sesiones pasadas desde
+  disco a través de todos los agentes.
+
+Estas herramientas son del lado del flujo de trabajo, fuera de este repo. El
+propio `ai-r` solo lee y devuelve datos.
 
 ## Agentes soportados
 
