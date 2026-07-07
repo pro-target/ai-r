@@ -22,7 +22,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # 1.9.0 is the floor that ships the streamable-http transport
+    # (``FastMCP.streamable_http_app``) and native transport-security
+    # (``TransportSecuritySettings``: DNS-rebinding Origin/Host validation)
+    # that ``ai_r.serve.run_http`` relies on. Older SDKs lack these APIs, so
+    # the http transport would crash at import/call time.
+    "mcp>=1.9.0",
 ]
 
 [project.optional-dependencies]

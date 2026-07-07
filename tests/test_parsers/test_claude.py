@@ -741,6 +741,250 @@ def test_read_subagent_session_by_uuid(
 
 
 # ---------------------------------------------------------------------------
+# Defect #7-A: >1-level spawn chains reconnect via ``.meta.json`` toolUseId
+# ---------------------------------------------------------------------------
+
+
+def _write_spawn_child(
+    subagents_dir: Path,
+    agent_id: str,
+    *,
+    session_id: str,
+    tool_use_id: str,
+    spawn_depth: int,
+    emits: tuple[str, ...] = (),
+) -> None:
+    """Write a subagent transcript + its sidecar ``.meta.json``.
+
+    ``emits`` are ``Task``/``Agent`` tool_use ids this child itself spawns
+    (i.e. it is the parent of those grandchildren) — mirrors the real
+    on-disk shape where a spawn call's ``id`` == the child's meta
+    ``toolUseId``.
+    """
+    subagents_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": f"task for {agent_id}"},
+            "timestamp": "2026-06-14T15:00:00Z",
+            "sessionId": session_id,
+            "isSidechain": True,
+        }
+    ]
+    content: list[dict] = [{"type": "text", "text": "working"}]
+    for i, tuid in enumerate(emits):
+        content.append(
+            {
+                "type": "tool_use",
+                "name": "Task",
+                "id": tuid,
+                "input": {"description": f"spawn {i}"},
+            }
+        )
+    records.append(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": content},
+            "timestamp": "2026-06-14T15:00:05Z",
+            "sessionId": session_id,
+            "isSidechain": True,
+        }
+    )
+    with (subagents_dir / f"{agent_id}.jsonl").open(
+        "w", encoding="utf-8"
+    ) as fh:
+        for r in records:
+            fh.write(json.dumps(r) + "\n")
+    (subagents_dir / f"{agent_id}.meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "general-purpose",
+                "toolUseId": tool_use_id,
+                "spawnDepth": spawn_depth,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _build_depth2_spawn_tree(tmp_sessions_dir: Path) -> tuple[str, str, str, str]:
+    """Top-level session spawns child-A (depth 1); child-A spawns
+    grandchild-B (depth 2).  All three transcripts share one flat
+    ``subagents/`` folder (the real Claude layout).
+
+    Returns ``(base, top_uuid, child_uuid, grandchild_uuid)``.
+    """
+    projects = tmp_sessions_dir / ".claude" / "projects"
+    slug = projects / "-home-user-proj"
+    top_uuid = "top-session-1"
+    child_uuid = "agent-child-A"
+    grandchild_uuid = "agent-grandchild-B"
+    tuid_child = "toolu_spawn_child_A"
+    tuid_grand = "toolu_spawn_grandchild_B"
+
+    # Top-level transcript: spawns child-A (emits tuid_child).
+    top_dir = slug
+    top_dir.mkdir(parents=True, exist_ok=True)
+    with (top_dir / f"{top_uuid}.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "start"},
+                    "timestamp": "2026-06-14T15:00:00Z",
+                    "sessionId": top_uuid,
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "spawning"},
+                            {
+                                "type": "tool_use",
+                                "name": "Task",
+                                "id": tuid_child,
+                                "input": {"description": "child A"},
+                            },
+                        ],
+                    },
+                    "timestamp": "2026-06-14T15:00:01Z",
+                    "sessionId": top_uuid,
+                }
+            )
+            + "\n"
+        )
+
+    subagents = slug / top_uuid / "subagents"
+    # child-A: depth 1, spawned by top (toolUseId == tuid_child); it in turn
+    # spawns grandchild-B (emits tuid_grand).
+    _write_spawn_child(
+        subagents,
+        child_uuid,
+        session_id=top_uuid,
+        tool_use_id=tuid_child,
+        spawn_depth=1,
+        emits=(tuid_grand,),
+    )
+    # grandchild-B: depth 2, spawned by child-A (toolUseId == tuid_grand).
+    # Its sessionId is the TOP uuid (real Claude behaviour) → without the
+    # meta join it would collapse to the top-level session.
+    _write_spawn_child(
+        subagents,
+        grandchild_uuid,
+        session_id=top_uuid,
+        tool_use_id=tuid_grand,
+        spawn_depth=2,
+    )
+    return str(projects), top_uuid, child_uuid, grandchild_uuid
+
+
+def test_deep_spawn_reparents_to_true_parent_in_list(
+    tmp_sessions_dir: Path,
+) -> None:
+    """A depth-2 subagent must point at its real spawner (the depth-1
+    child), NOT collapse to the top-level session (defect #7-A)."""
+    base, top, child, grandchild = _build_depth2_spawn_tree(tmp_sessions_dir)
+    by_uuid = {s.uuid: s for s in claude.list_sessions(base_dir=base)}
+
+    assert by_uuid[child].kind == "subagent"
+    assert by_uuid[child].parent_uuid == top  # depth 1 → top-level
+
+    gc = by_uuid[grandchild]
+    assert gc.kind == "subagent"
+    # THE fix: depth-2 child reparents to the depth-1 child, not the root.
+    assert gc.parent_uuid == child
+    assert gc.parent_uuid != top
+    # Internal bookkeeping must never leak.
+    assert "_emitted_spawn_ids" not in gc.extra
+    assert "_emitted_spawn_ids" not in by_uuid[child].extra
+
+
+def test_deep_spawn_reparents_on_single_read(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read_session`` (no session list to join) must ALSO reparent a
+    depth>1 subagent via its sibling transcripts (defect #7-A)."""
+    base, top, child, grandchild = _build_depth2_spawn_tree(tmp_sessions_dir)
+    gc = claude.read_session(grandchild, base_dir=base)
+    assert gc.parent_uuid == child
+    assert gc.parent_uuid != top
+    assert "_emitted_spawn_ids" not in gc.extra
+    # A depth-1 child on single read keeps its (correct) top-level parent.
+    ch = claude.read_session(child, base_dir=base)
+    assert ch.parent_uuid == top
+
+
+# ---------------------------------------------------------------------------
+# Defect #7-B: flat/nested detection is structural, not literal ``projects``
+# ---------------------------------------------------------------------------
+
+
+def test_flat_subagent_under_custom_base_dir(tmp_path: Path) -> None:
+    """Flat form under a base_dir whose leaf is NOT ``projects``: the
+    spawner must come from ``sessionId``, not the project slug folder name
+    (defect #7-B — the literal-``projects`` heuristic misfired)."""
+    base = tmp_path / "mystore"  # deliberately not named "projects"
+    slug_dir = base / "-slug"
+    subagents = slug_dir / "subagents"
+    subagents.mkdir(parents=True)
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "flat task"},
+            "timestamp": "2026-06-14T16:00:00Z",
+            "sessionId": "spawner-flat-9",
+            "isSidechain": True,
+        },
+    ]
+    (subagents / "agent-flat-x.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    sessions = claude.list_sessions(base_dir=str(base))
+    assert len(sessions) == 1
+    sub = sessions[0]
+    assert sub.kind == "subagent"
+    # Flat form → spawner from sessionId; the slug folder ("-slug") is NOT
+    # a parent uuid and must never be used as one.
+    assert sub.parent_uuid == "spawner-flat-9"
+    assert sub.parent_uuid != "-slug"
+    # project_slug still correctly identifies the slug dir (skip ONE level).
+    assert sub.extra.get("project_slug") == "-slug"
+
+
+def test_nested_subagent_under_custom_base_dir(tmp_path: Path) -> None:
+    """Directory form under a custom base_dir: the wrapper folder is a
+    per-session uuid and remains the parent (structural detection)."""
+    base = tmp_path / "store2"
+    subagents = base / "-slug" / "parent-uuid-Z" / "subagents"
+    subagents.mkdir(parents=True)
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "nested task"},
+            "timestamp": "2026-06-14T16:30:00Z",
+            "sessionId": "parent-uuid-Z",
+            "isSidechain": True,
+        },
+    ]
+    (subagents / "agent-nested-y.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    sessions = claude.list_sessions(base_dir=str(base))
+    assert len(sessions) == 1
+    sub = sessions[0]
+    assert sub.kind == "subagent"
+    assert sub.parent_uuid == "parent-uuid-Z"
+    # Directory form → skip TWO levels to reach the slug.
+    assert sub.extra.get("project_slug") == "-slug"
+
+
+# ---------------------------------------------------------------------------
 # Thinking blocks + per-message token usage (F3.3 breakdown groundwork)
 # ---------------------------------------------------------------------------
 

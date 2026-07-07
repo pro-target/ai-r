@@ -58,8 +58,10 @@ class Plan:
             ``draft``; plans belonging to *earlier* completed task groups
             are ``completed_major``.
         version: 1-based revision number within the task group, in
-            chronological ``(ts, seq)`` order (F3.4 v2) — drafts are
+            file/append (``seq``) order (F3.4 v2) — drafts are
             ``v1…vN-1``, the final is ``vN``; numbering restarts per task.
+            File order, not ts: it is the emission order and stays aligned
+            with the plan bodies even under non-monotonic timestamps.
         path: Source path when the signal is file-backed (``plans/*.md`` for
             Claude Write, ``implementation_plan.md`` for Antigravity).
         steps: Codex ``update_plan`` steps (with per-step ``status``), else
@@ -95,11 +97,19 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
     plan_events whose titles drift as they get decorated, but they are one
     task and must not be split.
 
-    Within each group the latest event (by ts, then seq) is ``final`` and the
-    rest are ``draft``.  Across groups, every plan of a task whose *final* is
-    older than another task's final is ``completed_major`` (a superseded
+    Within each group the latest event (by file/append order) is ``final`` and
+    the rest are ``draft``.  Across groups, every plan of a task whose *final*
+    is older than another task's final is ``completed_major`` (a superseded
     prior task, i.e. a DIFFERENT slug), except the single most-recent task
     which keeps ``draft``/``final``.
+
+    Ordering — both the per-task revision chain (draft…final, version numbers)
+    and the cross-task ranking — is by the ``seq`` file/append index carried in
+    each id, NOT by ts.  ``seq`` is the monotonic emission order and is the
+    same order plan signals are detected in, so the atoms stay aligned with
+    their bodies/steps even when timestamps are non-monotonic (a ts-primary key
+    would hand a revision the body/version of a chronologically-earlier-stamped
+    but file-later sibling).
     """
     # Bucket events by task key, preserving arrival order within a bucket.
     # The stable ``task_key`` ref is the primary key; fall back to a
@@ -112,18 +122,12 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
             key = _normalize_task_key(title)
         buckets.setdefault(key, []).append(ev)
 
-    def _seq(ev: dict[str, Any]) -> int:
-        try:
-            return int(str(ev.get("id", "")).rsplit(":", 1)[-1])
-        except (ValueError, TypeError):
-            return -1
-
-    def _sort_key(ev: dict[str, Any]) -> Tuple[bool, str, int]:
-        ts = ev.get("ts")
-        return (ts is None, ts or "", _seq(ev))
+    def _sort_key(ev: dict[str, Any]) -> int:
+        # File/append order — the stable ``seq`` in ``"{session}:{seq}"``.
+        return _event_seq(str(ev.get("id", "")))
 
     # Determine each task's "final time" (its latest event) to rank tasks.
-    task_final_time: dict[str, Tuple[bool, str, int]] = {}
+    task_final_time: dict[str, int] = {}
     for key, evs in buckets.items():
         latest = max(evs, key=_sort_key)
         task_final_time[key] = _sort_key(latest)
@@ -140,8 +144,8 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
         ordered = sorted(evs, key=_sort_key)
         final_ev = ordered[-1] if ordered else None
         is_latest_task = key == latest_task_key
-        # F3.4 v2: 1-based revision numbering per task group, chronological —
-        # drafts are v1…vN-1, the final is vN (restarts for every task).
+        # F3.4 v2: 1-based revision numbering per task group, in file/append
+        # order — drafts are v1…vN-1, the final is vN (restarts per task).
         for version, ev in enumerate(ordered, start=1):
             if not is_latest_task:
                 kind = "completed_major"
@@ -162,7 +166,8 @@ def _assign_plan_kinds(events: Sequence[dict[str, Any]]) -> List[Plan]:
                 refs=refs,
                 sha256=ev.get("sha256", ""),
             ))
-    # Return in timeline order (ts, seq) for a stable, chronological result.
+    # Return in file/append order (session, seq) for a stable result — the
+    # same order the atoms' bodies/versions were bound in.
     plans.sort(key=lambda p: (
         p.id.rsplit(":", 1)[0],
         int(p.id.rsplit(":", 1)[-1]) if ":" in p.id else -1,
@@ -234,14 +239,43 @@ class _PlanContextCache:
         return self._ctx[session_id]
 
 
+def _event_seq(event_id: str) -> int:
+    """The trailing ``seq`` of an ``"{session}:{seq}"`` id — the stable
+    file/append-order index within the session's normalized stream.
+
+    Plan signals are detected in file order (:func:`_plan_signals_for_session`)
+    and each plan_event is emitted with a monotonic ``seq`` in that same order,
+    so ordering a session's plan_event ids by ``seq`` reproduces the signal
+    order — regardless of how :func:`query` sorted the rows (ts order, which
+    diverges from file order under non-monotonic timestamps).
+    """
+    if ":" not in event_id:
+        return -1
+    try:
+        return int(event_id.rsplit(":", 1)[-1])
+    except (ValueError, TypeError):
+        return -1
+
+
 def _plan_ids_by_session(
     events: Sequence[dict[str, Any]],
 ) -> "OrderedDictType[str, List[str]]":
-    """Group the queried plan_event ids per session, preserving order."""
+    """Group the queried plan_event ids per session, in file/append order.
+
+    ``query`` returns rows in ts order, which diverges from the plan-signal
+    detection order when timestamps are non-monotonic.  The signal lists this
+    map indexes into (see :func:`_session_plan_context`) are always in file
+    order, so each session's ids are sorted by their ``seq`` (the stable
+    file-order index carried in the id) — NOT left in the ts order ``query``
+    happened to emit.  Without this, a non-monotonic session's plan atoms get
+    bodies/steps/versions from the WRONG revision.
+    """
     grouped: "OrderedDictType[str, List[str]]" = _OrderedDict()
     for ev in events:
         sid = ev.get("session_id") or ""
         grouped.setdefault(sid, []).append(ev.get("id", ""))
+    for sid in grouped:
+        grouped[sid].sort(key=_event_seq)
     return grouped
 
 
@@ -300,9 +334,9 @@ def plan(
 
     Returns:
         A list of normalized plan dicts (see :func:`_plan_to_dict`), in
-        timeline order.  Every atom carries ``version`` — its 1-based
-        chronological revision number within the task group (F3.4 v2:
-        drafts are ``v1…vN-1``, the final is ``vN``).  Steps/status are
+        file/append order.  Every atom carries ``version`` — its 1-based
+        revision number within the task group in that same file order (F3.4
+        v2: drafts are ``v1…vN-1``, the final is ``vN``).  Steps/status are
         carried for Codex plans.  With ``bodies="final"`` the ``final``
         atom carries ``body`` (honest ``None`` when the signal has no
         text, e.g. a steps-only Codex plan) and ``body_source`` —
@@ -520,6 +554,26 @@ def _cap_body(text: object, max_chars: int) -> tuple[object, bool]:
     return text, False
 
 
+def _cap_body_fields(
+    result: dict[str, Any], max_chars: int, fields: Sequence[str]
+) -> dict[str, Any]:
+    """Cap the given ``fields`` in place, setting ``body_truncated`` if any cut.
+
+    Runs AFTER :func:`_redact_body_fields` so the char cap always slices the
+    already-masked string — a secret straddling the cap edge can never leak
+    its unmasked prefix (F2.1 redact-then-cap order; defect #3).  Matches the
+    ``query``/``incidents``/``network`` emission order.
+    """
+    for field in fields:
+        if field not in result:
+            continue
+        capped, cut = _cap_body(result[field], max_chars)
+        if cut:
+            result[field] = capped
+            result["body_truncated"] = True
+    return result
+
+
 # A plan-feedback ref minted by :func:`plan_feedback`:
 # ``"<session_id>:pf<ordinal>"`` — the ordinal indexes the session's plan
 # responses (message order, deterministic).  Distinct from event ids, whose
@@ -554,22 +608,22 @@ def _feedback_body(
         if sig.tool_use_id == resp.tool_use_id and i < len(plan_ids):
             plan_id = plan_ids[i]
             break
-    text, truncated = _cap_body(resp.raw, max_chars)
     result: dict[str, Any] = {
         "id": ref,
         "type": "plan_feedback",
         "verdict": resp.verdict,
         "plan_id": plan_id,
-        "text": text,
+        "text": resp.raw,
         "pairs": [
             {"quote": quote, "comment": comment}
             for quote, comment in resp.pairs
         ],
         "ts": resp.ts,
     }
-    if truncated:
-        result["body_truncated"] = True
-    return _redact_body_fields(result, redact)
+    # F2.1 ordering: redact the FULL raw string first, THEN cap — a secret
+    # sliced by the cap edge can never leak its unmasked prefix (defect #3).
+    result = _redact_body_fields(result, redact)
+    return _cap_body_fields(result, max_chars, ("text",))
 
 
 def _resolve_tool_use(event: Any, stream: Sequence[Any]) -> Optional[dict]:
@@ -638,18 +692,16 @@ def _tool_call_body(
     if tool is None:
         # Couldn't recover the raw call (unreadable session / drifted stream):
         # fall back to the event's tool name so the caller still gets a shape.
-        text, body_truncated = _cap_body(event.text, max_chars)
-        out["text"] = text
-        if body_truncated:
-            out["body_truncated"] = True
-        return _redact_body_fields(out, redact)
+        # Redact the FULL text first, THEN cap (F2.1 order; defect #3) so a
+        # secret sliced by the cap edge can never leak its unmasked prefix.
+        out["text"] = event.text
+        out = _redact_body_fields(out, redact)
+        return _cap_body_fields(out, max_chars, ("text",))
     out["tool"] = tool.get("name", "") or None
-    body = _coerce_tool_input(tool.get("input", ""))
-    body, body_truncated = _cap_body(body, max_chars)
-    out["body"] = body
-    if body_truncated:
-        out["body_truncated"] = True
-    return _redact_body_fields(out, redact)
+    out["body"] = _coerce_tool_input(tool.get("input", ""))
+    # Redact the FULL body first, THEN cap (F2.1 order; defect #3).
+    out = _redact_body_fields(out, redact)
+    return _cap_body_fields(out, max_chars, ("body",))
 
 
 def get_body(
@@ -720,12 +772,12 @@ def get_body(
         )
 
     if event.type != "plan_event":
-        # Turn body: the text already lives on the event.
-        text, body_truncated = _cap_body(event.text, max_chars)
-        out: dict[str, Any] = {"id": id, "type": event.type, "text": text}
-        if body_truncated:
-            out["body_truncated"] = True
-        return _redact_body_fields(out, redact)
+        # Turn/tool body: the text already lives on the event.  Redact the
+        # FULL text first, THEN cap (F2.1 order; defect #3) so a secret sliced
+        # by the cap edge can never leak its unmasked prefix.
+        out: dict[str, Any] = {"id": id, "type": event.type, "text": event.text}
+        out = _redact_body_fields(out, redact)
+        return _cap_body_fields(out, max_chars, ("text",))
 
     sig = _resolve_plan_signal(id)
     title = _plan_ref_value(event.refs, "title") or event.text or ""
@@ -775,11 +827,11 @@ def get_body(
                 if p.task_id == my.task_id and p.kind == "draft"
                 and p.id != result["id"]
             ]
-    if "body" in result:
-        result["body"], body_truncated = _cap_body(result["body"], max_chars)
-        if body_truncated:
-            result["body_truncated"] = True
-    return _redact_body_fields(result, redact)
+    # F2.1 ordering: redact the FULL body (+ title/steps) first, THEN cap the
+    # body — a secret straddling the cap edge can never leak its unmasked
+    # prefix (defect #3), matching the query/incidents/network emission order.
+    result = _redact_body_fields(result, redact)
+    return _cap_body_fields(result, max_chars, ("body",))
 
 
 def _redact_body_fields(result: dict[str, Any], redact: bool) -> dict[str, Any]:

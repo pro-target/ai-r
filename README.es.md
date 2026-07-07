@@ -171,22 +171,67 @@ configuraciones MCP para **Claude**, **Codex**, **OpenCode**, **Antigravity**
 (donde existen las configuraciones), instala el skill de CLI de **Pi**, y ejecuta
 smoke tests.
 
-Extra opcional — `http`: `AI_R_EXTRAS=http bash install.sh` (o
-`pip install "ai-r[http]"`) añade [uvicorn](https://www.uvicorn.org) y habilita
-un **transporte streamable-http compartido**. Por defecto cada agente lanza su
-propio `ai-r-mcp` sobre stdio — bajo un fan-out multiagente eso son N procesos,
-cada uno con una caché fría, re-escaneando el corpus (la causa medida del
-agotamiento de RAM). Con `AI_R_MCP_TRANSPORT=http` un único **servidor caliente**
-en localhost (por defecto `127.0.0.1:8756`) es compartido por todos los agentes
-en lugar de un enjambre; las unidades de systemd en `packaging/systemd/` añaden
-activación por socket con auto-salida por inactividad — el proceso existe solo
-bajo carga. El bind es solo loopback y con **fallo cerrado (fail-closed)**: un
-`AI_R_MCP_HOST` que no sea localhost se rechaza (los transcripts contienen
-secretos y se sirven sin token) hasta que el operador ponga explícitamente
-`AI_R_MCP_ALLOW_REMOTE=1`. Otros ajustes: `AI_R_MCP_PORT`, `AI_R_MCP_IDLE_SEC`
-(umbral de auto-salida por inactividad), `AI_R_HAYSTACK_CACHE_MAX` (tope de la
-caché de búsqueda). Totalmente opcional: sin él, el modo stdio funciona como
-antes.
+**Extra opcional — `tokens`:** `AI_R_EXTRAS=tokens bash install.sh` (o
+`pip install "ai-r[tokens]"`) añade [tiktoken](https://github.com/openai/tiktoken)
+para mejores **estimaciones** de tokens en sesiones cuyo formato no almacena
+cifras de uso exactas. Totalmente opcional: sin él, las cifras exactas siguen
+saliendo directamente de los archivos de sesión donde están registradas, y la
+estimación de reserva degrada a una heurística aproximada de `chars/4`,
+etiquetada honestamente como `estimate` — nunca una caída.
+
+**Extra opcional — `semantic`** (`AI_R_EXTRAS=semantic bash install.sh`
+o `pip install "ai-r[semantic]"` + una descarga única del modelo, que el
+instalador hace por sí solo): habilita `sort="semantic"` en la búsqueda de texto
+(`query`, `search_sessions`) — los 50 mejores candidatos de BM25 se reordenan por
+**significado**.
+
+- **Modelo.** Modelo local multilingüe de embeddings
+  [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
+  (int8 ONNX, ~118 MB, MIT) — directamente vía
+  [onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
+  sin torch y sin índice persistente. Elegido por su fuerte búsqueda
+  cross-lingüe (una consulta en español encuentra una sesión en inglés y
+  viceversa) con un tamaño reducido.
+- **Cómo se calcula la puntuación.** BM25 selecciona las 50 mejores
+  coincidencias por palabras (es un presupuesto de coste, no un corte por
+  calidad — a propósito NO hay umbral de similitud: en esta familia de modelos
+  incluso textos no relacionados obtienen ≈0.7). Dentro del pool, la puntuación
+  final = **75 % significado + 25 % coincidencia de palabras** — el significado
+  manda, y la parte léxica evita hundir una aparición exacta del término y
+  desempata los empates.
+- **Fail-soft.** Sin los paquetes o los archivos del modelo, `sort="semantic"`
+  cae de forma honesta al orden BM25 con una explicación
+  (`semantic: {active: false, reason, fallback: "bm25"}`) — nunca una caída.
+
+**Extra opcional — `http`** (`AI_R_EXTRAS=http bash install.sh` o
+`pip install "ai-r[http]"`): añade [uvicorn](https://www.uvicorn.org) y habilita
+un **transporte streamable-http compartido** (requiere `mcp>=1.9.0`).
+
+- **Para qué.** Por defecto cada agente lanza su propio `ai-r-mcp` sobre stdio —
+  bajo un fan-out multiagente eso son N procesos, cada uno con una caché fría,
+  re-escaneando el corpus (la causa medida del agotamiento de RAM). Con
+  `AI_R_MCP_TRANSPORT=http` un único **servidor caliente** en localhost (por
+  defecto `127.0.0.1:8756`) es compartido por todos en lugar de un enjambre; las
+  unidades de systemd en `packaging/systemd/` dan activación por socket con
+  auto-salida por inactividad.
+- **Seguridad (fail-closed).** El bind es solo loopback. Los ataques desde el
+  navegador (DNS-rebinding) los corta el allowlist de Origin/Host del SDK
+  (siempre activo para loopback). El acceso remoto requiere
+  `AI_R_MCP_ALLOW_REMOTE=1` **y** el token `AI_R_HTTP_TOKEN` — sin token no
+  arranca (los transcripts contienen secretos). En loopback el token es opcional
+  (protección frente a otro usuario local de una máquina compartida); el cliente
+  envía la cabecera `Authorization: Bearer <token>`.
+- **Ajustes (env):**
+  - `AI_R_MCP_PORT` — puerto (por defecto `8756`).
+  - `AI_R_MCP_IDLE_SEC` — umbral de auto-salida por inactividad.
+  - `AI_R_MCP_HOST` / `AI_R_MCP_ALLOW_REMOTE` — host del bind / permitir no-loopback.
+  - `AI_R_HTTP_TOKEN` — token bearer (obligatorio para el bind remoto).
+  - `AI_R_HAYSTACK_CACHE_MAX` — tope de la caché de búsqueda por número de entradas.
+  - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — por volumen total (fusible del RSS de un
+    servidor de larga vida).
+
+Ambos extras son totalmente opcionales: sin ellos, el modo stdio y el orden BM25
+funcionan como antes.
 
 ## Límites: un lector, no un guardián
 
@@ -195,10 +240,13 @@ antes.
 - **Sin grafo, sin memoria.** Extrae entidades (turnos, llamadas, planes,
   intenciones). Construir un grafo de conocimiento o memoria a partir de ellas es
   tu trabajo, no el suyo.
-- **No es una capa de control de acceso.** Cualquiera que pueda alcanzar la CLI,
-  el servidor MCP o el paquete puede leer cualquier sesión. No hay autorización
-  delante de los parsers; mantenlo donde procesos locales no confiables no puedan
-  alcanzarlo.
+- **No es control de acceso — salvo el transporte http.** Quien alcance la CLI,
+  el MCP por stdio o el paquete lee cualquier sesión: es el mismo usuario local,
+  y una comprobación de permisos delante de los parsers no protegería nada. La
+  excepción es el transporte http compartido: al estar accesible por socket,
+  lleva allowlist de Origin y un token bearer opcional (obligatorio para el bind
+  remoto, ver el extra `http` arriba). Aun así, mantén los datos donde procesos
+  locales ajenos no puedan alcanzarlos.
 - **El contenido de la sesión es datos, no comandos.** Quien lea (auditor,
   summarizer) debe tratar el texto de la sesión como datos, no como
   instrucciones. Ver [Seguridad](docs/security.md).
@@ -219,7 +267,7 @@ Una galería de ejemplos reales — uno por capacidad (análisis de errores, com
 
 - Vocabulario de métodos (verbos + presets) — [`docs/methods.md`](./docs/methods.md)
   (SSOT en inglés) · [`docs/methods.ru.md`](./docs/methods.ru.md) (espejo en ruso)
-- Escenarios de aceptación (84 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Escenarios de aceptación (90 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Arquitectura y estratificación — [`docs/architecture.md`](./docs/architecture.md)
 - Operadores de búsqueda — [`docs/search-operators.md`](./docs/search-operators.md)
 - Registro MCP por agente — [`docs/mcp-registration.md`](./docs/mcp-registration.md)

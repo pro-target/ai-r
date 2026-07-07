@@ -8,10 +8,13 @@ import sys
 from typing import Any, List, Optional
 
 from ai_r.cli.shared import (
+    _add_redact_flag,
     _AGENT_CHOICES,
     _format_session_detail,
     _format_token_table,
     _messages_to_dicts,
+    _redact_obj,
+    _redact_str,
     _session_to_dict,
     resolve_session,
 )
@@ -52,6 +55,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "(parent + children + folded total)."
         ),
     )
+    _add_redact_flag(read_p)
     read_p.set_defaults(func=_run_read)
 
 
@@ -100,6 +104,10 @@ def _run_read(args: argparse.Namespace) -> int:
         payload = _session_to_dict(session)
         if want_messages and message_dicts is not None:
             payload["messages"] = message_dicts
+        # Emission-time redaction (F2.1): mask secrets in the title + message
+        # bodies before they leave the process.  Token/subagent blocks are
+        # integers + ai-r labels only, so they stay outside the pass.
+        payload = _redact_obj(payload, args)
         if want_tokens:
             payload["tokens"] = token_block
             if want_subagents:
@@ -108,7 +116,9 @@ def _run_read(args: argparse.Namespace) -> int:
         sys.stdout.write("\n")
         return 0
 
-    print(_format_session_detail(session, messages=message_dicts))
+    # Emission-time redaction (F2.1): the rendered detail carries the session
+    # title and (truncated) message bodies — mask before printing.
+    print(_redact_str(_format_session_detail(session, messages=message_dicts), args))
     if want_tokens:
         print()
         print(_format_token_table(token_block))
@@ -121,16 +131,18 @@ def _subagent_rollup(
     """Roll up the parent + spawned children component_tokens (CLI parity).
 
     Reuses the same core the MCP ``read_session(include_subagents=True)``
-    uses — :func:`ai_r.session_stats.children_of` + the ``aggregate``
-    ``component_tokens`` fold — so the CLI never re-implements the rollup.
+    uses — :func:`ai_r.session_stats.children_of` +
+    :func:`ai_r.tokens.rollup_component_tokens` (the SSOT fold that drops the
+    parent's double-counted ``task`` bucket when children are present and
+    reports ``total: None`` when nothing is measurable) — so the CLI never
+    re-implements the rollup.
     """
-    from ai_r.events.aggregate import aggregate as _aggregate
     from ai_r.parsers import PARSERS
     from ai_r.session_stats import children_of
-    from ai_r.tokens import component_tokens
+    from ai_r.tokens import component_tokens, rollup_component_tokens
 
-    rows: List[dict[str, Any]] = [{"component_tokens": parent_block}]
     children_out: List[dict[str, Any]] = []
+    child_blocks: List[Optional[dict[str, Any]]] = []
     for child in children_of(parent_uuid):
         child_parser = PARSERS.get(child.agent)
         child_msgs: List[Any] = []
@@ -145,11 +157,9 @@ def _subagent_rollup(
             "agent": child.agent.value.lower(),
             "component_tokens": child_block,
         })
-        rows.append({"component_tokens": child_block})
-    folded = _aggregate(rows, group_by=lambda _r: "all",
-                        metrics=["component_tokens"])
+        child_blocks.append(child_block)
     return {
         "parent": parent_block,
         "children": children_out,
-        "total": folded["totals"]["component_tokens"],
+        "total": rollup_component_tokens(parent_block, child_blocks),
     }

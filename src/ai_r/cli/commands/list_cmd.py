@@ -9,10 +9,12 @@ from typing import Any, List
 
 from ai_r.cli.shared import (
     _add_filter_group,
+    _add_redact_flag,
     _AGENT_CHOICES,
     _exit_with_error,
     _format_table,
     _passes_date_filters,
+    _redact_obj,
     _session_to_dict,
     _validate_date_args,
 )
@@ -33,6 +35,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Emit JSON instead of a human-readable table.",
     )
     _add_filter_group(list_p)
+    _add_redact_flag(list_p)
     list_p.set_defaults(func=_run_list)
 
 
@@ -53,6 +56,11 @@ def _run_list(args: argparse.Namespace) -> int:
     limit = getattr(args, "limit", None)
     if limit:
         summaries = summaries[:limit]
+
+    # Emission-time redaction (F2.1): titles are session-derived text and may
+    # carry pasted secrets — mask before display (mirrors MCP read_session /
+    # search_sessions, which redact the emitted title by default).
+    summaries = _redact_obj(summaries, args)
 
     if args.json:
         json.dump(summaries, sys.stdout, ensure_ascii=False, indent=2)

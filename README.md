@@ -211,22 +211,23 @@ chars/4 heuristic, honestly labeled `estimate` — never a crash.
 
 Optional extra — `semantic`: `AI_R_EXTRAS=semantic bash install.sh` (or
 `pip install "ai-r[semantic]"` + a one-time model download the installer does
-for you) enables `sort="semantic"` on text search (`query`, `search_sessions`):
-the BM25 top-50 candidates are re-ranked by **meaning** with a local
-multilingual embedding model —
-[intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
-(int8 ONNX, ~118 MB, MIT), run directly via
-[onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
-no torch, no persistent index. Why this model: strong cross-lingual retrieval
-(a Russian query finds an English session and vice versa) at a small size. How
-the score works, in plain words: BM25 picks the 50 best word-matches (a cost
-budget, not a quality cut-off — there is deliberately *no* similarity
-threshold, because this model family scores even unrelated texts ≈0.7); within
-that pool the final score is **75 % meaning + 25 % word match** — meaning
-dominates, the word share keeps exact-term hits from being drowned and breaks
-ties. Fully optional: without the packages or model files, `sort="semantic"`
-honestly falls back to the BM25 order and the response says why
-(`semantic: {active: false, reason, fallback: "bm25"}`) — never a crash.
+for you) enables `sort="semantic"` on text search (`query`, `search_sessions`) —
+the BM25 top-50 candidates are re-ranked by **meaning**.
+
+- **Model.** A local multilingual embedding model,
+  [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small)
+  (int8 ONNX, ~118 MB, MIT), run directly via
+  [onnxruntime](https://onnxruntime.ai) + [tokenizers](https://github.com/huggingface/tokenizers) + [numpy](https://numpy.org),
+  no torch, no persistent index. Chosen for strong cross-lingual retrieval
+  (a Russian query finds an English session and vice versa) at a small size.
+- **How the score works.** BM25 picks the 50 best word-matches (a cost budget,
+  not a quality cut-off — there is deliberately *no* similarity threshold,
+  because this model family scores even unrelated texts ≈0.7). Within that pool
+  the final score is **75 % meaning + 25 % word match** — meaning dominates,
+  while the word share keeps exact-term hits from being drowned and breaks ties.
+- **Fail-soft.** Without the packages or model files, `sort="semantic"` honestly
+  falls back to the BM25 order and the response says why
+  (`semantic: {active: false, reason, fallback: "bm25"}`) — never a crash.
 
 Two knobs keep the model well-behaved inside a long-lived MCP process (both
 env-tunable, both degrading to the default on blank/invalid input — never a
@@ -238,18 +239,32 @@ many idle seconds (default `300`); the next request transparently re-loads it.
 
 Optional extra — `http`: `AI_R_EXTRAS=http bash install.sh` (or
 `pip install "ai-r[http]"`) adds [uvicorn](https://www.uvicorn.org) and enables
-a **shared streamable-http transport**. By default every agent spawns its own
-`ai-r-mcp` over stdio — under multi-agent fan-out that is N processes, each with
-a cold cache, re-scanning the corpus (the measured cause of RAM exhaustion).
-With `AI_R_MCP_TRANSPORT=http` a single **warm server** on localhost (default
-`127.0.0.1:8756`) is shared by every agent instead of a swarm; the systemd units
-in `packaging/systemd/` add socket-activation with idle self-exit — the process
-exists only under load. The bind is loopback-only and **fail-closed**: a
-non-localhost `AI_R_MCP_HOST` is refused (transcripts carry secrets and are
-served without a token) until the operator explicitly sets
-`AI_R_MCP_ALLOW_REMOTE=1`. Other knobs: `AI_R_MCP_PORT`, `AI_R_MCP_IDLE_SEC`
-(idle self-exit threshold), `AI_R_HAYSTACK_CACHE_MAX` (search cache ceiling).
-Fully optional: without it stdio mode works as before.
+a **shared streamable-http transport** (requires `mcp>=1.9.0`).
+
+- **Why.** By default every agent spawns its own `ai-r-mcp` over stdio — under
+  multi-agent fan-out that is N processes, each with a cold cache, re-scanning
+  the corpus (the measured cause of RAM exhaustion). With
+  `AI_R_MCP_TRANSPORT=http` a single **warm server** on localhost (default
+  `127.0.0.1:8756`) is shared by every agent instead of a swarm; the systemd
+  units in `packaging/systemd/` add socket-activation with idle self-exit.
+- **Security (fail-closed).** The bind is loopback-only. Browser-based attacks
+  (DNS rebinding) are cut off by the SDK's Origin/Host allowlist (always on for
+  loopback). Remote access requires `AI_R_MCP_ALLOW_REMOTE=1` **and** an
+  `AI_R_HTTP_TOKEN` — without the token it refuses to start (transcripts carry
+  secrets). On loopback the token is optional (protection against another local
+  user on a shared box); the client sends an `Authorization: Bearer <token>`
+  header.
+- **Knobs (env):**
+  - `AI_R_MCP_PORT` — port (default `8756`).
+  - `AI_R_MCP_IDLE_SEC` — idle self-exit threshold.
+  - `AI_R_MCP_HOST` / `AI_R_MCP_ALLOW_REMOTE` — bind host / allow non-loopback.
+  - `AI_R_HTTP_TOKEN` — bearer token (required for a remote bind).
+  - `AI_R_HAYSTACK_CACHE_MAX` — search cache ceiling by entry count.
+  - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — by total size (an RSS safeguard for a
+    long-lived server).
+
+Both extras are fully optional: without them stdio mode and the BM25 order work
+as before.
 
 ## Boundaries: a reader, not a guard
 
@@ -257,9 +272,13 @@ Fully optional: without it stdio mode works as before.
   it reads and returns.
 - **No graph, no memory.** It extracts entities (turns, calls, plans, intents).
   Building a knowledge graph or memory out of them is your job, not its.
-- **Not an access-control layer.** Anyone who can reach the CLI, MCP server, or
-  package can read any session. There's no authorization in front of the
-  parsers; keep it where untrusted local processes can't reach.
+- **Not an access-control layer — except the http transport.** Anyone who can
+  reach the CLI, MCP over stdio, or the package reads any session: it's the same
+  local user, so an authorization check in front of the parsers would guard
+  nothing. The exception is the shared http transport: it's reachable over a
+  socket, so it carries an Origin allowlist and an optional bearer token
+  (required for a remote bind, see the `http` extra above). Either way, keep the
+  data where untrusted local processes can't reach.
 - **Session content is data, not commands.** Whoever reads (auditor, summarizer)
   must treat session text as data, not instructions. See
   [Security](docs/security.md).
@@ -278,7 +297,7 @@ A gallery of real examples — one per capability (error analysis, dangerous com
 
 - Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
   (English SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (Russian mirror)
-- Acceptance scenarios (84 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Acceptance scenarios (90 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Architecture & layering — [`docs/architecture.md`](./docs/architecture.md)
 - Search operators — [`docs/search-operators.md`](./docs/search-operators.md)
 - Per-agent MCP registration — [`docs/mcp-registration.md`](./docs/mcp-registration.md)

@@ -652,10 +652,16 @@ def test_reload_after_idle_release_through_fake_runtime(
     assert semantic._STATE["last_used"] is not None
 
 
-def test_get_embedder_releases_idle_on_entry(
+def test_get_embedder_does_not_release_on_request_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A stale embedder is dropped and rebuilt on the next _get_embedder call."""
+    """_get_embedder must NOT free the model on the request path.
+
+    Freeing at the moment a request needs the model would only add a reload
+    with no memory win (the A4 bug the audit flagged).  The reaper that frees
+    an *idle* server is :func:`release_if_idle`, driven by the server loop —
+    not this hot path.  So even a long-idle warm model is reused as-is here.
+    """
     _fake_runtime_modules(monkeypatch)
     monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
     monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
@@ -664,12 +670,15 @@ def test_get_embedder_releases_idle_on_entry(
     first = embedder
     assert first is not None
 
-    # Backdate last_used past the threshold; monotonic() > this so it's idle.
+    # Backdate last_used far past the threshold: a request-path release would
+    # rebuild here — the correct behaviour keeps the same warm handle.
     semantic._STATE["last_used"] = time.monotonic() - 1000.0
     embedder2, reason2 = semantic._get_embedder()
     assert reason2 is None
-    assert embedder2 is not None
-    assert embedder2 is not first  # rebuilt, not the stale handle
+    assert embedder2 is first  # same warm handle, NOT rebuilt on the hot path
+    # And accessing it re-stamps the idle clock so the reaper tracks real use.
+    assert semantic._STATE["last_used"] is not None
+    assert semantic._STATE["last_used"] > time.monotonic() - 5.0
 
 
 def test_idle_release_preserves_honest_degradation() -> None:
@@ -681,6 +690,73 @@ def test_idle_release_preserves_honest_degradation() -> None:
     assert info["active"] is False
     assert info["fallback"] == "bm25"
     assert release_if_idle() is False  # nothing loaded to free
+
+
+# ---------------------------------------------------------------------------
+# A4 wiring: the server's idle loop is what actually frees the model.  A
+# request-driven pull can never fire on an idle server (no requests arrive),
+# so the periodic reaper lives in ai_r.serve; these tests prove that seam and
+# the full free→reload cycle it drives.
+# ---------------------------------------------------------------------------
+
+
+def test_serve_release_helper_frees_idle_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ai_r.serve._release_semantic_if_idle drives release_if_idle end-to-end."""
+    from ai_r.serve import _release_semantic_if_idle
+
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "0.001")
+    _install_fake_embedder()
+    semantic._STATE["last_used"] = time.monotonic() - 10.0  # long idle
+
+    # The seam the server loop calls each tick: model idle → actually freed.
+    assert _release_semantic_if_idle() is True
+    assert semantic._STATE["embedder"] is None
+    assert semantic._STATE["probed"] is False
+
+
+def test_serve_release_helper_is_noop_when_nothing_loaded() -> None:
+    """No model loaded → the loop's tick is a cheap, safe no-op (never raises)."""
+    from ai_r.serve import _release_semantic_if_idle
+
+    assert _release_semantic_if_idle() is False
+
+
+def test_idle_loop_frees_then_next_request_reloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Full A4 cycle through the fake runtime: warm → (loop tick) freed → reload.
+
+    Simulates the server's idle-loop tick (``_release_semantic_if_idle``) on a
+    quiet stretch: the ~118 MB model is genuinely released, and the *next*
+    request re-probes and rebuilds a fresh embedder — no crash, no stale
+    handle.  This is the behaviour A4 claims and the audit found inert.
+    """
+    from ai_r.serve import _release_semantic_if_idle
+
+    _fake_runtime_modules(monkeypatch)
+    monkeypatch.setenv("AI_R_SEMANTIC_MODEL_DIR", str(_write_fake_model(tmp_path)))
+    monkeypatch.setenv("AI_R_SEMANTIC_IDLE_SEC", "300")
+
+    # Warm the model as a real request would.
+    first, reason = semantic._get_embedder()
+    assert first is not None and reason is None
+
+    # Server sits idle: the loop tick sees no use past the threshold and frees.
+    semantic._STATE["last_used"] = time.monotonic() - 1000.0
+    assert _release_semantic_if_idle() is True
+    assert semantic._STATE["embedder"] is None
+    assert semantic._STATE["probed"] is False  # back to un-probed → clean reload
+
+    # A quiet tick with nothing loaded is a harmless no-op.
+    assert _release_semantic_if_idle() is False
+
+    # The next request transparently reloads a fresh embedder.
+    second, reason2 = semantic._get_embedder()
+    assert reason2 is None
+    assert second is not None
+    assert second is not first  # rebuilt after the release, not a stale handle
 
 
 # ---------------------------------------------------------------------------

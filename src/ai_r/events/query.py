@@ -340,6 +340,14 @@ def query(
         )
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
+    # Symmetric with the other record-capping tools (network/incidents/
+    # find_file_edits): ``limit`` is a non-negative record cap (``0`` = no
+    # cap).  Fail loud on negatives instead of the silent ``survivors[:-1]``
+    # slice that would drop the newest event.
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError(
+            f"limit must be a non-negative integer, got {limit!r}"
+        )
     # F3.2: validate the session facet up front (single uuid or a list of
     # uuids), so a malformed value fails loud even on the ``relative_to``
     # walk — where, like every other facet, it may otherwise go unused.

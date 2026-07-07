@@ -115,7 +115,7 @@ Three cross-cutting modules sit beside the core:
 | Module | Responsibility |
 |---|---|
 | `redact.py` | Secret redaction on every emitting surface (title, message content, intent, qa) as `[REDACTED_<TYPE>]`, with a `redactions` type→count report. On by default. |
-| `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. |
+| `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. `rollup_component_tokens` is the SSOT fold for a parent + its spawned children — it drops the parent's double-counted `task` bucket when children are present and reports `total: None` (never a fabricated `0`) when nothing is measurable; both rollup callers (`read_session(include_subagents)` and the CLI) share it. |
 | `semantic.py` | Optional relevance re-rank (see ADR below): re-ranks the BM25 top-50 with a local ONNX embedding model. Strictly opt-in, fail-soft to BM25. |
 | `serve.py` | MCP transport selection (see ADR below): `stdio` by default, opt-in shared `streamable-http` server with idle self-exit and systemd socket-activation support. Pure predicates (`resolve_transport`, `should_exit_idle`, `systemd_listen_sockets`) + a thin uvicorn runner. |
 
@@ -137,6 +137,17 @@ The separate content-trust concern (what a reader's caller does with
 session text) is covered in [Security](security.md) and is unaffected
 by this decision.
 
+- **Amendment (v0.3.0) — the shared HTTP transport is the one exception.**
+  The "no auth guards nothing" reasoning holds only while every caller is
+  already the host user (CLI / SDK / stdio). The opt-in `streamable-http`
+  transport breaks that premise: it is reachable over a socket, so a
+  co-resident user or a browser page (DNS-rebinding) is a caller that is
+  *not* the session owner. There the transport **does** carry access
+  control — see the http-transport ADR below (SDK DNS-rebinding/Origin
+  allowlist, always on for loopback; opt-in bearer token `AI_R_HTTP_TOKEN`,
+  **required** — fail-closed — for any non-loopback bind). stdio and local
+  callers stay auth-free by design; the exception is scoped to the socket.
+
 ### ADR: semantic re-rank as an optional extra
 
 Earlier design deliberately shipped **no semantic embeddings** — relevance
@@ -154,12 +165,42 @@ the reversal and its boundaries.
 - **Boundaries.** Strictly optional (`pip install "ai-r[semantic]"` + a one-time
   model download). No `torch`, no background daemon, no persistent index.
   Resource-capped: `AI_R_SEMANTIC_THREADS` (default 2) and idle model release
-  (`AI_R_SEMANTIC_IDLE_SEC`, default 300 s, ~118 MB freed).
+  (`AI_R_SEMANTIC_IDLE_SEC`, default 300 s, ~118 MB freed). The idle release is
+  driven by the shared http server's existing idle loop (`serve.py`), not by an
+  opportunistic pull on the request path (a request-path release can never free
+  a model that is idle *because no request is arriving*, and only forces a
+  redundant reload); a `threading.Lock` guards the shared model handle because
+  the sync MCP tools run in a worker thread that races that loop. A4 is
+  therefore meaningful for the long-lived http transport; stdio is short-lived
+  per-agent with no persistent server to reclaim.
 - **Fail-soft.** Missing package/model → `{active: false, reason, fallback:
   "bm25"}`; it degrades to plain BM25 order, never crashes.
 - **Zero-LLM invariant preserved.** The embedder computes vector similarities;
   it generates no text and makes no model/network API call. The "no generative
   model in the read path" invariant holds — this is retrieval math, not an LLM.
+
+### ADR: plan signals bind by file order, not timestamp
+
+Earlier the `plan` preset ordered a session's plan revisions by **timestamp**
+(the order `query` returns `plan_event`s in) and indexed the per-revision
+signals (body / steps / version / final) by that ordinal. This ADR records the
+reversal to **file (append) order** and why.
+
+- **What broke.** Timestamps in a transcript are not guaranteed monotonic (a
+  resumed or clock-skewed session can write a later revision with an *earlier*
+  `ts`). When they were non-monotonic, the ts-ordinal pointed `plan()` at a
+  *different* revision's body/steps/version, and `plan_feedback` disagreed with
+  `get_body` (which already resolved by file order) — a silent
+  wrong-revision result, invisible to tests because every fixture was
+  monotonic.
+- **What changed.** Plan signals and version/final kinds now key on the
+  trailing `seq` of the event id (`"{session}:{seq}"`), a monotonic file-order
+  index assigned as messages are read — the same order the signal detection
+  itself walks. `plan()`, `plan_feedback()` and `get_body()` therefore always
+  agree.
+- **Boundary.** Public verb signatures are unchanged; this is an internal
+  ordering-correctness fix. A non-monotonic-timestamp regression test now
+  guards it.
 
 ### ADR: shared http transport (one server, not a per-agent stdio swarm)
 
@@ -192,12 +233,30 @@ records adding an optional shared transport as the fix.
   resident processes when idle. Idle-exit never fires while a request is in
   flight (active-request counter).
 - **Boundaries.** Bind is localhost-only and **fail-closed**: `resolve_host`
-  refuses a non-loopback `AI_R_MCP_HOST` (transcripts carry secrets and are
-  served without auth) unless the operator sets `AI_R_MCP_ALLOW_REMOTE=1` to
-  opt in deliberately. `uvicorn` is imported lazily and
-  shipped as the optional `ai-r[http]` extra, so stdio users need nothing new.
-  The activity wrapper is raw-ASGI (not Starlette `BaseHTTPMiddleware`) so it
-  never buffers the long-lived streaming responses streamable-http relies on.
+  refuses a non-loopback `AI_R_MCP_HOST` unless the operator sets
+  `AI_R_MCP_ALLOW_REMOTE=1` to opt in deliberately. `uvicorn` is imported
+  lazily and shipped as the optional `ai-r[http]` extra, so stdio users need
+  nothing new. The activity wrapper is raw-ASGI (not Starlette
+  `BaseHTTPMiddleware`) so it never buffers the long-lived streaming responses
+  streamable-http relies on.
+- **Transport auth (v0.3.0).** The bind guard is not the only defense — a
+  loopback bind is still reachable by any co-resident user and by a browser
+  page via DNS-rebinding, and transcripts carry secrets. Two SDK-native
+  controls now apply: (1) the `mcp` SDK's DNS-rebinding/Origin protection is
+  pinned to the resolved host/port allowlist (always on for the loopback
+  default; when `AI_R_MCP_ALLOW_REMOTE=1` the real host:port + http/https
+  origins are added, never a blanket `*`); (2) an opt-in bearer token
+  (`AI_R_HTTP_TOKEN`, constant-time compared via `hmac.compare_digest`, `401`
+  otherwise) — **required, fail-closed, for any non-loopback bind** (remote
+  without a token is a hard refusal). This raises the SDK floor to
+  `mcp>=1.9.0` (the version that ships `streamable_http_app` +
+  `TransportSecuritySettings`).
+- **Haystack cache correctness.** The warm-scan cache keys on
+  `(agent, uuid, mtime)`; on an mtime change the stale key is now **purged**
+  (one live version per session, no dead-key pileup / LRU thrash), and
+  eviction is bounded by **both** entry count (`AI_R_HAYSTACK_CACHE_MAX`) and
+  total characters (`AI_R_HAYSTACK_CACHE_CHARS_MAX`) so a long-lived shared
+  server cannot grow unbounded RSS. A single oversize session stays servable.
 - **Back-compat / fail-closed.** `stdio` stays the default — existing sessions
   are unaffected until they opt in, with no mid-session break. An unrecognized
   `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
