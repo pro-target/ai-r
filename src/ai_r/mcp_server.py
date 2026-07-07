@@ -1976,7 +1976,8 @@ def query(
       crash); ``sort="date"`` (default) orders by timestamp ascending.
     * ``relative_to`` (event id) + ``direction`` (``prev``|``next``) +
       ``n`` (a positive integer, default ``1``, or ``"all"``) — the
-      neighbouring-turn walk.
+      neighbouring-turn walk.  A numeric string (``"3"``) is deprecated
+      and will be rejected in 0.6.0 — pass an int or ``"all"``.
       Generalises the ``previous_user_intent`` used by ``find_file_edits``
       to both directions and any count.  ``step_type`` chooses which
       event type to collect (default ``user_turn``).  When

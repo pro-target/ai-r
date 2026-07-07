@@ -9,6 +9,7 @@ real session data leaks in.  The one host-dependent test requests the
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -415,6 +416,31 @@ def test_invalid_n_raises() -> None:
         query(relative_to="x:0", n="two")
     with pytest.raises(ValueError):
         query(relative_to="x:0", n=0)
+
+
+def test_numeric_string_n_warns_deprecation(multi_turn_claude: str) -> None:
+    # A numeric string ("3") still walks (accept preserved), but the surface is
+    # moving to int | "all": the call must emit a DeprecationWarning naming the
+    # 0.6.0 removal, while the walk result is byte-for-byte what int 3 returns.
+    anchor = _anchor(multi_turn_claude, "user_turn", occurrence=2)
+    with pytest.warns(DeprecationWarning, match=r"0\.6\.0"):
+        got_str = query(relative_to=anchor, direction="prev", n="3")
+    # accept unchanged: "3" collects the same turns as int 3.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        got_int = query(relative_to=anchor, direction="prev", n=3)
+    assert [e["text"] for e in got_str] == [e["text"] for e in got_int]
+    assert [e["text"] for e in got_str] == ["first request", "second request please"]
+
+
+def test_int_and_all_n_do_not_warn(multi_turn_claude: str) -> None:
+    # The clean arms (int 1, int 3, and the "all" sentinel) must stay silent —
+    # only the numeric-string spelling is deprecated.
+    anchor = _anchor(multi_turn_claude, "user_turn", occurrence=2)
+    for nv in (1, 3, "all"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            query(relative_to=anchor, direction="prev", n=nv)
 
 
 def test_query_kind_facet_removed() -> None:

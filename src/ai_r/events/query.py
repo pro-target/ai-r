@@ -10,6 +10,7 @@ Moved verbatim from the former ``ai_r/events.py`` monolith — no logic change.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, List, Optional, Sequence
 
 from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
@@ -365,6 +366,15 @@ def query(
                 raise ValueError(
                     f"n must be a positive integer or 'all', got {n!r}"
                 ) from exc
+            # A numeric string ("3") still walks, but the surface is moving to
+            # the clean ``int | Literal["all"]`` shape: warn now, reject in
+            # 0.6.0. The int arm and "all" sentinel are unaffected.
+            warnings.warn(
+                'n as a numeric string is deprecated; pass an int '
+                '(or "all"); string ints will be rejected in 0.6.0',
+                DeprecationWarning,
+                stacklevel=2,
+            )
     elif isinstance(n, bool) or not isinstance(n, int):
         raise ValueError(f"n must be a positive integer or 'all', got {n!r}")
     else:
