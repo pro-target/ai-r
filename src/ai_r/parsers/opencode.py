@@ -433,6 +433,30 @@ _SELECT_ALL_SESSIONS_LEGACY = (
     f"SELECT {_SESSION_COLUMNS} FROM session ORDER BY time_updated DESC"
 )
 _SELECT_MESSAGE_COUNT = "SELECT COUNT(*) FROM message WHERE session_id = ?"
+# Metadata-only rows (role/model live in ``message.data``; the text bodies
+# live in ``part`` and are NOT read here), in message order — feeds the
+# ``Session.models`` rollup without touching the part table.
+_SELECT_MESSAGE_DATA = (
+    "SELECT data FROM message WHERE session_id = ? ORDER BY time_created, id"
+)
+
+
+def _session_models(cursor: sqlite3.Cursor, sid: str) -> Tuple[str, ...]:
+    """Unique assistant ``modelID`` values for one session, in order.
+
+    Parsed in Python from the metadata JSON (no ``json_extract``
+    dependency — an old SQLite without JSON1 must not abort session
+    enumeration).  Rows that fail to parse contribute nothing.
+    """
+    models: List[str] = []
+    for (blob,) in cursor.execute(_SELECT_MESSAGE_DATA, (sid,)):
+        data = _json_or_none(blob)
+        if data is None or data.get("role") != "assistant":
+            continue
+        model = _message_model(data)
+        if model is not None and model not in models:
+            models.append(model)
+    return tuple(models)
 
 
 def _execute_session_select(
@@ -497,7 +521,9 @@ def list_sessions(
                 # parent_uuid) — a field-by-field rebuild silently dropped
                 # ``kind`` when it was added.
                 session = dataclasses.replace(
-                    session, message_count=int(count)
+                    session,
+                    message_count=int(count),
+                    models=_session_models(count_cursor, sid),
                 )
                 sessions.append(session)
         except sqlite3.Error:
@@ -534,7 +560,11 @@ def _read_session_by_uuid(
             ).fetchone()[0]
             session = _row_to_session(row, db_path)
             # See list_sessions: replace() preserves kind / parent_uuid.
-            return dataclasses.replace(session, message_count=int(count))
+            return dataclasses.replace(
+                session,
+                message_count=int(count),
+                models=_session_models(count_cursor, uuid),
+            )
         except sqlite3.Error:
             continue
     raise FileNotFoundError(f"OpenCode session {uuid!r} not found")
@@ -682,6 +712,20 @@ def _normalize_tokens(tokens: object) -> Optional[dict]:
     return {**block, "total": total}
 
 
+def _message_model(message_data: dict) -> Optional[str]:
+    """Return the assistant row's ``modelID``, or ``None`` without signal.
+
+    OpenCode stores the producing model on the assistant message metadata
+    (``message.data.modelID``, e.g. ``"big-pickle"``); the neighbouring
+    ``providerID`` is deliberately not folded in — the raw model id is the
+    signal, no invented ``provider/model`` taxonomy on top.
+    """
+    model = message_data.get("modelID")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return None
+
+
 def _build_message(
     message_data: Optional[dict],
     parts: List[_PartTuple],
@@ -812,6 +856,13 @@ def _build_message(
         qa=tuple(qa),
         thinking="\n".join(thinking_chunks),
         tokens=tokens,
+        # OpenCode records the producing model on assistant metadata
+        # (``message.data.modelID``); user rows carry none — honest None.
+        model=(
+            _message_model(message_data)
+            if role == "assistant" and message_data is not None
+            else None
+        ),
     )
 
 

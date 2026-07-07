@@ -469,6 +469,9 @@ def _scan_file(
     is_sidechain = False
     record_session_id: Optional[str] = None
     record_cwd: Optional[str] = None
+    # Unique assistant ``message.model`` values, in order of first
+    # appearance (``<synthetic>`` stubs excluded) → ``Session.models``.
+    models: List[str] = []
     # Ids of ``Task``/``Agent`` ``tool_use`` blocks this session emitted —
     # the spawn edges it is the PARENT of.  The list-level reconciliation
     # pass maps a child's ``toolUseId`` (from its ``.meta.json``) back to
@@ -507,6 +510,9 @@ def _scan_file(
         if rec_type == "assistant":
             payload = record.get("message")
             if isinstance(payload, dict):
+                model = _record_model(payload)
+                if model is not None and model not in models:
+                    models.append(model)
                 content = payload.get("content")
                 if isinstance(content, list):
                     for part in content:
@@ -615,6 +621,7 @@ def _scan_file(
         kind="subagent" if is_subagent else "agent",
         project_dir=project_dir,
         launch_surface="claude-cli",
+        models=tuple(models),
         extra=extra,
     )
 
@@ -689,6 +696,12 @@ def _desktop_extra(record: dict) -> dict:
     cwd = record.get("cwd") or record.get("originCwd")
     if isinstance(cwd, str) and cwd:
         extra["cwd"] = cwd
+    # The Desktop-configured model (a session-level setting, less granular
+    # than the per-message transcript signal — kept in ``extra``, not
+    # merged into ``Session.models``, which stays transcript-evidenced).
+    model = record.get("model")
+    if isinstance(model, str) and model.strip():
+        extra["model"] = model.strip()
     return extra
 
 
@@ -1106,6 +1119,27 @@ def _derive_tool_result_error(
     return False
 
 
+# Claude writes ``model: "<synthetic>"`` on locally-generated assistant
+# records (interrupt notices, API-error stubs) — a placeholder, not a model.
+_SYNTHETIC_MODEL = "<synthetic>"
+
+
+def _record_model(payload: dict) -> Optional[str]:
+    """Return the assistant record's ``message.model``, or ``None``.
+
+    The ``<synthetic>`` placeholder marks a locally-generated record (no
+    API call behind it) and is NOT a model — mapped to ``None``, so the
+    model dimension never counts synthetic stubs as model output.
+    """
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    model = model.strip()
+    if model == _SYNTHETIC_MODEL:
+        return None
+    return model
+
+
 def _message_from_record(record: dict) -> Optional[Message]:
     """Build a :class:`Message` from a parsed Claude record, or skip it.
 
@@ -1233,6 +1267,7 @@ def _message_from_record(record: dict) -> Optional[Message]:
         timestamp=ts,
         thinking="\n".join(thinking_chunks),
         tokens=tokens,
+        model=_record_model(payload) if rec_type == "assistant" else None,
     )
 
 
@@ -1335,10 +1370,11 @@ def _link_ask_user_questions(messages: List[Message]) -> List[Message]:
                 timestamp=msg.timestamp,
                 qa=tuple(qa),
                 # Reconstruction MUST carry every remaining field —
-                # dropping ``thinking``/``tokens`` here would silently
-                # lose them on any qa-bearing message.
+                # dropping ``thinking``/``tokens``/``model`` here would
+                # silently lose them on any qa-bearing message.
                 thinking=msg.thinking,
                 tokens=msg.tokens,
+                model=msg.model,
             )
         )
     return out

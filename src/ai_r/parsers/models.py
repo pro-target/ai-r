@@ -94,6 +94,16 @@ class Session:
             ``"antigravity-ide"`` | ``"antigravity-cli"`` (from which
             brain root holds the session).  OpenCode and Pi carry no
             launch-surface signal → always ``None``.
+        models: Unique model identifiers observed in the session, in
+            order of first appearance — the session-level rollup of the
+            per-message :attr:`Message.model` signal.  Sources: Claude —
+            assistant-record ``message.model`` (the ``<synthetic>``
+            placeholder is not a model and is skipped); Codex — the
+            ``turn_context`` records' ``model``; OpenCode — assistant
+            ``message.data.modelID``; Pi — assistant ``message.model``.
+            Antigravity records no structured model signal → always
+            empty.  Empty when the format carries no signal (never
+            fabricated).
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.
@@ -109,6 +119,7 @@ class Session:
     kind: str = "agent"
     project_dir: Optional[str] = None
     launch_surface: Optional[str] = None
+    models: Tuple[str, ...] = ()
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -175,6 +186,15 @@ class Message:
             per-message usage — Codex (cumulative session counter only),
             Antigravity (no usage at all), user messages — absence is
             honest, never fabricated.  Not part of the equality contract.
+        model: The model identifier that produced this message, where the
+            format records one on assistant output: Claude — the assistant
+            record's ``message.model`` (the ``<synthetic>`` placeholder is
+            NOT a model and maps to ``None``); Codex — the ``model`` of the
+            most recent preceding ``turn_context`` record; OpenCode — the
+            assistant ``message.data.modelID``; Pi — the assistant
+            ``message.model``.  ``None`` for user/tool messages and where
+            the format carries no signal (Antigravity) — absence is
+            honest, never fabricated.
     """
 
     role: str
@@ -185,6 +205,7 @@ class Message:
     qa: Tuple[dict, ...] = ()
     thinking: str = ""
     tokens: Optional[dict] = field(default=None, compare=False)
+    model: Optional[str] = None
 
 
 __all__ = ["AgentName", "Message", "Session"]

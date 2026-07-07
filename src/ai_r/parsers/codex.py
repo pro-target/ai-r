@@ -140,6 +140,9 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     parent_uuid: Optional[str] = None
     is_subagent = False
     message_count = 0
+    # Unique ``turn_context`` model values, in order of first appearance
+    # (Codex records the model per turn, not per message) → ``Session.models``.
+    models: List[str] = []
 
     for record in iter_jsonl_records(jsonl_path):
         line_ts = _parse_iso_timestamp(record.get("timestamp", ""))
@@ -149,6 +152,14 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         rec_type = record.get("type")
         payload = record.get("payload") or {}
         if not isinstance(payload, dict):
+            continue
+
+        if rec_type == "turn_context":
+            model = payload.get("model")
+            if isinstance(model, str) and model.strip():
+                model = model.strip()
+                if model not in models:
+                    models.append(model)
             continue
 
         if rec_type == "session_meta" and uuid is None:
@@ -241,6 +252,7 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         kind="subagent" if is_subagent else "agent",
         project_dir=cwd,
         launch_surface=originator,
+        models=tuple(models),
         extra={"cwd": cwd} if cwd else {},
     )
 
@@ -360,10 +372,21 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     # so we buffer the questions and pair them by call_id when the output
     # lands (the answer text is keyed by question id, not positional).
     pending_questions: dict[str, list] = {}
+    # The active model: Codex records it on ``turn_context`` records (one
+    # per turn, BEFORE the turn's response items), not per message — every
+    # assistant item until the next ``turn_context`` was produced by it.
+    # ``None`` until the first ``turn_context`` (honest absence).
+    current_model: Optional[str] = None
     for record in iter_jsonl_records(path):
         rec_type = record.get("type")
         payload = record.get("payload") or {}
         if not isinstance(payload, dict):
+            continue
+
+        if rec_type == "turn_context":
+            model = payload.get("model")
+            if isinstance(model, str) and model.strip():
+                current_model = model.strip()
             continue
 
         if rec_type == "response_item":
@@ -379,7 +402,12 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                     if key in seen_user_texts:
                         continue
                     seen_user_texts.add(key)
-                messages.append(Message(role=role, text=text, timestamp=env_ts))
+                messages.append(Message(
+                    role=role,
+                    text=text,
+                    timestamp=env_ts,
+                    model=current_model if role == "assistant" else None,
+                ))
             elif ptype in ("function_call", "local_shell_call"):
                 name = payload.get("name") or ptype
                 arguments = payload.get("arguments", "")
@@ -410,6 +438,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                         text="",
                         tool_use=({"name": name, "input": input_str},),
                         timestamp=env_ts,
+                        model=current_model,
                     )
                 )
             elif ptype == "reasoning":
@@ -439,6 +468,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                             text="",
                             thinking="\n".join(thinking_chunks),
                             timestamp=env_ts,
+                            model=current_model,
                         )
                     )
             elif ptype == "web_search_call":
@@ -465,6 +495,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                         text="",
                         tool_use=({"name": "web_search", "input": input_str},),
                         timestamp=env_ts,
+                        model=current_model,
                     )
                 )
             elif ptype in ("function_call_output", "local_shell_call_output"):

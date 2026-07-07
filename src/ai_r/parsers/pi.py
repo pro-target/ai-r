@@ -136,6 +136,9 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
     first_user_text: Optional[str] = None
     session_name: Optional[str] = None
     message_count = 0
+    # Unique assistant ``message.model`` values, in order of first
+    # appearance → ``Session.models``.
+    models: List[str] = []
 
     for entry in iter_jsonl_records(jsonl_path):
         rec_type = entry.get("type")
@@ -171,6 +174,12 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         if role not in ("user", "assistant"):
             continue
         message_count += 1
+        if role == "assistant":
+            model = message.get("model")
+            if isinstance(model, str) and model.strip():
+                model = model.strip()
+                if model not in models:
+                    models.append(model)
         if role == "user" and first_user_text is None:
             text = _extract_text(message.get("content", "")).strip()
             if text and not text.lstrip().startswith("<"):
@@ -216,6 +225,7 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
         # launch-surface signal (header carries only type/version/id/
         # timestamp/cwd) → launch_surface stays None, never fabricated.
         project_dir=cwd,
+        models=tuple(models),
         extra=extra,
     )
 
@@ -381,6 +391,7 @@ def _pi_extract_message(
                 if isinstance(thought, str) and thought:
                     thinking_chunks.append(thought)
     if role in ("user", "assistant"):
+        model = message.get("model")
         return Message(
             role=role,
             text="\n".join(text_chunks),
@@ -392,6 +403,14 @@ def _pi_extract_message(
             tokens=(
                 _message_tokens(message.get("usage"))
                 if role == "assistant"
+                else None
+            ),
+            # Pi records the producing model per assistant message
+            # (``message.model``); user messages carry none — honest None.
+            model=(
+                model.strip()
+                if role == "assistant"
+                and isinstance(model, str) and model.strip()
                 else None
             ),
         )
