@@ -308,7 +308,7 @@ MCP に対して実行して検証します（pytest を補完します）。完
 
 - メソッド語彙（動詞 + プリセット）— [`docs/methods.md`](./docs/methods.md)
   （英語 SSOT）· [`docs/methods.ru.md`](./docs/methods.ru.md)（ロシア語ミラー）
-- 受け入れシナリオ（96 個の e2e）— [`docs/scenarios.md`](./docs/scenarios.md)
+- 受け入れシナリオ（97 個の e2e）— [`docs/scenarios.md`](./docs/scenarios.md)
 - アーキテクチャとレイヤリング — [`docs/architecture.md`](./docs/architecture.md)
 - 検索演算子 — [`docs/search-operators.md`](./docs/search-operators.md)
 - エージェントごとの MCP 登録 — [`docs/mcp-registration.md`](./docs/mcp-registration.md)

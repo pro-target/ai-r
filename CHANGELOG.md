@@ -97,6 +97,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent`/`since`/`until`) to the last 7 days, loudly (`default_since` +
   `note` in the response; any explicit scope disables the default).
 
+- **`session_diff` / `diff` output is size-bounded (the 145K-char
+  response).** A session with one big `Write` (an 89 KB HTML body was
+  observed) returned the full body TWICE — once in the write hunk, once in
+  the stitched per-file `diff` — with no field bounding the response. The
+  MCP wrappers now share the `find_file_edits` bound (same `cap_field`):
+  over-long `intent` (1000) / hunk bodies (4000) / per-file `diff` text
+  (20000) are cut with a `…[truncated]` marker and named in the per-file
+  `truncated_fields` (indexed paths, e.g. `edits[2].hunks[0].content`),
+  and whole-file emission stops at a 4 MB byte budget (`output_truncated`;
+  `count` keeps the true total). Caps run AFTER redaction (the `network`
+  ordering — a boundary-sliced secret never leaks); the CORE
+  `session_diff`/`diff` functions stay uncapped, and the full body stays
+  reachable on demand via `get_body` / `read_session`.
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

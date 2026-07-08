@@ -266,7 +266,7 @@ cd ~/dev/ai-r && bash install.sh
 
 - 方法词汇表（动词 + 预设）—— [`docs/methods.md`](./docs/methods.md)
   （英文 SSOT）· [`docs/methods.ru.md`](./docs/methods.ru.md)（俄文镜像）
-- 验收场景（96 个 e2e）—— [`docs/scenarios.md`](./docs/scenarios.md)
+- 验收场景（97 个 e2e）—— [`docs/scenarios.md`](./docs/scenarios.md)
 - 架构与分层 —— [`docs/architecture.md`](./docs/architecture.md)
 - 搜索运算符 —— [`docs/search-operators.md`](./docs/search-operators.md)
 - 各智能体 MCP 注册 —— [`docs/mcp-registration.md`](./docs/mcp-registration.md)

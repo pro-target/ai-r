@@ -299,7 +299,7 @@ A gallery of real examples — one per capability (error analysis, dangerous com
 
 - Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
   (English SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (Russian mirror)
-- Acceptance scenarios (96 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Acceptance scenarios (97 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Architecture & layering — [`docs/architecture.md`](./docs/architecture.md)
 - Search operators — [`docs/search-operators.md`](./docs/search-operators.md)
 - Per-agent MCP registration — [`docs/mcp-registration.md`](./docs/mcp-registration.md)

@@ -55,6 +55,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from ai_r import __version__  # noqa: E402
 from ai_r.find_file_edits import (  # noqa: E402
     PARSERS as _PARSERS,
+    cap_field as _cap_field,
     # Re-exported for downstream consumers/tests that historically import
     # it from here (read_session no longer uses it directly).
     coerce_agent as _coerce_agent,  # noqa: F401
@@ -1681,6 +1682,82 @@ def network(
         return {"error": "invalid_argument", "message": str(exc)}
 
 
+# --- diff-shaped response size caps (session_diff / diff) -------------------
+# A session with one big ``Write`` (an 89 KB HTML body was observed) used to
+# return the full body TWICE — once in the write hunk, once in the stitched
+# per-file ``diff`` — for a 145K-char MCP response no field bounded.  Mirror
+# the ``find_file_edits`` bound (same shared :func:`cap_field`): over-long
+# fields are cut with a ``…[truncated]`` marker and named in the per-file
+# ``truncated_fields`` (indexed paths, e.g. ``edits[2].hunks[0].content``),
+# and whole-file emission stops at a total byte budget (``output_truncated``).
+# Caps run AFTER the core's redaction pass — the ``network`` ordering, so a
+# boundary-sliced secret can never leak.  The full body stays reachable on
+# demand via ``get_body`` (the edit's ``tool_call`` id) / ``read_session``.
+_DIFF_INTENT_CHARS_CAP = 1_000   # per-edit driving user intent (FFE value)
+_DIFF_HUNK_CHARS_CAP = 4_000     # per-hunk body field (old/new/content/cmd)
+_DIFF_TEXT_CHARS_CAP = 20_000    # per-file stitched ``diff`` text
+_DIFF_OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized file entries
+
+
+def _cap_diff_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Size-bound a ``{"files": [...]}`` diff result in place.
+
+    Shared by the ``session_diff`` and ``diff`` MCP wrappers (same shape;
+    the ``diff`` verb's flat per-file ``hunks`` list aliases the very hunk
+    dicts under ``edits[*].hunks``, so one walk bounds both views).  Error
+    dicts and unknown shapes pass through untouched.
+    """
+    files = result.get("files")
+    if not isinstance(files, list):
+        return result
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        truncated_fields: List[str] = []
+        for e_idx, edit in enumerate(entry.get("edits") or []):
+            if not isinstance(edit, dict):
+                continue
+            new_val, hit = _cap_field(edit.get("intent"), _DIFF_INTENT_CHARS_CAP)
+            if hit:
+                edit["intent"] = new_val
+                truncated_fields.append(f"edits[{e_idx}].intent")
+            for h_idx, hunk in enumerate(edit.get("hunks") or []):
+                if not isinstance(hunk, dict):
+                    continue
+                for field in ("old", "new", "content", "cmd"):
+                    if field not in hunk:
+                        continue
+                    new_val, hit = _cap_field(hunk.get(field), _DIFF_HUNK_CHARS_CAP)
+                    if hit:
+                        hunk[field] = new_val
+                        truncated_fields.append(
+                            f"edits[{e_idx}].hunks[{h_idx}].{field}"
+                        )
+        new_val, hit = _cap_field(entry.get("diff"), _DIFF_TEXT_CHARS_CAP)
+        if hit:
+            entry["diff"] = new_val
+            truncated_fields.append("diff")
+        entry["truncated_fields"] = truncated_fields
+
+    # Byte-budget backstop (mirrors ``find_file_edits``): stop emitting whole
+    # file entries once the cumulative serialized size exceeds the budget.
+    # ``count`` keeps the TRUE total, so ``output_truncated=True`` +
+    # ``count > len(files)`` reads as "more files changed than shown".
+    output_truncated = False
+    budgeted: List[dict[str, Any]] = []
+    running = 0
+    for entry in files:
+        running += len(json.dumps(entry, ensure_ascii=False, default=str))
+        if running > _DIFF_OUTPUT_BYTES_BUDGET and budgeted:
+            output_truncated = True
+            break
+        budgeted.append(entry)
+    if output_truncated:
+        result["files"] = budgeted
+    result["output_truncated"] = output_truncated
+    return result
+
+
 @mcp.tool()
 def session_diff(
     session_uuid: str,
@@ -1707,13 +1784,20 @@ def session_diff(
     intents as ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count
     dict when any replacement happened; ``redact=False`` returns raw.
 
+    Size-bounded output (mirrors ``find_file_edits``): over-long ``intent``
+    / hunk bodies / per-file ``diff`` text are cut with a ``…[truncated]``
+    marker and named in the per-file ``truncated_fields`` (indexed paths),
+    and whole-file emission stops at a total byte budget
+    (``output_truncated``; ``count`` keeps the true total).  The full edit
+    body stays reachable on demand via ``get_body`` / ``read_session``.
+
     Thin wrapper over :func:`ai_r.session_diff.session_diff` that
     translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the MCP
     client expects.
     """
     try:
-        return _session_diff_core(
+        result = _session_diff_core(
             session_uuid=session_uuid,
             agent=agent,
             path=path,
@@ -1721,6 +1805,7 @@ def session_diff(
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
+    return _cap_diff_result(result)
 
 
 @mcp.tool()
@@ -2449,13 +2534,16 @@ def diff(
 
     Returns:
         ``{"files": [{"file", "edits", "diff", "hunks"}], "count", "caveats"}``
-        (same shape + caveats as ``session_diff``) or the standard
+        (same shape + caveats as ``session_diff``, size-bounded the same
+        way: capped fields named in the per-file ``truncated_fields``, byte
+        budget → ``output_truncated``) or the standard
         ``{"error": ..., "message": ...}`` dict on an unsupported ``format``.
     """
     try:
-        return _diff_core(rows, per_file=per_file, format=format, redact=redact)
+        result = _diff_core(rows, per_file=per_file, format=format, redact=redact)
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
+    return _cap_diff_result(result)
 
 
 @mcp.tool()

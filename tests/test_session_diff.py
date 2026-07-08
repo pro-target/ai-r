@@ -194,3 +194,139 @@ def test_mcp_session_diff_invalid_agent_returns_error_dict() -> None:
     result = mcp_session_diff(session_uuid="any", agent="bogus")
     assert result["error"] == "invalid_argument"
     assert "bogus" in result["message"]
+
+
+def _write_claude_write_session(
+    uuid: str, writes: list[tuple[str, str]], *, intent: str = "Write the files"
+) -> None:
+    """A Claude JSONL: one user intent, then one ``Write`` per (path, content)."""
+    home = Path(os.environ["AI_R_HOME"])
+    jsonl = home / ".claude" / "projects" / "proj-sd" / f"{uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": intent},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": uuid,
+        }
+    ]
+    for i, (fpath, content) in enumerate(writes):
+        records.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {"file_path": fpath, "content": content},
+                        },
+                    ],
+                },
+                "timestamp": f"2026-06-14T10:0{i + 1}:00Z",
+                "sessionId": uuid,
+            }
+        )
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_mcp_session_diff_caps_big_write_and_stitched_diff(tmp_path: Path) -> None:
+    """The 145K-char regression: one big ``Write`` must not blow the response.
+
+    The body used to be emitted TWICE, uncapped — in the write hunk and in
+    the stitched per-file ``diff``.  The MCP wrapper now cuts over-long
+    fields with a ``…[truncated]`` marker, names every cut in the per-file
+    ``truncated_fields`` (indexed paths), and carries ``output_truncated``.
+    The CORE result stays raw — the cap is a transport bound, not data loss.
+    """
+    uuid = "claude-sd-big-1"
+    content = "<html>\n" + ("x" * 88 + "\n") * 1000  # ~89 KB body
+    intent = "please write the full report page again " * 30  # > 1000 chars
+    _write_claude_write_session(
+        uuid, [("/repo/site/report.html", content)], intent=intent
+    )
+
+    # The core keeps the full body (session_diff CORE contract is unchanged).
+    raw = session_diff(uuid, "claude")
+    assert raw["files"][0]["edits"][0]["hunks"][0]["content"] == content
+
+    result = mcp_session_diff(session_uuid=uuid, agent="claude")
+    f = result["files"][0]
+    hunk = f["edits"][0]["hunks"][0]
+    marker = "…[truncated]"
+    assert hunk["content"].endswith(marker)
+    assert len(hunk["content"]) == 4_000 + len(marker)
+    assert f["edits"][0]["intent"].endswith(marker)
+    assert len(f["edits"][0]["intent"]) == 1_000 + len(marker)
+    assert f["diff"].endswith(marker)
+    assert len(f["diff"]) == 20_000 + len(marker)
+    assert f["truncated_fields"] == [
+        "edits[0].intent",
+        "edits[0].hunks[0].content",
+        "diff",
+    ]
+    assert result["output_truncated"] is False
+    assert result["count"] == 1
+    # The whole response stays bounded (the regression was 145,811 chars).
+    assert len(json.dumps(result, ensure_ascii=False)) < 40_000
+
+
+def test_mcp_session_diff_small_session_untouched(tmp_path: Path) -> None:
+    """Under-cap fields pass through byte-identical; the additive markers
+    read "nothing was cut" (``truncated_fields == []``)."""
+    uuid = "claude-sd-1"
+    _write_claude_multi_edit_session(tmp_path, uuid, "/repo/src/mod.py")
+    result = mcp_session_diff(session_uuid=uuid, agent="claude")
+    f = result["files"][0]
+    assert f["truncated_fields"] == []
+    assert result["output_truncated"] is False
+    assert f["edits"][2]["hunks"][0]["content"] == "def bar():\n    return 42\n"
+    assert f["edits"][0]["intent"] == "Rename foo to bar"
+
+
+def test_mcp_session_diff_byte_budget_stops_file_emission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the total byte budget whole file entries stop emitting and
+    ``output_truncated`` flips; ``count`` keeps the TRUE total so the cut
+    is visible (mirrors ``find_file_edits``)."""
+    uuid = "claude-sd-budget-1"
+    _write_claude_write_session(
+        uuid,
+        [("/repo/a.py", "print('a')\n" * 20), ("/repo/b.py", "print('b')\n" * 20)],
+    )
+    monkeypatch.setattr("ai_r.mcp_server._DIFF_OUTPUT_BYTES_BUDGET", 300)
+    result = mcp_session_diff(session_uuid=uuid, agent="claude")
+    assert result["output_truncated"] is True
+    assert result["count"] == 2
+    assert len(result["files"]) == 1
+
+
+def test_mcp_diff_verb_shares_the_size_cap(tmp_path: Path) -> None:
+    """The ``diff`` verb emits the same shape and shares the same bound —
+    including its flat per-file ``hunks`` view, which aliases the very hunk
+    dicts under ``edits[*].hunks`` (one walk bounds both)."""
+    from ai_r.events import query
+    from ai_r.mcp_server import diff as mcp_diff
+
+    uuid = "claude-sd-big-2"
+    content = ("y" * 100 + "\n") * 900  # ~91 KB body
+    _write_claude_write_session(uuid, [("/repo/site/page.html", content)])
+
+    rows = [
+        ev
+        for ev in query(type="tool_call(write)", session=uuid, agent="claude")
+        if any("file" in r for r in ev.get("refs", ()))
+    ]
+    result = mcp_diff(rows=rows)
+    f = result["files"][0]
+    marker = "…[truncated]"
+    assert f["edits"][0]["hunks"][0]["content"].endswith(marker)
+    assert f["diff"].endswith(marker)
+    assert f["hunks"][0]["content"].endswith(marker)  # the aliased flat view
+    assert result["output_truncated"] is False
