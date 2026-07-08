@@ -194,6 +194,35 @@ def test_non_human_user_turns_are_skipped() -> None:
     assert out["markers"]["negative"] == []
 
 
+def test_wrapper_markers_mid_text_are_skipped() -> None:
+    """Harness wrappers NOT at char 0 are still non-human — and skipped
+    turns never consume tail slots, so the real closing verdict survives
+    three later wrapper turns (the false-negative regression)."""
+    msgs = [
+        _user("Отлично, работает"),
+        _user(
+            "12:01 run log\n<local-command-stdout>error: broken, failed"
+            "</local-command-stdout>"
+        ),
+        _user("fyi\n<task-notification>still failing, wrong</task-notification>"),
+        _user("note\n<command-name>/clear</command-name>"),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert out["user_verdict"] == "positive"
+    assert out["markers"]["negative"] == []
+
+
+def test_oversized_paste_turn_is_skipped() -> None:
+    """A >10k-char user turn is pasted/injected content, not a verdict."""
+    paste = "не работает, сломалось, всё wrong. " * 400  # ~14k chars
+    assert len(paste) > 10_000
+    msgs = [_user("Супер, всё чисто"), _user(paste)]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert out["markers"]["negative"] == []
+
+
 def test_tie_of_markers_is_neutral() -> None:
     """Equal positive and negative evidence must abstain, not guess."""
     msgs = [_user("работает, но код говно")]

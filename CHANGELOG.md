@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history (`find_tool_calls tool_name_pattern="mcp__ai-r__"`) to see which
   parameters callers actually passed.
 
+- **Session outcome: harness dumps no longer flip the verdict.** The
+  non-human user-turn filter was prefix-only (`<`, `[`, `Caveat:`), so a
+  `<local-command-stdout>` / `<task-notification>` / `<command-name>`
+  wrapper *inside* the text — full of words like "error"/"failed" — could
+  pass as a human verdict, occupy the 3-turn tail and evict the user's
+  real closing words (a false `failure`). Wrapper markers are now
+  detected anywhere in the text, a >10k-char turn counts as pasted
+  content rather than a verdict, and every skipped turn frees its tail
+  slot instead of consuming it.
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

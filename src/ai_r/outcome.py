@@ -77,6 +77,23 @@ _ERROR_RATE_DOMINANT = 0.5
 # (``[Request interrupted by user]``) and the IDE caveat preamble.
 _NON_HUMAN_PREFIXES = ("<", "[", "Caveat:")
 
+# Harness wrapper markers that identify a non-human turn ANYWHERE in the
+# text, not only at position 0: real Claude Code user records prepend the
+# caveat / a timestamp / concatenated content blocks before the wrapper, so
+# a prefix check alone lets a ``<local-command-stdout>`` dump (full of words
+# like "error"/"failed") pass as a human verdict and flip the outcome.
+_NON_HUMAN_MARKERS = (
+    "<local-command-",
+    "<task-notification>",
+    "<command-name>",
+)
+
+# A "user turn" longer than this is pasted/injected content (a log, a diff,
+# a whole document), not the user's own closing words — a human verdict is
+# a short reaction.  Such turns are skipped entirely: they neither occupy a
+# tail slot nor contribute markers.
+_MAX_HUMAN_TEXT_CHARS = 10_000
+
 
 def _marker(label: str, pattern: str) -> tuple[str, "re.Pattern[str]"]:
     return label, re.compile(pattern, re.IGNORECASE)
@@ -137,20 +154,40 @@ _NEGATIVE_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 
+def _is_human_text(text: str) -> bool:
+    """Whether a stripped user-turn text reads as the user's own words.
+
+    Rejected as non-human (each is skipped entirely — it neither occupies
+    a tail slot nor contributes verdict markers):
+
+    * a tool wrapper / harness placeholder / IDE caveat *prefix*
+      (:data:`_NON_HUMAN_PREFIXES`);
+    * a harness wrapper marker anywhere in the text
+      (:data:`_NON_HUMAN_MARKERS`) — wrappers are not always at char 0;
+    * text over :data:`_MAX_HUMAN_TEXT_CHARS` — a paste/injection, not a
+      closing human verdict.
+    """
+    if not text or text.startswith(_NON_HUMAN_PREFIXES):
+        return False
+    if len(text) > _MAX_HUMAN_TEXT_CHARS:
+        return False
+    return not any(marker in text for marker in _NON_HUMAN_MARKERS)
+
+
 def _tail_user_texts(messages: Sequence[Message]) -> list[str]:
     """The last :data:`_TAIL_USER_TURNS` *human* user-turn texts.
 
-    Human = ``role == "user"`` with non-empty text that is not a tool
-    wrapper / harness placeholder (see :data:`_NON_HUMAN_PREFIXES`).
-    Tool-result-only user records (Claude embeds results in user
-    records) have empty ``text`` and drop out naturally.
+    Human = ``role == "user"`` with non-empty text that passes
+    :func:`_is_human_text` (not a tool wrapper / harness placeholder /
+    over-long paste).  Tool-result-only user records (Claude embeds
+    results in user records) have empty ``text`` and drop out naturally.
     """
     texts: list[str] = []
     for msg in messages:
         if msg.role != "user":
             continue
         text = (msg.text or "").strip()
-        if not text or text.startswith(_NON_HUMAN_PREFIXES):
+        if not _is_human_text(text):
             continue
         texts.append(text)
     return texts[-_TAIL_USER_TURNS:]
