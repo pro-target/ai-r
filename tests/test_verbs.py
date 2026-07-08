@@ -27,56 +27,16 @@ import pytest
 from ai_r.events import aggregate, detect_current, diff, query
 from ai_r.file_frequency import file_frequency
 from ai_r.find_file_edits import find_file_edits
-from ai_r.parsers import PARSERS, target_agents
 from ai_r.session_diff import session_diff
-from ai_r.session_stats import group_key, session_stats
+from ai_r.session_stats import session_stats
+
+from ._parity_helpers import session_rows
 
 
 # ---------------------------------------------------------------------------
 # Parity helpers: build the SAME rows the legacy tools fold internally, so the
 # comparison exercises ``aggregate`` on the real inputs (not a re-implementation).
 # ---------------------------------------------------------------------------
-
-
-def _session_rows(agent: str | None = None) -> List[dict[str, Any]]:
-    """One row per session, carrying the fields ``session_stats`` rolls up.
-
-    Mirrors the enrichment ``session_stats`` computes (edit count + distinct
-    intents from ``find_file_edits``, message_count from the inventory) but as
-    a flat, per-session row stream — exactly what ``aggregate`` consumes.
-    ``size_caps=False`` mirrors the rollup exactly: ``session_stats`` counts
-    on raw, complete records (a byte-budget drop or a capped intent would
-    drift the edit/intent counts on a big vault — the observed host-parity
-    failure).
-    """
-    edits = find_file_edits(path="/", agent=agent, limit=0, size_caps=False)
-    edits_by_session: dict[str, dict[str, Any]] = {}
-    for r in edits["records"]:
-        uuid = r.get("session_uuid")
-        if not uuid:
-            continue
-        bucket = edits_by_session.setdefault(uuid, {"edits": 0, "intents": set()})
-        bucket["edits"] += 1
-        intent = r.get("intent")
-        if isinstance(intent, str) and intent.strip():
-            bucket["intents"].add(intent.strip())
-
-    rows: List[dict[str, Any]] = []
-    for agent_name in target_agents(agent):
-        parser = PARSERS[agent_name]
-        for session in parser.list_sessions():
-            enrich = edits_by_session.get(session.uuid, {"edits": 0, "intents": set()})
-            rows.append({
-                "session_uuid": session.uuid,
-                "agent": group_key(session, "agent"),
-                "dir": group_key(session, "dir"),
-                "date": group_key(session, "date"),
-                "kind": group_key(session, "kind"),
-                "edits": enrich["edits"],
-                "intents": sorted(enrich["intents"]),
-                "messages": int(getattr(session, "message_count", 0) or 0),
-            })
-    return rows
 
 
 def _edit_diff_rows(uuid: str, agent: str | None = None) -> List[dict[str, Any]]:
@@ -227,7 +187,7 @@ def test_aggregate_parity_session_stats(
 
     legacy = session_stats(group_by=group_by, agent="claude", top=0)
     agg = aggregate(
-        _session_rows(agent="claude"),
+        session_rows(agent="claude"),
         group_by=group_by,
         metrics=["sessions", "edits", "intents", "agents", "messages"],
     )
@@ -243,7 +203,7 @@ def test_aggregate_parity_session_stats_kind_split(
     _patch_claude(monkeypatch, tmp_sessions_dir)
     legacy = session_stats(group_by="kind", agent="claude", top=0)
     agg = aggregate(
-        _session_rows(agent="claude"),
+        session_rows(agent="claude"),
         group_by="kind",
         metrics=["sessions", "edits", "intents", "agents", "messages"],
     )
@@ -472,7 +432,7 @@ def test_aggregate_parity_session_stats_host(frozen_claude_home: Path) -> None:
     """
     legacy = session_stats(group_by="agent", agent="claude", top=0)
     agg = aggregate(
-        _session_rows(agent="claude"),
+        session_rows(agent="claude"),
         group_by="agent",
         metrics=["sessions", "edits", "intents", "agents", "messages"],
     )

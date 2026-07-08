@@ -38,7 +38,9 @@ from ai_r.find_file_edits import find_file_edits
 from ai_r.find_tool_calls import find_tool_calls
 from ai_r.parsers import PARSERS, target_agents
 from ai_r.session_diff import session_diff
-from ai_r.session_stats import group_key, session_stats
+from ai_r.session_stats import session_stats
+
+from ._parity_helpers import session_rows
 
 
 # ---------------------------------------------------------------------------
@@ -161,43 +163,6 @@ def test_session_diff_equals_diff_verb_hermetic(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _session_rows(agent: str = "claude") -> List[dict[str, Any]]:
-    # Mirror production ``session_stats``: count on RAW, UNCAPPED records.
-    # Without redact=False/size_caps=False this helper silently diverges on a
-    # large real vault — the ~4 MB byte budget drops records and redaction
-    # merges distinct intents — producing a FALSE parity failure.  Production
-    # ``session_stats`` scans with exactly these flags so a count never loses a
-    # record; the parity reconstruction must feed ``aggregate`` the same rows.
-    edits = find_file_edits(
-        path="/", agent=agent, limit=0, redact=False, size_caps=False
-    )
-    by: dict[str, dict[str, Any]] = {}
-    for r in edits["records"]:
-        u = r.get("session_uuid")
-        if not u:
-            continue
-        b = by.setdefault(u, {"edits": 0, "intents": set()})
-        b["edits"] += 1
-        it = r.get("intent")
-        if isinstance(it, str) and it.strip():
-            b["intents"].add(it.strip())
-    rows: List[dict[str, Any]] = []
-    for an in target_agents(agent):
-        for s in PARSERS[an].list_sessions():
-            e = by.get(s.uuid, {"edits": 0, "intents": set()})
-            rows.append({
-                "session_uuid": s.uuid,
-                "agent": group_key(s, "agent"),
-                "dir": group_key(s, "dir"),
-                "date": group_key(s, "date"),
-                "kind": group_key(s, "kind"),
-                "edits": e["edits"],
-                "intents": sorted(e["intents"]),
-                "messages": int(getattr(s, "message_count", 0) or 0),
-            })
-    return rows
-
-
 def _stats_preset(rows: List[dict[str, Any]], group_by: str, top: int) -> dict[str, Any]:
     agg = aggregate(rows, group_by=group_by,
                     metrics=["sessions", "edits", "intents", "agents", "messages"],
@@ -245,7 +210,7 @@ def test_session_stats_equals_aggregate_preset_hermetic(
     _sess("a2", "2026-06-10", 1)
     _sess("b1", "2026-06-11", 5)
 
-    rows = _session_rows("claude")
+    rows = session_rows("claude")
     for top in (8, 0):
         legacy = session_stats(group_by=group_by, agent="claude", top=top)
         assert legacy == _stats_preset(rows, group_by, top), f"{group_by} top={top}"
@@ -329,7 +294,7 @@ def test_session_stats_equals_aggregate_preset_on_real_data(
     FROZEN snapshot for a clean byte comparison (the live vault mutates between
     the two independent ``find_file_edits`` scans otherwise).
     """
-    rows = _session_rows("claude")
+    rows = session_rows("claude")
     for group_by in ("agent", "dir", "date", "kind"):
         for top in (8, 0):
             legacy = session_stats(group_by=group_by, agent="claude", top=top)
