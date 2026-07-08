@@ -303,8 +303,11 @@ def session_stats(
         # Internal call — only *counts* are derived from the records (no
         # text is emitted), and redaction could merge two distinct raw
         # intents under one masked string (an intents-count drift): keep
-        # the fold on raw data.
+        # the fold on raw data.  ``size_caps`` off for the same reason —
+        # a capped intent could merge with another, and a byte budget must
+        # never drop records from a count.
         redact=False,
+        size_caps=False,
     )
 
     # Edit enrichment, keyed by session uuid: edit count + distinct intents.

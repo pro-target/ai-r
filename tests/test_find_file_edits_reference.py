@@ -122,3 +122,141 @@ def test_core_include_input_false_matches_mcp_default(
     assert "input" not in rec
     assert len(rec["input_sha256"]) == 64
     assert rec["input_chars"] > 0
+
+
+# ---------------------------------------------------------------------------
+# (d) Size caps: per-record field caps + total byte budget (mirrors
+#     ``find_tool_calls``) — the 3.2M-char-response regression guard.
+# ---------------------------------------------------------------------------
+
+
+def _write_edit_session(
+    tmp_sessions_dir, uuid: str, *, user_text: str, assistant_text: str,
+    edit_path: str,
+) -> None:
+    """One user turn + one assistant Edit call (minimal Claude JSONL)."""
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": user_text},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": assistant_text},
+                    {
+                        "type": "tool_use",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": edit_path,
+                            "old_string": "a",
+                            "new_string": "b",
+                        },
+                    },
+                ],
+            },
+            "timestamp": "2026-06-14T10:00:05Z",
+            "sessionId": uuid,
+        },
+    ]
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-caps"
+        / f"{uuid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_size_caps_cut_long_intent_and_assistant(
+    tmp_sessions_dir, monkeypatch,
+) -> None:
+    """Over-long ``intent``/``assistant`` are cut with a marker and named
+    in ``truncated_fields`` (the uncapped fields were the 3.2M source)."""
+    from pathlib import Path
+
+    _write_edit_session(
+        tmp_sessions_dir, "caps-long",
+        user_text="i" * 5_000, assistant_text="a" * 10_000,
+        edit_path="/repo/caps/long.py",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = _core(path="caps/long", agent="claude", include_input=False)
+    rec = result["records"][0]
+    assert rec["intent"].endswith("…[truncated]")
+    assert len(rec["intent"]) <= 1_000 + len("…[truncated]")
+    assert rec["assistant"].endswith("…[truncated]")
+    assert len(rec["assistant"]) <= 4_000 + len("…[truncated]")
+    assert rec["truncated_fields"] == ["intent", "assistant"]
+    assert result["output_truncated"] is False
+
+
+def test_size_caps_never_touch_the_full_input_body(
+    fake_claude_edit_session: str,
+) -> None:
+    """``include_input=True`` promises the FULL body — caps must not cut it
+    (``get_body`` round-trips the ``input_sha256`` fingerprint)."""
+    result = _core(path="widget.py", agent="claude", include_input=True)
+    rec = _widget_records(result)[0]
+    assert rec["input"] == _EDIT_INPUT
+    assert rec["truncated_fields"] == []
+
+
+def test_byte_budget_stops_emission_and_flags(
+    tmp_sessions_dir, monkeypatch,
+) -> None:
+    """Past the total byte budget records stop and ``output_truncated``
+    is set — distinct from the count-based ``truncated``."""
+    from pathlib import Path
+
+    for i in range(3):
+        _write_edit_session(
+            tmp_sessions_dir, f"caps-budget-{i}",
+            user_text=f"edit {i}", assistant_text="Editing.",
+            edit_path=f"/repo/budget/f{i}.py",
+        )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    monkeypatch.setattr("ai_r.find_file_edits._OUTPUT_BYTES_BUDGET", 300)
+    result = _core(path="budget/f", agent="claude")
+    assert result["output_truncated"] is True
+    assert 1 <= len(result["records"]) < 3
+    assert result["count"] == 3
+    assert result["truncated"] is False  # no count-based cut happened
+
+
+def test_size_caps_false_returns_raw_complete_records(
+    tmp_sessions_dir, monkeypatch,
+) -> None:
+    """Internal rollups (``size_caps=False``) get raw fields, every record,
+    and no cap bookkeeping — distinct-intent counts must not drift."""
+    from pathlib import Path
+
+    _write_edit_session(
+        tmp_sessions_dir, "caps-raw",
+        user_text="i" * 5_000, assistant_text="Editing.",
+        edit_path="/repo/rawcaps/x.py",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    monkeypatch.setattr("ai_r.find_file_edits._OUTPUT_BYTES_BUDGET", 300)
+    result = _core(
+        path="rawcaps", agent="claude", size_caps=False, redact=False
+    )
+    rec = result["records"][0]
+    assert rec["intent"] == "i" * 5_000
+    assert "truncated_fields" not in rec
+    assert result["output_truncated"] is False

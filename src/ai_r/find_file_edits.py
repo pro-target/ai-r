@@ -37,6 +37,7 @@ __all__ = [
     # truth) so downstream consumers and tests that historically imported
     # them from here keep working.
     "PARSERS",
+    "cap_field",
     "coerce_agent",
     "target_agents",
     "iso",
@@ -65,6 +66,55 @@ EDIT_PATH_KEYS: tuple[str, ...] = ("file_path", "notebook_path", "path")
 # lives inside the shell command string. These tool names trigger a
 # conservative quote-aware redirection scan (see :func:`_shell_redirect_targets`).
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"exec_command", "local_shell_call"})
+
+
+# --- Per-record field caps (chars) + total-response byte budget ------------
+# Mirrors ``find_tool_calls``: ``limit`` bounds the record COUNT only, never
+# bytes.  Without caps a single record can carry an uncapped user ``intent``
+# (a whole pasted document) / uncapped ``assistant`` text, so a handful of
+# records blow the MCP response far past any sane size (observed: a
+# 3.2M-char response).  Over-long fields are truncated at emission time with
+# a ``…[truncated]`` marker and named in the per-record ``truncated_fields``.
+# The opt-in full ``input`` body (``include_input=True``) is deliberately NOT
+# field-capped — that flag *promises* the full body (``get_body`` is the
+# bounded on-demand route) — but it does count toward the byte budget.
+_INTENT_CHARS_CAP = 1_000     # preceding user message text
+_ASSISTANT_CHARS_CAP = 4_000  # assistant message text hosting the edit
+
+# Cumulative serialized size after which record emission stops and the
+# top-level ``output_truncated`` flag is set (DISTINCT from the count-based
+# ``truncated``: the former means "output capped by size", the latter "more
+# records matched than ``limit``").  Generous — only bites pathological
+# output.  Same value as ``find_tool_calls``.
+_OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
+
+
+def cap_field(value: Any, cap: int) -> tuple[Any, bool]:
+    """Return ``(value, truncated)`` bounding a field to ``cap`` chars.
+
+    A ``str`` longer than ``cap`` is sliced with a trailing marker.  A
+    non-string value (parsed dict/list) is serialized to measure size; only
+    when its JSON form exceeds ``cap`` do we replace it with the truncated
+    string form (small structured inputs pass through unchanged as the parsed
+    object).  ``None`` and short values are returned untouched.
+
+    Shared by :func:`find_file_edits` and
+    :func:`ai_r.find_tool_calls.find_tool_calls` (this module is the
+    import-order base of the two).
+    """
+    if value is None:
+        return value, False
+    if isinstance(value, str):
+        if len(value) > cap:
+            return value[:cap] + "…[truncated]", True
+        return value, False
+    try:
+        serialized = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    if len(serialized) > cap:
+        return serialized[:cap] + "…[truncated]", True
+    return value, False
 
 
 def parse_iso_bound(value: Optional[str], name: str) -> Optional[datetime]:
@@ -261,6 +311,7 @@ def find_file_edits(
     limit: int = 100,
     include_input: bool = True,
     redact: bool = True,
+    size_caps: bool = True,
 ) -> dict[str, Any]:
     """Find every file edit across sessions, cross-agent by default.
 
@@ -291,14 +342,28 @@ def find_file_edits(
             (see :mod:`ai_r.redact`).  ``False`` returns raw content.
             The ``path`` filter and ``input_sha256`` reference always use
             the RAW, pre-redaction content.
+        size_caps: When ``True`` (default) emitted records are size-bounded
+            like ``find_tool_calls``: ``intent`` / ``assistant`` are capped
+            (:data:`_INTENT_CHARS_CAP` / :data:`_ASSISTANT_CHARS_CAP`, cut
+            with a ``…[truncated]`` marker and named in the per-record
+            ``truncated_fields``), and emission stops once the cumulative
+            serialized size exceeds :data:`_OUTPUT_BYTES_BUDGET` (top-level
+            ``output_truncated``).  The opt-in full ``input`` body is never
+            field-capped (``include_input=True`` promises the full body) but
+            counts toward the budget.  Internal rollups (``session_stats`` /
+            ``file_frequency``) pass ``False``: they fold DISTINCT intents on
+            raw text (a cap could merge two long intents — a count drift) and
+            must never lose records to a byte budget.
 
     Returns:
-        A dict ``{"records": [...], "count": N, "truncated": bool}``.  Each
-        record carries ``"input"`` when ``include_input=True``, else
-        ``"input_sha256"`` + ``"input_chars"``.  When ``count == 0`` the
-        dict additionally carries ``"diagnostics"`` (scanned agents +
-        session counts, corpus date bounds, cause hints — see
-        :mod:`ai_r.diagnostics`) so an empty listing is explainable.
+        A dict ``{"records": [...], "count": N, "truncated": bool,
+        "output_truncated": bool}``.  Each record carries ``"input"`` when
+        ``include_input=True``, else ``"input_sha256"`` + ``"input_chars"``;
+        with ``size_caps`` it also carries ``"truncated_fields"`` (the
+        fields the per-record cap cut, ``[]`` when none).  When
+        ``count == 0`` the dict additionally carries ``"diagnostics"``
+        (scanned agents + session counts, corpus date bounds, cause hints —
+        see :mod:`ai_r.diagnostics`) so an empty listing is explainable.
 
     Raises:
         ValueError: on invalid arguments (``path`` empty, ``limit`` negative,
@@ -318,6 +383,8 @@ def find_file_edits(
         )
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
+    if not isinstance(size_caps, bool):
+        raise ValueError(f"size_caps must be a bool, got {size_caps!r}")
 
     since_dt = parse_iso_bound(since, "since")
     until_dt = parse_iso_bound(until, "until")
@@ -427,6 +494,23 @@ def find_file_edits(
         records = records[:limit]
         truncated = True
 
+    # Emission-time per-record field caps (mirrors ``find_tool_calls``):
+    # after the limit slice so only emitted records pay, BEFORE redaction so
+    # the redaction cost is bounded by the response size.  Gated by
+    # ``size_caps`` — internal rollups need raw, complete records.
+    if size_caps:
+        for rec in records:
+            truncated_fields: List[str] = []
+            for field, cap in (
+                ("intent", _INTENT_CHARS_CAP),
+                ("assistant", _ASSISTANT_CHARS_CAP),
+            ):
+                new_val, hit = cap_field(rec.get(field), cap)
+                if hit:
+                    rec[field] = new_val
+                    truncated_fields.append(field)
+            rec["truncated_fields"] = truncated_fields
+
     # Emission-time redaction (F2.1): after the limit slice so only emitted
     # records pay for it.  The ``path`` filter and the ``input_sha256``
     # reference above were computed on the RAW content.
@@ -441,8 +525,28 @@ def find_file_edits(
                     rec[field] = new_val
                     merge_redaction_counts(redactions, counts)
 
+    # Size-based safeguard (mirrors ``find_tool_calls``): stop emitting
+    # records once the cumulative serialized size exceeds the response byte
+    # budget.  Distinct from the count-based ``truncated`` above —
+    # ``output_truncated`` means "output capped by size", so a caller can
+    # tell "more records exist" (raise ``limit``) from "output too big"
+    # (fields already capped, but the sheer record count blew the budget).
+    output_truncated = False
+    if size_caps:
+        budgeted: List[dict[str, Any]] = []
+        running = 0
+        for rec in records:
+            running += len(json.dumps(rec, ensure_ascii=False, default=str))
+            if running > _OUTPUT_BYTES_BUDGET and budgeted:
+                output_truncated = True
+                break
+            budgeted.append(rec)
+        if output_truncated:
+            records = budgeted
+
     result: dict[str, Any] = {
         "records": records, "count": total, "truncated": truncated,
+        "output_truncated": output_truncated,
     }
     if redactions:
         result["redactions"] = redactions

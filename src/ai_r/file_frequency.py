@@ -143,6 +143,10 @@ def file_frequency(
         since=since,
         until=until,
         limit=0,
+        # Internal rollup: distinct-intent counting must fold on RAW intent
+        # text (a char cap could merge two long intents) and a byte budget
+        # must never drop records from a count.
+        size_caps=False,
     )
 
     by_file = aggregate(result["records"])

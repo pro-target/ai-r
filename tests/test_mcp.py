@@ -1879,7 +1879,16 @@ def test_find_file_edits_no_match_returns_empty(
     )
     result = find_file_edits(path="/definitely/not/a/real/path/zzz")
     diagnostics = result.pop("diagnostics")
-    assert result == {"records": [], "count": 0, "truncated": False}
+    # Fully unscoped (no agent/since/until): the wrapper applies the default
+    # time window and says so.
+    default_since = result.pop("default_since")
+    note = result.pop("note")
+    assert result == {
+        "records": [], "count": 0, "truncated": False,
+        "output_truncated": False,
+    }
+    assert default_since
+    assert "last 7 days" in note
     # A zero-match result must explain itself (F1.1).
     assert diagnostics["filters"]["path"] == "/definitely/not/a/real/path/zzz"
     assert diagnostics["hints"]
@@ -1900,7 +1909,9 @@ def test_find_file_edits_claude_match(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="README.md", include_input=True)
+    result = find_file_edits(
+        path="README.md", since="2026-06-01", include_input=True
+    )
     assert result["count"] >= 1
     assert result["truncated"] is False
     hit = next(r for r in result["records"] if r["session_uuid"] == "cfe-1")
@@ -1956,7 +1967,7 @@ def test_find_file_edits_path_substring(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="README")
+    result = find_file_edits(path="README", since="2026-06-01")
     uuids = [r["session_uuid"] for r in result["records"]]
     assert "cfe-sub-a" in uuids
     assert "cfe-sub-b" not in uuids
@@ -2009,7 +2020,7 @@ def test_find_file_edits_limit_caps_results(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="cap/file-", limit=2)
+    result = find_file_edits(path="cap/file-", since="2026-06-01", limit=2)
     assert len(result["records"]) == 2
     assert result["count"] == 4
     assert result["truncated"] is True
@@ -2079,7 +2090,7 @@ def test_find_file_edits_intent_from_immediately_previous_user(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    result = find_file_edits(path="intent/auth.py")
+    result = find_file_edits(path="intent/auth.py", since="2026-06-01")
     assert result["count"] == 1
     assert result["records"][0]["intent"] == "Refactor the auth module"
 
@@ -2110,9 +2121,44 @@ def test_find_file_edits_cross_agent_default(
     monkeypatch.setattr(
         "ai_r.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
     )
-    result = find_file_edits(path="cross/shared")
+    # The pi fixture timestamps are epoch-2024; an explicit early bound keeps
+    # both agents in scope while disabling the unscoped default window.
+    result = find_file_edits(path="cross/shared", since="2024-01-01")
     agents = {r["agent"] for r in result["records"]}
     assert {"claude", "pi"} <= agents
+
+
+def test_find_file_edits_default_since_window(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fully-unscoped MCP calls are narrowed to the last 7 days, loudly.
+
+    The 2026-06-14 fixture edit sits outside any rolling 7-day window, so
+    the unscoped call must exclude it AND say so (``default_since`` +
+    ``note``); any explicit scope — a ``since`` bound or an ``agent``
+    filter — disables the default entirely.
+    """
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-window",
+        user_text="Old edit", edit_path="/tmp/window/file.py",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    unscoped = find_file_edits(path="window/file")
+    assert unscoped["count"] == 0
+    assert unscoped["default_since"]
+    assert "last 7 days" in unscoped["note"]
+    # An explicit lower bound disables the default window.
+    scoped = find_file_edits(path="window/file", since="1970-01-01")
+    assert scoped["count"] == 1
+    assert "default_since" not in scoped
+    assert "note" not in scoped
+    # An agent filter alone is also a scope: no window is applied.
+    by_agent = find_file_edits(path="window/file", agent="claude")
+    assert by_agent["count"] == 1
+    assert "default_since" not in by_agent
 
 
 def test_find_file_edits_via_mcp_client(
@@ -2128,7 +2174,9 @@ def test_find_file_edits_via_mcp_client(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
-    texts = _run(_call("find_file_edits", {"path": "mcp-via"}))
+    texts = _run(_call(
+        "find_file_edits", {"path": "mcp-via", "since": "2026-06-01"}
+    ))
     payload = json.loads(texts[0])
     assert payload["count"] >= 1
     assert any(r["session_uuid"] == "cfe-mcp" for r in payload["records"])

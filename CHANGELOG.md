@@ -70,6 +70,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallbacks and the honest `"(unknown)"` bucket remain for sessions
   without a normalized dir.
 
+- **`find_file_edits` output is size-bounded (the 3.2M-char response).**
+  Records carried uncapped `intent`/`assistant` text, so one pasted
+  document in a user turn could blow the MCP response past any sane size.
+  The core now mirrors `find_tool_calls`: `intent`/`assistant` are cut
+  with a `…[truncated]` marker and named in a per-record
+  `truncated_fields`, and emission stops at a total byte budget
+  (`output_truncated`, distinct from the count-based `truncated`). The
+  opt-in full `input` body (`include_input=true`) is never field-capped —
+  it promises the full body — but counts toward the budget; internal
+  rollups (`session_stats`/`file_frequency`) keep raw, complete records.
+  The MCP wrapper additionally narrows a fully-unscoped call (no
+  `agent`/`since`/`until`) to the last 7 days, loudly (`default_since` +
+  `note` in the response; any explicit scope disables the default).
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

@@ -20,6 +20,7 @@ import re
 from typing import Any, List, Optional
 
 from ai_r.find_file_edits import (
+    cap_field as _cap_field,
     parse_iso_bound,
     previous_user_intent,
     to_utc_aware,
@@ -56,28 +57,9 @@ _OUTPUT_CHARS_CAP = 2_000     # correlated tool_result content
 _OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
 
 
-def _cap_field(value: Any, cap: int) -> tuple[Any, bool]:
-    """Return ``(value, truncated)`` bounding a field to ``cap`` chars.
-
-    A ``str`` longer than ``cap`` is sliced with a trailing marker.  A
-    non-string value (parsed dict/list) is serialized to measure size; only
-    when its JSON form exceeds ``cap`` do we replace it with the truncated
-    string form (small structured inputs pass through unchanged as the parsed
-    object).  ``None`` and short values are returned untouched.
-    """
-    if value is None:
-        return value, False
-    if isinstance(value, str):
-        if len(value) > cap:
-            return value[:cap] + "…[truncated]", True
-        return value, False
-    try:
-        serialized = json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        serialized = str(value)
-    if len(serialized) > cap:
-        return serialized[:cap] + "…[truncated]", True
-    return value, False
+# ``_cap_field`` is the shared :func:`ai_r.find_file_edits.cap_field`
+# (imported above): one truncation contract — same marker, same structured
+# fallback — for both record surfaces.
 
 
 # --- Smart output truncation ----------------------------------------------

@@ -42,7 +42,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, Union
 
@@ -1274,6 +1274,14 @@ def read_session(
     return summary
 
 
+# A fully-unscoped ``find_file_edits`` (no agent, no since, no until) used to
+# scan and emit the WHOLE corpus — months of history nobody asked for, and the
+# main ingredient of an oversized response.  The MCP wrapper now narrows such
+# calls to the last N days and says so in the response (``default_since`` +
+# ``note``) — any explicit scope disables the default entirely.
+_FIND_EDITS_DEFAULT_SINCE_DAYS = 7
+
+
 @mcp.tool()
 def find_file_edits(
     path: str,
@@ -1298,13 +1306,39 @@ def find_file_edits(
     + ``message_index``).  Pass ``include_input=True`` to inline the full
     body under ``input`` instead.
 
+    Size-bounded output: over-long ``intent`` / ``assistant`` fields are cut
+    with a ``…[truncated]`` marker (named in the per-record
+    ``truncated_fields``) and emission stops at a total byte budget
+    (``output_truncated`` — distinct from the count-based ``truncated``).
+
+    Default time window: a call with NO narrowing filter at all (no
+    ``agent`` / ``since`` / ``until``) is scoped to the last
+    7 days instead of the whole corpus; the response then carries
+    ``default_since`` (the applied bound) plus a ``note`` saying so.  Any
+    explicit scope disables the default — pass e.g. ``since="1970-01-01"``
+    to deliberately scan the full history.
+
     Thin wrapper over :func:`ai_r.find_file_edits.find_file_edits`
     that translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the
     MCP client expects.
     """
+    # Mirror the ``session_stats`` scoped-check: an empty/whitespace value is
+    # as unscoped as an absent one.
+    scoped = bool(
+        (agent and str(agent).strip())
+        or (since and str(since).strip())
+        or (until and str(until).strip())
+    )
+    default_since: Optional[str] = None
+    if not scoped:
+        default_since = (
+            datetime.now(timezone.utc)
+            - timedelta(days=_FIND_EDITS_DEFAULT_SINCE_DAYS)
+        ).isoformat(timespec="seconds")
+        since = default_since
     try:
-        return _find_file_edits_core(
+        result = _find_file_edits_core(
             path=path,
             agent=agent,
             since=since,
@@ -1315,6 +1349,16 @@ def find_file_edits(
         )
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
+    if default_since is not None:
+        result["default_since"] = default_since
+        result["note"] = (
+            f"no agent/since/until filter was given: results are limited to "
+            f"the last {_FIND_EDITS_DEFAULT_SINCE_DAYS} days "
+            f"(since={default_since}). Pass agent, since or until "
+            f"(e.g. since=\"1970-01-01\" for the full corpus) to widen the "
+            f"scope."
+        )
+    return result
 
 
 @mcp.tool()
