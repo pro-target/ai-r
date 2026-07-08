@@ -5,7 +5,8 @@ module rolls *sessions themselves* up by a chosen dimension so a reader can
 answer "how is the work distributed?" in one call:
 
 * ``group_by="agent"`` — claude vs codex vs opencode vs ...
-* ``group_by="dir"``   — by working directory / project (``Session.extra``
+* ``group_by="dir"``   — by working directory / project (the normalized
+  ``Session.project_dir`` first, then the ``Session.extra`` fallbacks:
   ``cwd`` for codex/pi, ``project_slug`` for claude).
 * ``group_by="date"``  — by calendar day (``YYYY-MM-DD``).
 * ``group_by="kind"``  — top-level *agent* sessions vs spawned *subagent*
@@ -124,12 +125,21 @@ TOKEN_SCAN_WARN: int = 200
 def _session_dir(session: Any) -> str:
     """Best-effort working-directory / project label for a session.
 
-    Codex and Pi carry an absolute ``cwd`` in ``Session.extra``; Claude
-    carries a ``project_slug`` (the encoded project path).  Agents that
-    expose neither (OpenCode, Antigravity) fall back to the literal
-    ``"(unknown)"`` so they still form a single, honest bucket rather than
-    vanishing from the rollup.
+    The normalized :attr:`ai_r.parsers.Session.project_dir` (F1.4 — the
+    record-level cwd, or the filesystem-verified slug decode for Claude) is
+    checked FIRST so one real directory folds into one bucket regardless of
+    the recording agent.  Without it the same project split in two: Claude
+    sessions bucketed under the storage slug (``-home-u-dev-ai-r``) while
+    codex/pi sessions bucketed under the absolute ``cwd``
+    (``/home/u/dev/ai-r``).  The ``Session.extra`` fallbacks (``cwd`` for
+    codex/pi, ``project_slug`` for Claude) remain for sessions whose
+    normalized dir could not be resolved; agents with no signal at all
+    fall back to the literal ``"(unknown)"`` so they still form a single,
+    honest bucket rather than vanishing from the rollup.
     """
+    project_dir = getattr(session, "project_dir", None)
+    if isinstance(project_dir, str) and project_dir:
+        return project_dir
     extra = getattr(session, "extra", None) or {}
     cwd = extra.get("cwd")
     if isinstance(cwd, str) and cwd:
@@ -144,7 +154,8 @@ def group_key(session: Any, group_by: str) -> str:
     """Return the bucket label for ``session`` under dimension ``group_by``.
 
     * ``agent`` → the lowercase agent name (``"claude"``, ``"codex"``, ...).
-    * ``dir``   → ``cwd`` / ``project_slug`` (see :func:`_session_dir`).
+    * ``dir``   → ``project_dir`` / ``cwd`` / ``project_slug`` (see
+      :func:`_session_dir`).
     * ``date``  → the ``YYYY-MM-DD`` calendar day of ``session.date``
       (``"(undated)"`` when the session has no usable timestamp).
     * ``kind``  → ``session.kind`` (``"agent"`` / ``"subagent"``).

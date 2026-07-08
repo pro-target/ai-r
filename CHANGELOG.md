@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content rather than a verdict, and every skipped turn frees its tail
   slot instead of consuming it.
 
+- **`session_stats(group_by="dir")` no longer splits one real directory
+  into two buckets.** The rollup read only the `Session.extra` fallbacks —
+  Claude sessions bucketed under the storage slug (`-home-u-dev-ai-r`)
+  while codex/pi sessions bucketed under the absolute cwd
+  (`/home/u/dev/ai-r`) — so per-project counts drifted across agents. The
+  normalized `Session.project_dir` (record-level cwd, or the
+  filesystem-verified slug decode) is now checked first; the extra
+  fallbacks and the honest `"(unknown)"` bucket remain for sessions
+  without a normalized dir.
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

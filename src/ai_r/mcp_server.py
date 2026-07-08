@@ -1401,8 +1401,10 @@ def session_stats(
     ``group_by`` is one of:
 
     * ``"agent"`` (default) — claude vs codex vs opencode vs ...
-    * ``"dir"``   — by working directory / project (``cwd`` for codex/pi,
-      project slug for claude; ``"(unknown)"`` for agents without one).
+    * ``"dir"``   — by working directory / project (the normalized
+      ``project_dir`` first — one real directory = one bucket across
+      agents — then ``cwd`` for codex/pi / project slug for claude;
+      ``"(unknown)"`` for agents without any signal).
     * ``"date"``  — by calendar day (``YYYY-MM-DD``).
     * ``"kind"``  — top-level *agent* sessions vs spawned *subagent* sessions.
 

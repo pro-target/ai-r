@@ -112,12 +112,16 @@ def _silence_non_claude_parsers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _FakeSession:
-    def __init__(self, agent_value, kind="agent", date=None, extra=None, mc=0):
+    def __init__(
+        self, agent_value, kind="agent", date=None, extra=None, mc=0,
+        project_dir=None,
+    ):
         self.agent = type("A", (), {"value": agent_value})()
         self.kind = kind
         self.date = date
         self.extra = extra or {}
         self.message_count = mc
+        self.project_dir = project_dir
 
 
 def test_group_key_dimensions() -> None:
@@ -138,6 +142,42 @@ def test_group_key_dimensions() -> None:
 def test_group_key_dir_prefers_cwd_over_slug() -> None:
     s = _FakeSession("CODEX", extra={"cwd": "/tmp/work", "project_slug": "p"})
     assert group_key(s, "dir") == "/tmp/work"
+
+
+def test_group_key_dir_prefers_normalized_project_dir() -> None:
+    """``Session.project_dir`` (normalized) wins over every extra fallback."""
+    s = _FakeSession(
+        "CLAUDE",
+        extra={"project_slug": "-home-u-dev-ai-r"},
+        project_dir="/home/u/dev/ai-r",
+    )
+    assert group_key(s, "dir") == "/home/u/dev/ai-r"
+
+
+def test_group_key_dir_one_directory_one_bucket_across_agents() -> None:
+    """The same real directory folds into ONE bucket regardless of agent.
+
+    Before the ``project_dir``-first rule a Claude session (storage slug)
+    and a codex session (absolute ``cwd``) from the same project landed in
+    two different ``dir`` buckets.
+    """
+    claude = _FakeSession(
+        "CLAUDE",
+        extra={"project_slug": "-home-u-dev-ai-r"},
+        project_dir="/home/u/dev/ai-r",
+    )
+    codex = _FakeSession(
+        "CODEX",
+        extra={"cwd": "/home/u/dev/ai-r"},
+        project_dir="/home/u/dev/ai-r",
+    )
+    assert group_key(claude, "dir") == group_key(codex, "dir")
+
+
+def test_group_key_dir_extra_fallback_without_project_dir() -> None:
+    """No normalized dir → the historical extra fallbacks still apply."""
+    s = _FakeSession("CLAUDE", extra={"project_slug": "proj-x"})
+    assert group_key(s, "dir") == "proj-x"
 
 
 def test_group_key_dir_unknown_fallback() -> None:
@@ -323,6 +363,37 @@ def test_session_stats_agent_filter(
     result = session_stats(group_by="agent", agent="claude")
     assert result["totals"]["agents_list"] == ["claude"]
     assert result["totals"]["sessions"] == 1
+
+
+def test_session_stats_dir_buckets_by_normalized_project_dir(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record-level ``cwd`` normalizes the ``dir`` bucket away from the slug.
+
+    The Claude parser lifts the transcript ``cwd`` into
+    ``Session.project_dir``; the rollup must bucket by that normalized path,
+    not by the storage slug, so the same directory never splits in two.
+    """
+    record = {
+        "type": "user",
+        "message": {"role": "user", "content": "edit it"},
+        "timestamp": "2026-06-14T10:00:00Z",
+        "sessionId": "ss-pdir",
+        "cwd": "/tmp/one-project",
+    }
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-slug"
+        / "ss-pdir.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    result = session_stats(group_by="dir", agent="claude")
+    groups = [g["group"] for g in result["groups"]]
+    assert "/tmp/one-project" in groups
+    assert "proj-slug" not in groups
 
 
 # ---------------------------------------------------------------------------
