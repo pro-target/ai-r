@@ -666,3 +666,146 @@ def test_without_tokens_ignores_scan_guard(
     assert result["totals"]["sessions"] == TOKEN_SCAN_LIMIT + 5
     # No token reads at all when with_tokens is False.
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# CLI: ``ai-r stats`` (thin wrapper over the same core; layout mirrors the
+# ``file-frequency`` CLI tests)
+# ---------------------------------------------------------------------------
+
+
+def _run_inproc(
+    argv: list[str], env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
+    """Run ``cli.main`` in-process; return ``(rc, stdout, stderr)``."""
+    import contextlib
+    import io
+    import os
+
+    from ai_r import cli as cli_module
+
+    saved_env = {k: os.environ.get(k) for k in ("AI_R_HOME", "OPENCODE_DB")}
+    try:
+        for k in ("AI_R_HOME", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        if env:
+            os.environ.update(env)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                rc = cli_module.main(argv)
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else 1
+        return rc, stdout.getvalue(), stderr.getvalue()
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_cli_stats_group_by_choices_match_core() -> None:
+    """The CLI ``--group-by`` choices stay in step with the core set."""
+    from ai_r.cli.commands.stats_cmd import _GROUP_BY_CHOICES
+
+    assert set(_GROUP_BY_CHOICES) == GROUP_BY
+
+
+def test_cli_stats_human(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_edit_session(
+        tmp_sessions_dir, "st-cli-h",
+        turns=[("edit one", "Edit", "/repo/one.py")],
+    )
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    rc, out, err = _run_inproc(
+        ["stats", "--agent", "claude"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "scanned:" in out
+    assert "group by: agent" in out
+    assert "claude" in out
+
+
+def test_cli_stats_json_group_by_dir(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_edit_session(
+        tmp_sessions_dir, "st-cli-j",
+        turns=[("edit it", "Edit", "/repo/file.py")],
+        proj="proj-st",
+    )
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    rc, out, err = _run_inproc(
+        ["stats", "--agent", "claude", "--group-by", "dir", "--json"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["group_by"] == "dir"
+    assert payload["totals"]["sessions"] == 1
+    assert payload["groups"][0]["group"] == "proj-st"
+
+
+def test_cli_stats_with_tokens_json(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_edit_session(
+        tmp_sessions_dir, "st-cli-t",
+        turns=[("edit it", "Edit", "/repo/tok.py")],
+    )
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    rc, out, err = _run_inproc(
+        ["stats", "--agent", "claude", "--with-tokens", "--json"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert "tokens" in payload["groups"][0]
+    assert "tokens" in payload["totals"]
+
+
+def test_cli_stats_no_sessions_stderr(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    rc, out, err = _run_inproc(
+        ["stats", "--agent", "claude"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0
+    assert "no sessions" in err.lower()
+
+
+def test_cli_stats_bad_iso_exits_2(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rc, out, err = _run_inproc(
+        ["stats", "--since", "not-a-date"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 2
+    assert "iso" in err.lower()
+
+
+def test_cli_stats_scan_guard_refusal_exits_2(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core's structured refusal surfaces via the CLI error contract."""
+    monkeypatch.setattr(
+        "ai_r.session_stats.session_stats",
+        lambda **kwargs: {
+            "error": "scope_required",
+            "message": "narrow the scope (agent / since / until)",
+        },
+    )
+    rc, out, err = _run_inproc(
+        ["stats", "--with-tokens"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 2
+    assert "narrow the scope" in err

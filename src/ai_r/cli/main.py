@@ -23,6 +23,7 @@ from ai_r.cli.commands import (
     list_cmd,
     read_cmd,
     search_cmd,
+    stats_cmd,
 )
 
 
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     find_file_edits.register(sub)
     find_tool_calls.register(sub)
     file_frequency.register(sub)
+    stats_cmd.register(sub)
     detect_agent.register(sub)
     detect_session.register(sub)
     export.register(sub)

@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate: the hermetic pytest suite plus the new AGG-6 scenario executed
   in two independent LLM runs against a live MCP server — both GO.
 
+- **CLI `ai-r stats` — the `session_stats` rollup from the terminal.**
+  Groups sessions by `--group-by agent|dir|date|kind` with the same
+  enrichment the MCP preset carries (edits / distinct intents / agents /
+  messages), `--since`/`--until`/`--agent` scoping, `--top`, `--json`,
+  and `--with-tokens` for the request-time token rollup (the core's
+  unscoped-scan refusal surfaces as the standard CLI error, exit 2).
+
 ### Deprecated
 
 - **`query`'s `kind` fail-loud tombstone is scheduled for removal in `0.6.0`.**
