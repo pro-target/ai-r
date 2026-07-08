@@ -68,6 +68,7 @@ from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # n
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.network import network as _network_core  # noqa: E402
+from ai_r.quotes import quotes as _quotes_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import (  # noqa: E402
     TOKEN_SCAN_LIMIT as _SESSION_STATS_TOKEN_SCAN_LIMIT,
@@ -1673,6 +1674,78 @@ def network(
             kind=kind,
             risk=risk,
             domain=domain,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def quotes(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """User quotes of prior in-session content — the *quotes* preset.
+
+    One call answers "where did the user quote something the agent said, and
+    what did they say about it?".  When a user selects a chunk of a prior
+    message and comments on it (the "attach selection as context" flow), the
+    quoted text is embedded VERBATIM in their turn — no agent records it as a
+    structured field — so it is recovered by matching the user turn against the
+    text before it.  A preset over the existing core, not a second engine:
+    ``query`` scans supply user turns + assistant turns, the reviewed text is
+    normalized (``_normalize_rendered_text``, reused from the plan-feedback
+    anchorer) and :func:`difflib.SequenceMatcher` finds the longest verbatim
+    run; a run below the minimum is not a quote (honest ``null``), and text
+    pasted from OUTSIDE the session matches nothing (never fabricated).
+
+    This is the cross-agent, chat-wide generalization of ``plan(feedback)``
+    (which surfaces «plan quote → user comment» only for Claude's plan-approval
+    flow): ``quotes`` surfaces «any prior message quote → user comment» for
+    every agent, operating on the normalized event stream, not client markup.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list),
+    ``since``/``until`` (ISO bounds on the user turn's ts), ``source_kind``
+    (currently ``assistant`` — a user quoting the agent's prose; unknown values
+    fail loud), ``noise`` and ``project_dir`` (session-level, same as
+    ``query``).
+
+    Each record carries the user_turn event ``id`` (context on-demand via
+    ``query(relative_to=...)``), ``source_id`` (the quoted assistant turn),
+    ``source_kind``, ``quote_chars``, and the char-capped ``quote`` + ``comment``
+    (the user's turn with the quote elided).  ``count``/``by_source_kind``
+    reflect the FULL matched set; ``limit`` (default 50, ``0`` = no cap) bounds
+    only the emitted records (``truncated``).
+
+    Caveat (documented): v1 sources are assistant *prose* (the common case —
+    quoting a tool's raw output is a future extension); the emitted
+    ``quote``/``comment`` come from the NORMALIZED text (markdown stripped), so
+    they are readable but not byte-identical to the raw turn (raw bodies stay
+    reachable via the event ids).  ``redact=true`` (default) masks secrets only
+    in the emitted ``session_title``/``quote``/``comment``.  When ``count == 0``
+    the response carries ``diagnostics`` so an empty result is explainable.
+
+    Thin wrapper over :func:`ai_r.quotes.quotes` that translates the core
+    ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _quotes_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            source_kind=source_kind,
             limit=limit,
             noise=noise,
             project_dir=project_dir,
