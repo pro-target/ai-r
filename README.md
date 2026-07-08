@@ -1,22 +1,30 @@
 # ai-r
 
 [![CI](https://github.com/pro-target/ai-r/workflows/CI/badge.svg)](https://github.com/pro-target/ai-r/actions)
+[![coverage](https://img.shields.io/badge/coverage-92%25-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
+[![tests](https://img.shields.io/badge/tests-1300+-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 [English](README.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md)
 
-> `git` shows **what** made it into the code. `ai-r` shows **why**: which agent
-> did it, under which plan — and whether it quietly dropped the plan it actually
-> settled on. Read-only, across all five coding agents, one interface.
+**An agent reported "done." There's nothing to check it against.**
 
-**Deterministic read path: extraction makes no LLM calls and no outbound network requests; the optional semantic re-rank is local too (embeddings, not an LLM).**
+`ai-r` reads the session history of any of the five coding agents and lets a
+fresh agent cold-check what `git` can't answer:
 
-An agent reports: "done X, per plan Y." You have no way to check. The plan lives
-in one format, the edits in another. And if two agents worked the task, their
-histories don't reconcile at all — each writes its own way, in its own place.
-`ai-r` reads an agent's session history and pulls out the intent, the plan, and
-the authorship behind an edit.
+- did it lie, did it break anything — did it keep its word, did it run anything
+  dangerous (and roll it back if it did), what it actually changed, what it cost;
+- why it went that way — under which plan, with what intent, and whose hand was
+  behind the edit.
+
+> Across our own corpus — 1600+ sessions of five agents in 20+ projects — that's
+> how we found 312 risky commands (`rm -rf`, `curl|sh`, `git push --force`): the
+> agent caught and rolled back two itself; the other 310 ran silently — `git`
+> won't show them.
+
+`git` shows **what** made it into the code; `ai-r` shows whether you can trust
+**how** the agent got there. Read-only: no LLM calls, no network.
 
 ## Quick example — an agent asks about history
 
@@ -81,10 +89,9 @@ query shape per agent; format differences are normalized inside the parsers.
 - **Audit sessions with a fresh pair of eyes.** A new agent with an empty
   context coldly checks past sessions on three axes: were promises and
   requirements met; are the decisions sound and well-judged; how deeply was the
-  question explored — what the agent missed. On one real run, 271 dialogs were
-  reviewed this way in a week, catching agents that finished the task **but
-  misled on the planning** — something a live chat hides, and that steers you
-  into wrong decisions.
+  question explored — what the agent missed. This catches agents that finished
+  the task **but misled on the planning** — something a live chat hides, and that
+  steers you into wrong decisions.
 - **Continue past a spent context — without losing detail.** `/compact` erases
   the specifics. Instead, open a fresh session: it reads the previous session's
   **logs** and continues from its conclusions, without re-burning context on
@@ -316,7 +323,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 1100+ tests, CI requires ≥85% coverage
+- 1300+ tests, CI requires ≥85% coverage
 - Versioning: [SemVer](https://semver.org); while on `0.x`, a minor release may
   break compatibility — where possible a migration path is given (a loud
   deprecation warning before removal); changes land in

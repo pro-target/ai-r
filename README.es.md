@@ -1,23 +1,30 @@
 # ai-r
 
 [![CI](https://github.com/pro-target/ai-r/workflows/CI/badge.svg)](https://github.com/pro-target/ai-r/actions)
+[![coverage](https://img.shields.io/badge/coverage-92%25-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
+[![tests](https://img.shields.io/badge/tests-1300+-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 [English](README.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md)
 
-> `git` muestra **qué** llegó al código. `ai-r` muestra **por qué**: qué agente
-> lo hizo, bajo qué plan — y si silenciosamente descartó el plan que realmente
-> había acordado. Solo lectura, a través de los cinco agentes de programación, una
-> sola interfaz.
+**Un agente informó "hecho". No hay nada contra lo que comprobarlo.**
 
-**Ruta de lectura determinista: la extracción no hace llamadas a LLM ni peticiones de red salientes; el re-ranking semántico opcional también es local (embeddings, no un LLM).**
+`ai-r` lee el historial de sesión de cualquiera de los cinco agentes de
+programación y permite que un agente nuevo verifique en frío lo que `git` no puede
+responder:
+- si mintió, si rompió algo — si cumplió su palabra, si ejecutó algo peligroso (y
+  si lo revirtió cuando lo hizo), qué cambió realmente, cuánto costó;
+- por qué fue por ese camino — bajo qué plan, con qué intención, y de quién era la
+  mano detrás de la edición.
 
-Un agente informa: "hecho X, según el plan Y". No tienes forma de comprobarlo. El
-plan vive en un formato, las ediciones en otro. Y si dos agentes trabajaron la
-tarea, sus historiales no se reconcilian en absoluto — cada uno escribe a su
-manera, en su propio lugar. `ai-r` lee el historial de sesión de un agente y
-extrae la intención, el plan y la autoría detrás de una edición.
+> A través de nuestro propio corpus — más de 1600 sesiones de cinco agentes en más
+> de 20 proyectos — así fue como encontramos 312 comandos peligrosos (`rm -rf`,
+> `curl|sh`, `git push --force`): el agente detectó y revirtió dos por sí mismo;
+> los otros 310 se ejecutaron en silencio — `git` no los muestra.
+
+`git` muestra **qué** llegó al código; `ai-r` muestra si puedes confiar en **cómo**
+el agente llegó ahí. Solo lectura: sin llamadas a LLM, sin red.
 
 ## Ejemplo rápido — un agente pregunta sobre el historial
 
@@ -87,9 +94,9 @@ de formato se normalizan dentro de los parsers.
   vacío revisa fríamente sesiones pasadas en tres ejes: ¿se cumplieron promesas y
   requisitos; son sólidas y bien juzgadas las decisiones; con qué profundidad se
   exploró la cuestión — qué se le pasó al agente? En una ejecución real, se
-  revisaron 271 diálogos de esta forma en una semana, pillando a agentes que
-  terminaron la tarea **pero engañaron sobre la planificación** — algo que un chat
-  en vivo oculta, y que te lleva a decisiones equivocadas.
+  revisaron sesiones de esta forma, pillando a agentes que terminaron la tarea
+  **pero engañaron sobre la planificación** — algo que un chat en vivo oculta, y
+  que te lleva a decisiones equivocadas.
 - **Continuar más allá de un contexto agotado — sin perder detalle.** `/compact`
   borra los detalles. En su lugar, abre una sesión nueva: lee los **registros** de
   la sesión anterior y continúa desde sus conclusiones, sin volver a quemar
@@ -331,7 +338,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 1100+ tests, CI requiere ≥85% de cobertura
+- 1300+ tests, CI requiere ≥85% de cobertura
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - Al añadir nuevos agentes, ver [CONTRIBUTING.md](./CONTRIBUTING.md) y
   [docs/parsers.md](./docs/parsers.md)

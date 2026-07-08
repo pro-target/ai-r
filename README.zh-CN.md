@@ -1,21 +1,28 @@
 # ai-r
 
 [![CI](https://github.com/pro-target/ai-r/workflows/CI/badge.svg)](https://github.com/pro-target/ai-r/actions)
+[![coverage](https://img.shields.io/badge/coverage-92%25-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
+[![tests](https://img.shields.io/badge/tests-1300+-brightgreen.svg)](https://github.com/pro-target/ai-r/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 [English](README.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Español](README.es.md)
 
-> `git` 展示的是**什么**进入了代码。`ai-r` 展示的是**为什么**：哪个智能体
-> 做的、依据哪个计划——以及它是否悄悄丢弃了它其实敲定的那个计划。
-> 只读，覆盖全部五个编码智能体，一套统一接口。
+**一个智能体报告“完成了”。却没有任何东西可以拿来核对它。**
 
-**只读的确定性读取路径：提取过程不做任何 LLM 调用，也不发出任何对外网络请求；可选的语义（semantic）重排（re-rank）同样在本地完成（用的是嵌入向量 embeddings，而非 LLM）。**
+`ai-r` 读取五个编码智能体中任意一个的会话历史，让一个全新的智能体冷静地核查
+那些 `git` 回答不了的问题：
 
-一个智能体报告：“完成了 X，依照计划 Y。”你却无从核对。计划存在一种格式里，
-编辑存在另一种格式里。而如果两个智能体一起做了这个任务，它们的历史根本对不上
-——每个都用自己的方式、在自己的地方记录。`ai-r` 读取一个智能体的会话历史，
-并从一次编辑背后提取出意图、计划和作者归属。
+- 它有没有撒谎、有没有弄坏什么——它有没有信守承诺、有没有运行任何危险的东西
+  （若有，是否回滚了）、它究竟改了什么、代价如何；
+- 它为什么走了那条路——依据哪个计划、带着什么意图、这次编辑背后是谁的手。
+
+> 在我们自己的语料上——20 多个项目里五个智能体的 1600 多次会话——我们正是这样
+> 找到了 312 条危险命令（`rm -rf`、`curl|sh`、`git push --force`）：其中两条智能体
+> 自己发现并回滚了；另外 310 条悄无声息地跑掉了——`git` 不会让你看见它们。
+
+`git` 展示的是**什么**进入了代码；`ai-r` 展示的是你能否信任这个智能体**如何**
+走到那里。只读：不做任何 LLM 调用，也不发出任何对外网络请求。
 
 ## 快速示例——一个智能体询问历史
 
@@ -74,9 +81,9 @@ OpenCode 用 SQLite，Antigravity 用 “brain” 目录，Pi 用按项目划分
 
 - **用一双全新的眼睛审计会话。** 一个上下文为空的全新智能体从三个维度冷静地
   核查过往会话：承诺和要求是否达成；决策是否稳妥、判断是否得当；问题被探究得
-  有多深——智能体遗漏了什么。在一次真实运行中，一周里以此方式复核了 271 次
-  对话，抓到了那些完成了任务、**但在规划上误导了你**的智能体——这是实时对话
-  会掩盖的，并会把你引向错误的决策。
+  有多深——智能体遗漏了什么。在一次真实运行中，以此方式复核过往对话，抓到了
+  那些完成了任务、**但在规划上误导了你**的智能体——这是实时对话会掩盖的，
+  并会把你引向错误的决策。
 - **在耗尽的上下文之后继续——而不丢失细节。** `/compact` 抹掉了具体细节。
   取而代之，开一个全新会话：它读取上一次会话的**日志**，并从其结论处继续，
   不必在已经理清的东西上重新烧掉上下文。原始会话保持完好——供审计和搜索。
@@ -283,7 +290,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_r
 ```
 
-- 1100+ 个测试，CI 要求 ≥85% 覆盖率
+- 1300+ 个测试，CI 要求 ≥85% 覆盖率
 - Conventional Commits（`feat:`、`fix:`、`docs:`……）
 - 加入新智能体时，参见 [CONTRIBUTING.md](./CONTRIBUTING.md) 和
   [docs/parsers.md](./docs/parsers.md)
