@@ -48,7 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted parameters) before the tool runs, generalizing the `kind` fail-loud
   tombstone to the whole surface. Found by dogfooding: ai-r read its own dev
   history (`find_tool_calls tool_name_pattern="mcp__ai-r__"`) to see which
-  parameters callers actually passed.
+  parameters callers actually passed. The guard now also accepts any
+  `Mapping`-shaped arguments (not only plain `dict`) and carries a
+  regression test for the observed `find_tool_calls(session=…)` incident
+  (an older installed build scanned the whole corpus silently).
 
 - **Session outcome: harness dumps no longer flip the verdict.** The
   non-human user-turn filter was prefix-only (`<`, `[`, `Caveat:`), so a

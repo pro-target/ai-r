@@ -54,6 +54,33 @@ def test_call_tool_rejects_phantom_list_sessions_since() -> None:
     assert "since" in result["message"]
 
 
+def test_call_tool_rejects_phantom_find_tool_calls_session() -> None:
+    """The observed incident: ``find_tool_calls(session=…)`` — a parameter
+    the tool does not declare — silently scanned the whole corpus on an
+    older installed build.  The guard must reject it before any data read.
+    """
+    result = asyncio.run(
+        mcp.call_tool("find_tool_calls", {"tool_name": "Bash", "session": "abc"})
+    )
+    assert isinstance(result, dict)
+    assert result["error"] == "invalid_argument"
+    assert "session" in result["message"]
+    assert "find_tool_calls accepts:" in result["message"]
+
+
+def test_call_tool_checks_mapping_shaped_arguments() -> None:
+    """A ``Mapping`` that is not a plain ``dict`` must not slip past the
+    unknown-argument guard into pydantic's silent key drop."""
+    from types import MappingProxyType
+
+    result = asyncio.run(
+        mcp.call_tool("plan", MappingProxyType({"session": "abc", "limit": 1}))
+    )
+    assert isinstance(result, dict)
+    assert result["error"] == "invalid_argument"
+    assert "limit" in result["message"]
+
+
 def test_call_tool_allows_declared_args_through() -> None:
     """A fully-declared call is NOT short-circuited — it reaches the tool.
 

@@ -272,7 +272,12 @@ class _StrictArgsFastMCP(FastMCP):
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
         tool = self._tool_manager.get_tool(name)
-        if tool is not None and isinstance(arguments, dict):
+        # ``Mapping`` (not bare ``dict``): any mapping-shaped arguments the
+        # transport hands over get the unknown-key check — a non-dict mapping
+        # must not slide past the guard into pydantic's silent key drop.  The
+        # remaining fall-throughs are fail-LOUD in the base class already: an
+        # unknown tool name raises, non-mapping arguments fail validation.
+        if tool is not None and isinstance(arguments, Mapping):
             unknown = _unknown_tool_args(tool.parameters, arguments)
             if unknown:
                 allowed = sorted((tool.parameters or {}).get("properties", {}))
