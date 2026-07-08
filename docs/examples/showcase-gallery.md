@@ -161,6 +161,44 @@ not the git outcome (manual edits/merges outside the session are invisible);
 (2) shell-redirect writes (`tee`/`sed -i`/`cp`) are not detected. `diff` is the
 primitive; `session_diff` is the preset on top of it.
 
+## 11. Which model actually did the work — `aggregate(group_by="model")`
+
+"I fanned work out to subagents — did the pricey model quietly end up on the
+grunt work?" The model behind each event is a *dimension over* the existing
+taxonomy, not a second classifier. A one-day slice of a single project:
+
+```
+aggregate(group_by="model") → opus-4-8 ×154 · sonnet-5 ×121 · haiku-4-5 ×31
+  opus-4-8  — top-level orchestrators
+  sonnet-5  — audit subagents (session forensics)
+  haiku-4-5 — read-only scouts
+```
+
+Tiers landed by task weight: Opus held orchestration, Sonnet carried the audit
+forensics, Haiku ran the cheap read-only recon — visible in one call, not
+assumed. `query(model="claude-haiku-4-5-…", tool_kind="bash")` shows what the
+cheap tier was trusted to run; `detect_current` returns the live session's model
+for a self-check. Where a format records no model (Antigravity) — an honest
+`null`, never fabricated.
+
+## 12. Where a week of work and tokens went, by project — `session_stats(with_tokens)`
+
+"Across every project, where did the last few days of agent time and tokens
+land?" One rollup, no per-session digging:
+
+```
+session_stats(group_by="dir", since="…", with_tokens=true)
+→ /dev/ai-r 106 sessions · 745 edits · 466M tokens
+  /.agents   28 sessions · 185 edits · 126M tokens
+  … 171 sessions · 1055 edits · 707M tokens total
+```
+
+Tokens fold in at request time — exact where the agent recorded its own usage,
+an honest estimate where it didn't, never faked. At a glance one project ate
+two-thirds of the whole token budget — you'd never eyeball that across scattered
+logs. `session_stats` is a preset over `aggregate(rank_by=stats)`; `group_by`
+takes `agent`/`dir`/`date`/`kind`.
+
 ---
 
 **Coverage:** 15 verbs — `find_tool_calls` · `incidents` · `network` ·
