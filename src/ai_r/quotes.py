@@ -214,7 +214,7 @@ def quotes(
 
     # --- Step 1: candidates (user turns) + sources (assistant turns) ------
     scanned_sessions: dict[str, Any] = {}
-    common = dict(
+    common: dict[str, Any] = dict(
         agent=agent, session=session, since=since, until=until, limit=0,
         noise=noise, project_dir=project_dir, redact=False,
     )
