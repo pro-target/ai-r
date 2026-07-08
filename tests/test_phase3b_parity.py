@@ -162,7 +162,15 @@ def test_session_diff_equals_diff_verb_hermetic(tmp_path: Path) -> None:
 
 
 def _session_rows(agent: str = "claude") -> List[dict[str, Any]]:
-    edits = find_file_edits(path="/", agent=agent, limit=0)
+    # Mirror production ``session_stats``: count on RAW, UNCAPPED records.
+    # Without redact=False/size_caps=False this helper silently diverges on a
+    # large real vault — the ~4 MB byte budget drops records and redaction
+    # merges distinct intents — producing a FALSE parity failure.  Production
+    # ``session_stats`` scans with exactly these flags so a count never loses a
+    # record; the parity reconstruction must feed ``aggregate`` the same rows.
+    edits = find_file_edits(
+        path="/", agent=agent, limit=0, redact=False, size_caps=False
+    )
     by: dict[str, dict[str, Any]] = {}
     for r in edits["records"]:
         u = r.get("session_uuid")
