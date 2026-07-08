@@ -162,7 +162,14 @@ def test_session_diff_equals_diff_verb_hermetic(tmp_path: Path) -> None:
 
 
 def _session_rows(agent: str = "claude") -> List[dict[str, Any]]:
-    edits = find_file_edits(path="/", agent=agent, limit=0)
+    # Mirror ``session_stats``'s INTERNAL enrichment call byte-for-byte:
+    # ``redact=False`` (a masked secret could merge two distinct raw intents,
+    # drifting the distinct-intent count) and ``size_caps=False`` (the 4 MB
+    # byte budget drops records + the intent cap truncates them on a big real
+    # vault, undercounting edits/intents — the observed host-parity failure:
+    # legacy 4210/623 vs a capped 1295/204).  A preset is a thin chain over the
+    # base method with the SAME arguments, so the reconstruction must pass them.
+    edits = find_file_edits(path="/", agent=agent, limit=0, redact=False, size_caps=False)
     by: dict[str, dict[str, Any]] = {}
     for r in edits["records"]:
         u = r.get("session_uuid")
