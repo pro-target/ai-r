@@ -68,6 +68,7 @@ from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # n
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.incidents import incidents as _incidents_core  # noqa: E402
 from ai_r.network import network as _network_core  # noqa: E402
+from ai_r.attention import attention as _attention_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
 from ai_r.session_stats import (  # noqa: E402
     TOKEN_SCAN_LIMIT as _SESSION_STATS_TOKEN_SCAN_LIMIT,
@@ -1673,6 +1674,90 @@ def network(
             kind=kind,
             risk=risk,
             domain=domain,
+            limit=limit,
+            noise=noise,
+            project_dir=project_dir,
+            redact=redact,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def attention(
+    agent: Optional[str] = None,
+    session: Optional[Union[str, List[str]]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    gate: Optional[str] = None,
+    severity: str = "flagged",
+    limit: int = 50,
+    noise: str = "include",
+    project_dir: Optional[str] = None,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Rushed-approval pacing audit — the *attention* preset.
+
+    One call answers "did the user approve a decision gate faster than they
+    could have read it?".  A preset over the existing core, not a second
+    engine: ONE ``query`` scan (``type="tool_call"``) filtered to the
+    interactive gate tools — a plan presented for approval (Claude
+    ``ExitPlanMode``) or a structured question (``AskUserQuestion``) —
+    supplies the candidates; the user's answer is located at the *message*
+    level (a ``tool_result`` correlated by ``tool_use_id`` — NOT a
+    ``user_turn`` event, so the event stream alone cannot time it); the gap
+    is ``answer.ts − gate.ts`` and the severity is a pure arithmetic verdict
+    against a reading-speed model (``content_chars / gap_sec`` vs an average
+    human rate).  Zero LLM, zero guessing: no answer found → no signal;
+    unmeasurable content → the absolute floor only.
+
+    Only plan + question gates participate — an edit/delete "approval" is not
+    a distinct human-timed event (auto-approved tools land at machine speed,
+    indistinguishable from a genuine click), so timing it would flag every
+    auto-approved write; those two gates carry a real human-decision
+    timestamp.
+
+    Filters (all parameters): ``agent``, ``session`` (uuid or list of
+    uuids), ``since``/``until`` (ISO bounds on the gate ts), ``gate``
+    (``plan``/``question`` — unknown values fail loud), ``severity``
+    (``flagged`` default = red+amber | ``red`` | ``all``), ``noise`` and
+    ``project_dir`` (session-level, same semantics as ``query``).
+
+    Each record carries the query event ``id`` (walk its context via
+    ``query(relative_to=...)`` / ``read_session``), the ``gate`` kind + raw
+    ``tool``, ``content_chars`` (reviewed length; ``null`` = unmeasured →
+    floor-only), ``gap_sec``, ``required_cps``/``ratio`` (``null`` when
+    content is unmeasured), ``severity`` (``red``/``amber``/``null``) and a
+    coarse ``reaction`` (``kind`` + capped ``preview``).
+    ``count``/``red_count``/``amber_count``/``by_gate`` always reflect the
+    FULL matched set; ``limit`` (default 50, ``0`` = no cap) bounds only the
+    emitted records (``truncated``).  The effective thresholds are echoed in
+    ``params`` for report transparency.
+
+    Caveats (documented, not hidden): the gate ts is the message-completion
+    instant, so a user who read while the answer streamed — or who authored
+    the very plan they approve — can look faster than they were (the high
+    ratio + floor keep this off ordinary careful approvals, but a genuinely
+    read fast approval can still surface — a signal to review, not a proof);
+    being AFK inflates the gap (bias toward under-flagging, never a
+    fabricated one); a negative gap (clock skew) is dropped, never coerced.
+    ``redact=true`` (default) masks secrets only in the emitted
+    ``session_title``/``reaction.preview`` (``redactions`` type→count dict
+    when anything was masked).  When ``count == 0`` the response carries
+    ``diagnostics`` so an empty result is explainable.
+
+    Thin wrapper over :func:`ai_r.attention.attention` that translates the
+    core ``ValueError`` contract into the ``{"error": "invalid_argument",
+    "message": str(exc)}`` shape the MCP client expects.
+    """
+    try:
+        return _attention_core(
+            agent=agent,
+            session=session,
+            since=since,
+            until=until,
+            gate=gate,
+            severity=severity,
             limit=limit,
             noise=noise,
             project_dir=project_dir,
