@@ -34,15 +34,21 @@ previous agent settled on, drafts discarded:
 
 ```
 Show me the plan from the last session — final only, no intermediate revisions.
-→ ai-r: plan(session=…, kind="final")  →  get_body(id, shallow=true)
-        returns the final task + a list of dropped_drafts
+→ plan(session=…, kind="final")  →  get_body(id, shallow=true)
+
+  plan:            "Migrate auth to JWT: 1) extract the check…"
+  dropped_drafts:  2   ← two drafts the agent threw away along the way
+  session:         a3f… (claude)
 ```
 
 Fast edit attribution — one terminal command, across every agent at once:
 
 ```bash
-# who edited this file, and when — cross-agent, optionally time-boxed
 ai-r find-file-edits auth.py --since 2026-06-01
+```
+```
+2026-06-03  codex   auth.py  "add a refresh token"                 edit
+2026-06-07  claude  auth.py  "extract the check into middleware"   edit
 ```
 
 ## What hurts
@@ -64,25 +70,54 @@ per-project JSONL. Five formats, five layouts — together they don't reconcile.
 script, or yourself — at any session, no matter which tool recorded it. One
 query shape per agent; format differences are normalized inside the parsers.
 
+Even with a **single** agent it works: you audit your own Claude history (or
+Codex…). The five formats are so your history doesn't break when you switch
+tools — not a requirement to have all five.
+
 ## Key features
 
-- **"Why?", not just "What?".** Extracts the plan, intent, and authorship behind
-  an edit — not just the diff text. `git diff` tells you *what* changed; `ai-r`
-  tells you under which plan and on whose request.
-- **The final plan, not the drafts.** `ai-r` pulls the plan the agent *settled
-  on*, and separately shows what it threw away along the way (`dropped_drafts`)
-  — across Claude / Codex / Antigravity, where the plan signals differ.
-- **Cross-agent attribution.** Any file edit or tool call → the agent that made
-  it, plus the request that triggered it (`find-file-edits` / `find-tool-calls`).
-- **Small answer, body on demand.** Records carry a reference to the content
-  (hash + length); the full edit text is fetched separately — the response
-  doesn't balloon.
-- **Works over MCP (15 tools).** An agent calls `ai-r` directly in plain
-  language; the same data is available from the terminal (CLI) and from code
-  (Python SDK).
-- **A reader, not a guard.** Extracts entities; you (or your tool) build the
-  knowledge graph and the memory. Read-only: it never runs or writes to an
-  agent's history.
+Each item is a trust question from the first screen and the verb that answers it:
+
+- **Did it keep its word — plan vs. reality.** Pulls the final plan (separate
+  from the discarded `dropped_drafts`) and checks it against what actually made
+  it into the edits — catching "did X per plan Y" where Y is no longer that
+  plan. (`plan`, `session_diff`)
+- **Did it run anything dangerous — and roll it back.** Flags risky commands
+  (`rm -rf`, `curl|sh`, `git push --force`) and, from the turns that follow,
+  sees whether the agent caught it and rolled back — or it passed silently.
+  (`incidents`, `query tool_kind=bash`)
+- **What it actually changed, and by whose hand.** Any edit or call → the agent
+  that made it, plus the request that triggered it; including edits made through
+  the shell (`> file` under codex) that a plain diff misses.
+  (`find-file-edits`, `find-tool-calls`)
+- **What it cost.** Tokens and cost per session — exact where the format
+  recorded the usage, an honest estimate where it didn't, never invented.
+  (`session_stats with_tokens`, `aggregate group_by=model`)
+- **Why it went that way.** The intent behind an edit (the request *before* it),
+  under which plan, on which model — "why", not just "what". (`query with_intent`)
+- **Small answer, body on demand.** A record carries a reference to the content
+  (hash + length); the full text comes as a separate request. A reader, not a
+  guard: read-only, it runs nothing and writes nothing to an agent's history.
+
+## How ai-r knows
+
+Deterministically, with no second LLM guessing — and honest about the edges:
+
+- **dangerous command** — a pattern over the call string (`rm -rf`, `curl|sh`,
+  `git push --force`, …). Anything obfuscated (`exec(input())`) the pattern
+  won't catch — that's a declared boundary, not a silent miss.
+- **rollback** — marked "confirmed" ONLY when a regret/apology marker from the
+  agent sits nearby (within the window of following turns; the marker itself is a
+  bilingual ru/en pattern, not an LLM sentiment call). No marker → it stays an
+  unconfirmed candidate: `ai-r` **won't infer a silent rollback**, it honestly
+  says "not confirmed".
+- **lied about the plan** — `ai-r` doesn't decide for you. It lays the plan
+  entity next to the session's reconstructed edits (`session_diff`) — the
+  mismatch is visible to you or a reviewing agent. That's evidence assembly, not
+  a semantic verdict.
+
+Zero LLM calls, read-only — the numbers are reproducible and "confirmed" is
+never guessed.
 
 ## What you use it for
 
