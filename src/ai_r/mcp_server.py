@@ -645,6 +645,12 @@ def _project_messages(
         # datetime, so guard the ``None`` case explicitly.
         ts = getattr(m, "timestamp", None)
         entry["timestamp"] = _iso(ts) if ts is not None else None
+        # Model dimension: the producing model, only where the parser carried
+        # one (``Message.model``) — the key is absent without a signal, never
+        # a fabricated null (mirrors the event-layer inheritance).
+        model = getattr(m, "model", None)
+        if model is not None:
+            entry["model"] = model
         # Intent (Feature 1): for assistant messages that invoke a tool,
         # attach the previous user request that motivated the call.  Reuse
         # ``previous_user_intent`` over the *full* message list so the index

@@ -610,6 +610,22 @@ def test_mcp_session_summary_models_empty_without_signal(
     assert by_uuid["test-claude-1"]["models"] == []
 
 
+def test_mcp_read_session_messages_carry_model(claude_two_models: str) -> None:
+    """Each projected message names its producing model — absent, never
+    null, without a signal (user turns, ``<synthetic>`` stubs)."""
+    from ai_r.mcp_server import read_session
+
+    read = read_session(claude_two_models, agent="claude")
+    by_content = {m["content"]: m for m in read["messages"]}
+    assert by_content["alpha answer"]["model"] == "model-alpha-1"
+    assert by_content["beta answer"]["model"] == "model-beta-2"
+    # ``<synthetic>`` stub and the model-less record: key absent, not null.
+    assert "model" not in by_content["interrupted"]
+    assert "model" not in by_content["modelless"]
+    # User messages never carry a model.
+    assert "model" not in by_content["first ask"]
+
+
 def test_mcp_query_model_facet(claude_model_events: str) -> None:
     from ai_r.mcp_server import query as mcp_query
 

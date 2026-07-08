@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty string fails loud) and its events carry a top-level `model`
   field when known; `aggregate` accepts `group_by="model"` with an
   honest `"(unknown)"` bucket for no-signal rows; `list_sessions` /
-  `read_session` / `search_sessions` summaries carry `models`;
+  `read_session` / `search_sessions` summaries carry `models`, and
+  `read_session` message entries carry a per-message `model` where the
+  parser recorded one (key absent — never null — for user turns,
+  `<synthetic>` stubs and no-signal formats);
   `detect_current` reports the detected transcript's last assistant
   model (`null` when unresolvable). Acceptance per the contribution
   gate: the hermetic pytest suite plus the new AGG-6 scenario executed
