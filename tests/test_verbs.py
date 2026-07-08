@@ -44,8 +44,12 @@ def _session_rows(agent: str | None = None) -> List[dict[str, Any]]:
     Mirrors the enrichment ``session_stats`` computes (edit count + distinct
     intents from ``find_file_edits``, message_count from the inventory) but as
     a flat, per-session row stream — exactly what ``aggregate`` consumes.
+    ``size_caps=False`` mirrors the rollup exactly: ``session_stats`` counts
+    on raw, complete records (a byte-budget drop or a capped intent would
+    drift the edit/intent counts on a big vault — the observed host-parity
+    failure).
     """
-    edits = find_file_edits(path="/", agent=agent, limit=0)
+    edits = find_file_edits(path="/", agent=agent, limit=0, size_caps=False)
     edits_by_session: dict[str, dict[str, Any]] = {}
     for r in edits["records"]:
         uuid = r.get("session_uuid")
