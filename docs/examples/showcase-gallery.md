@@ -199,10 +199,60 @@ two-thirds of the whole token budget — you'd never eyeball that across scatter
 logs. `session_stats` is a preset over `aggregate(rank_by=stats)`; `group_by`
 takes `agent`/`dir`/`date`/`kind`.
 
+## 13. External sources the user handed the agent — `query(user_ref)` + `aggregate`
+
+"Which external pointers — files, links, images — did the user hand the agent
+alongside the text?" In a raw transcript an attachment is easy to miss: it isn't
+the message text but a separate block or a buried service tag. ai-r marks it as its
+own queryable signal:
+
+```
+query(user_ref="any", type="user_turn") → 230 turns across 169 sessions
+aggregate(group_by="user_ref_kinds") → url ×161 · ide_context ×48 · image ×19 · file ×8
+```
+
+A live example — a turn where the user handed the agent a link to an external page:
+
+```
+query(user_ref="url") → user_refs:[{
+   kind: url · target: https://github.com/…/blob/main/README.md · origin: text }]
+```
+
+The value isn't the count — it's that a pointer to an **external source** becomes
+visible and filterable. `kind` separates a deliberate attachment (`file`/`url`/`image`)
+from the weak `ide_context` signal — a file the editor slipped in, not the user.
+**Separation of duties:** ai-r marks the pointer — fetching the source and wrapping
+it in injection defenses (external data is untrusted) is the consumer's job. Cleanly:
+ai-r = the signal, the consumer = the check. As a side effect the dimension closed
+an OpenCode bug: a user-attached file used to count as an agent action (it fell into
+`tool_use`) — now it lands in `user_refs`, and intent/reaction read correctly.
+
+## 14. Model reasoning apart from the answer — `read_session(include_thinking)` + `has_thinking`
+
+"Read the conversation without the model's service reasoning — and surface the
+reasoning when you need it?" Reasoning is hidden by default; one flag brings it back:
+
+```
+read_session(uuid)                         → clean conversation, no thoughts
+read_session(uuid, include_thinking=true)  → + a thinking field (reasoning apart, not in the text)
+query(type="assistant_turn", has_thinking=true) → flags turns that have reasoning behind them
+```
+
+The value is the **separation**: model reasoning is a service streaming draft, not
+the conversation; by default it's in neither the output nor the search (clean audit,
+budget not inflated), and it's one flag away when needed. The subtlety that would
+otherwise leave the flag fetching nothing: reasoning often arrives as a **separate
+message with no answer text** (that's how model streaming works) — a naive read would
+lose it; ai-r stitches it onto the next answer itself, so the thoughts are actually
+visible for every agent that has them (Claude/Codex/OpenCode/Pi; Antigravity has no
+reasoning at all).
+
 ---
 
 **Coverage:** 15 verbs — `find_tool_calls` · `incidents` · `network` ·
 `read_session` · `plan` · `find_file_edits` · `aggregate` · `search_sessions` ·
 `list_sessions` · `session_diff` · `diff` · `query` · `get_body` ·
-`detect_current` · `session_stats`. Different tasks need different verbs; the gallery
-shows each on a real example.
+`detect_current` · `session_stats`. Plus dimensions over them: `model`,
+`user_ref` (what the user attached) and thinking (opt-in) — facets on
+`query`/`aggregate`/`read_session`, not separate verbs. Different tasks need different
+verbs; the gallery shows each on a real example.

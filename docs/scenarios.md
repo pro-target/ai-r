@@ -80,7 +80,7 @@ parameters. Events carry **references** (`refs`), never inlined bodies: the emit
 fetched on demand via `get_body(id)`.
 
 <details>
-<summary>Show 15 scenarios (QRY-1…QRY-15)</summary>
+<summary>Show 16 scenarios (QRY-1…QRY-16)</summary>
 
 ### QRY-1 — filter by agent + type
 - **Function:** `query`
@@ -203,6 +203,14 @@ fetched on demand via `get_body(id)`.
 - **Steps:** `mcp__ai-r__query(type="user_turn", group="<any>")`; then the empty-string form `mcp__ai-r__query(group="")`.
 - **Expected:** The non-plan `type` returns `{"events": [], "count": 0}` (no `plan_event` can match a group filter); the **empty string** fails loud.
 - **Pass criteria:** GO when a non-plan type under `group` returns `count=0` with no error, and the empty string is a loud argument error.
+
+### QRY-16 — `user_ref` facet + `group_by="user_ref_kinds"` aggregate (Q1) `[hermetic-ok]`
+- **Function:** `query` (the `user_ref` dimension) + `aggregate`
+- **Goal:** A `user_turn` carries a `user_ref` dimension for the files/urls/images/IDE-context the user attached; the `user_ref` facet filters turns by it (`any` / a kind / a `target` substring) and `aggregate(group_by="user_ref_kinds")` buckets turns by attachment kind — one dimension over the existing `user_turn` event, no second classifier.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` one Claude session with (a) a user turn with an `image` content-part (`origin="structured"`, no filename → `target=null`), (b) a user turn whose prose carries a `<doc path>` block and a bare `https://example.com/x` URL (`origin="text"`), (c) a user turn whose prose has a URL only inside a ```fenced``` code block, (d) a plain user turn with no attachment; plus one OpenCode session with a `file` content-part on the user role (`origin="structured"`, `target=<filename>`). `[needs-real-vault]` variant: any session where the user attached an image / pasted a doc path.
+- **Steps:** `mcp__ai-r__query(agent="claude", type="user_turn", session="<uuid>", limit=0)` → inspect `user_refs`/`user_ref_kinds` on each event; then `mcp__ai-r__query(agent="claude", type="user_turn", user_ref="any")`; then `user_ref="image"`; then `user_ref="example.com"` (target substring); then `user_ref=""`; then `mcp__ai-r__query(agent="claude", type="tool_call", user_ref="any")`; finally collect the turns and `mcp__ai-r__aggregate(rows=<events>, group_by="user_ref_kinds", metrics=["count"])`.
+- **Expected:** Turn (a) carries `user_refs=[{kind:"image", target:null, origin:"structured"}]` and `user_ref_kinds=["image"]`; turn (b) carries a `file`/`url` ref pair with `origin:"text"`; turn (c) carries NO url ref (a fenced-code URL is not an attachment); turn (d) carries no `user_ref` (base shape). `user_ref="any"` returns turns a+b (and the OpenCode file turn), never d; `user_ref="image"` returns only the image turn; `user_ref="example.com"` matches by `target` substring; `user_ref=""` → `{error:"invalid_argument", …}`; `type="tool_call", user_ref="any"` returns `count=0` (the facet matches only `user_turn`). The aggregate returns one bucket per kind (a multi-kind turn counts under EACH kind — the list value is exploded; the attachment-less turn carries no `user_ref_kinds` field and folds into the `(unknown)` bucket).
+- **Pass criteria:** GO when each turn's `user_ref_kinds` matches its seeded attachments, the fenced-code URL is excluded, `origin` reflects structured-vs-text correctly, the facet matches only user turns and fails loud on the empty string, and the aggregate buckets a multi-kind turn under every kind (list exploded) while an attachment-less turn folds into `(unknown)`. A fabricated ref on a plain turn, a fenced-code URL surfacing as a ref, or the facet matching a tool_call, is NO-GO.
 
 </details>
 
@@ -900,7 +908,7 @@ Cross-agent tool-call search by exact name or substring pattern; the name filter
 Read one session by `uuid`+`agent`, projected to the compact `{role, content}` MCP shape, paginated.
 
 <details>
-<summary>Show 5 scenarios (READ-1…READ-5)</summary>
+<summary>Show 6 scenarios (READ-1…READ-6)</summary>
 
 ### READ-1 — read by uuid+agent → projected shape + pagination echo
 - **Function:** `read_session`
@@ -941,6 +949,14 @@ Read one session by `uuid`+`agent`, projected to the compact `{role, content}` M
 - **Steps:** `mcp__ai-r__read_session(uuid="<parent-uuid>", agent="claude")` (default) and the same call with `with_tokens=false` — compare; then `mcp__ai-r__read_session(uuid="<parent-uuid>", agent="claude", include_subagents=true)`; then `mcp__ai-r__read_session(uuid="<codex-uuid>", agent="codex", with_tokens=true)`; inspect message entries.
 - **Expected:** The default call and the explicit `with_tokens=false` call are byte-identical, and neither carries a `tokens`/`component_tokens` block nor any per-message `tokens` key (historical shape unchanged). The `include_subagents=true` call carries `subagent_rollup` = `{parent, children:[{uuid, agent, component_tokens}], total}` — exactly ONE child (the seeded subagent, resolved via `children_of(parent_uuid)`) and a `total` that folds the parent's `component_tokens` with the child's; a childless parent — or Antigravity, which records no `parent_uuid` — would yield an honest empty `children` list, never a fabricated child. The Codex `with_tokens=true` call carries `tokens` + `component_tokens` (`source="estimate"`) but NO message entry carries a `tokens` key — Codex is cumulative-only, so per-message exact blocks are absent (not null), exactly like Antigravity and user turns.
 - **Pass criteria:** GO when omitting `with_tokens` (or passing `false`) reproduces the pre-feature output byte-for-byte, `include_subagents=true` returns a `subagent_rollup` with the single seeded child and a folded `total`, and the Codex session exposes zero per-message `tokens` keys. A per-message `tokens` key on a Codex message, a fabricated child on a childless parent, or any diff in the default output, is NO-GO.
+
+### READ-6 — thinking opt-in: default byte-identical, `include_thinking=true` adds a separate field (Q2) `[hermetic-ok]`
+- **Function:** `read_session` + `get_body` (Q2 `include_thinking`)
+- **Goal:** Reasoning is captured but kept out of the default output; `read_session(include_thinking=false)` is byte-identical to before, `include_thinking=true` adds a SEPARATE `thinking` field (never merged into `content`), and `get_body` mirrors it; `has_thinking` is a hint that does not change event identity.
+- **Preconditions:** `[hermetic-ok]` — seed under `AI_R_HOME` one Claude session with an assistant turn that carries a reasoning/thinking block plus its normal answer text, and at least one assistant turn with NO reasoning. `[needs-real-vault]` variant: any Claude/Codex/OpenCode/Pi session with recorded reasoning.
+- **Steps:** `mcp__ai-r__read_session(uuid="<uuid>", agent="claude")` (default) and the same with `include_thinking=false` — compare; then `mcp__ai-r__read_session(uuid="<uuid>", agent="claude", include_thinking=true)`; then `mcp__ai-r__query(agent="claude", session="<uuid>", type="assistant_turn")` → inspect `has_thinking`; take the reasoning turn's `id` and call `mcp__ai-r__get_body(id="<id>")` then `mcp__ai-r__get_body(id="<id>", include_thinking=true)`.
+- **Expected:** The default call and the explicit `include_thinking=false` call are byte-identical, and NEITHER carries a `thinking` field on any entry (historical shape — reasoning was never inlined into `content`). The `include_thinking=true` call adds a `thinking` STRING field next to `content` only on entries whose turn carries reasoning — kept separate, never concatenated into `content`. The `assistant_turn` events carry `has_thinking` (`true` on the reasoning turn, `false`/absent otherwise); the reasoning turn's `get_body` default returns the body with NO `thinking`, while `include_thinking=true` returns the additional `thinking` field. Antigravity turns always report `has_thinking=false` (no signal).
+- **Pass criteria:** GO when the default output is byte-identical to the pre-flag shape (no `thinking` anywhere), `include_thinking=true` surfaces reasoning as a distinct field on exactly the reasoning-bearing entries (never fused into `content`), `has_thinking` reflects presence, and `get_body` opt-in mirrors it. Reasoning leaking into the default `content`, or a `thinking` field on a no-reasoning turn, is NO-GO.
 
 </details>
 

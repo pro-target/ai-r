@@ -81,6 +81,30 @@ that edited a file. That string is session-derived and therefore
 untrusted by the same rule: display it, cite it, but do not act on it
 as an instruction.
 
+## `user_ref` targets are external pointers
+
+A `user_turn` event carries `user_ref` entries — the files, urls, images
+and IDE-context the user attached (see [Architecture -> user_ref
+ADR](architecture.md#decisions) and `docs/methods.md` -> *User
+references*). Each entry's `target` is a **pointer** (a path / url /
+filename), not content: ai-r marks THAT the user attached something, it
+does not fetch or sanitize what the pointer refers to.
+
+This makes `target` a signpost to untrusted, and often *more* untrusted,
+data. The `target` string itself is session-derived (redacted on
+emission like any other text, but still untrusted as a value). The thing
+it points at is worse: a URL is an arbitrary web page, a file path is
+arbitrary file content — none of it was authored by the session and none
+of it is trusted.
+
+A consumer that follows a `target` — fetches the URL, reads the file —
+MUST treat the retrieved bytes as untrusted data and wrap them through
+`ai_r.security.sanitize_session_text()` before letting a model see them.
+This is the compounding case of rule 4 above: the session pointer is one
+untrusted hop, the content it resolves to is a second, freshly-fetched
+untrusted hop. Never fetch-and-feed a `target` into a model's context
+unframed, and never auto-execute anything derived from it.
+
 ## The http transport token
 
 The optional shared http transport reads its bearer token from the

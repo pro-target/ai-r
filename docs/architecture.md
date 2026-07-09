@@ -128,6 +128,7 @@ Three cross-cutting modules sit beside the core:
 | Module | Responsibility |
 |---|---|
 | `redact.py` | Secret redaction on every emitting surface (title, message content, intent, qa) as `[REDACTED_<TYPE>]`, with a `redactions` type→count report. On by default. |
+| `user_refs.py` | User-attachment classification (see ADR below): the `USER_REF_KIND` dictionary + the extractors that fold a `user_turn`'s structured/text references into `{kind, target, origin}` for the `user_ref` facet + `user_ref_kinds` aggregate. Marks the pointer only — never fetches or sanitizes the referenced content. |
 | `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. `rollup_component_tokens` is the SSOT fold for a parent + its spawned children — it drops the parent's double-counted `task` bucket when children are present and reports `total: None` (never a fabricated `0`) when nothing is measurable; both rollup callers (`read_session(include_subagents)` and the CLI) share it. |
 | `semantic.py` | Optional relevance re-rank (see ADR below): re-ranks the BM25 top-50 with a local ONNX embedding model. Strictly opt-in, fail-soft to BM25. |
 | `serve.py` | MCP transport selection (see ADR below): `stdio` by default, opt-in shared `streamable-http` server with idle self-exit and systemd socket-activation support. Pure predicates (`resolve_transport`, `should_exit_idle`, `systemd_listen_sockets`) + a thin uvicorn runner. |
@@ -337,3 +338,84 @@ records adding an optional shared transport as the fix.
 - **Boundaries.** Deterministic, no data read on rejection. Pure helper
   `_unknown_tool_args` is unit-tested; `tests/test_mcp_strict_args.py` covers
   the phantom cases and declared-argument passthrough.
+
+### ADR: `user_ref` — a user-attachment dimension over `user_turn` (Q1)
+
+"What the user attached to a turn" — files, urls, images, IDE-injected context —
+is a new dimension recorded on the existing `user_turn` event, not a new event
+type or a second classifier. This ADR records the addition and, critically, the
+reader/consumer boundary it deliberately does NOT cross.
+
+- **What changed.** Each `user_turn` event gains a `user_ref` entry in `refs`
+  per attached thing: `{kind, target, origin}`. `kind` ∈
+  `file|url|image|attachment|ide_context` (`USER_REF_KIND` in
+  `ai_r/user_refs.py`); `origin ∈ structured|text` distinguishes a real
+  content-part (`structured` — the user definitely attached it) from a
+  prose-mined reference (`text` — a `<doc path>`/`<ide_*>` block, a bare URL, an
+  `@mention`). The surface reuses the existing verbs — a `user_ref` facet on
+  `query` (`any` / a kind / a `target` substring), plus hoisted `user_refs` /
+  `user_ref_kinds` row fields so `aggregate(group_by="user_ref_kinds")` works
+  directly. No new event type, verb or preset.
+- **Why.** An audit for "what context did the human actually bring in" was
+  previously invisible — attachments were flattened into prose or (OpenCode)
+  miscounted as a tool_use. The dimension surfaces intent-of-input on the same
+  taxonomy the rest of the reader speaks.
+- **Per-agent honesty.** Structured signals only where the format records them:
+  Claude `image` parts + text-mined refs; OpenCode a `file` content-part on the
+  user role (a bug-fix — it used to be classified as `tool_use`); Codex
+  `input_image`; Antigravity/Pi carry no structured attachment signal, so they
+  contribute only the text path (honestly empty when the prose carries none,
+  never fabricated). `ide_context` is tagged distinctly because an
+  `<ide_opened_file>` / `<ide_selection>` injection is weaker evidence than a
+  deliberate attachment. A URL inside a fenced code block is not extracted.
+- **Boundary — mark, do not fetch or sanitize (the load-bearing decision).**
+  `target` is a POINTER only. ai-r records THAT a reference exists; it never
+  follows it, never reads the referenced file/url, never sanitizes its content.
+  Following the pointer is the consumer's job — and a consumer that does so MUST
+  wrap the fetched bytes through `ai_r.security.sanitize_session_text()`, because
+  external content pulled from a `target` is the maximum-injection tier and
+  compounds the untrusted-source chain (see [Security](security.md)). The
+  `target` string itself is redacted on emission (F2.1 `redact_text`) like any
+  other text/intent — that is the only transformation ai-r applies to it.
+- **Invariants.** Additive to `refs`; the `user_turn` event `sha256`/identity is
+  unaffected; a turn with no attachment keeps the base shape (no empty
+  `user_ref`). SSOT `ai_r.user_refs`.
+
+### ADR: thinking is opt-in, not silently in the searchable body (Q2)
+
+Earlier, captured model reasoning (`Message.thinking`) was folded into the
+body-search haystack automatically — "reasoning is now part of the searched
+body". This ADR records the reversal to **opt-in** and why.
+
+- **What changed.** Thinking is no longer in the default search or output.
+  `search_sessions` / `query` (text haystack) / `read_session` / `get_body` take
+  `include_thinking` (default `false`); `true` restores the old
+  reasoning-in-search behaviour. A new `assistant_turn.has_thinking` boolean
+  hint + a `query(has_thinking=…)` facet let a consumer find turns that HAVE
+  reasoning and pull it on demand.
+- **Why.** Two reasons. (1) **Separation of drafts from conversation** — an audit
+  for what was actually said/done should not be polluted by a model's internal
+  scratchpad; reasoning is a different kind of text and now stays a distinct
+  field, opt-in. (2) **Budget** — the reasoning of a large session can dwarf its
+  prose, so folding it into every default search inflated the haystack an auditor
+  pays for. Reachable-on-request is the right default for a signal that is
+  usually noise to the "what happened" question.
+- **Boundaries.** `include_thinking=true` on `read_session`/`get_body` adds a
+  SEPARATE `thinking` field alongside `content`/body — reasoning is never merged
+  into the conversation text. Some agents stream reasoning as a separate, text-less
+  record (common in Claude, the norm in Codex); rather than lose the per-turn hint
+  there, the parser folds an orphan reasoning record's `thinking` onto the adjacent
+  answer message (`fold_orphan_thinking` in `ai_r.parsers._common`), preserving
+  `message_index`, so `has_thinking` / `read_session` / `get_body` surface reasoning
+  uniformly for Claude / Codex / OpenCode / Pi. The one residual gap is a reasoning
+  record with no following answer text before the next user turn (a rare tail),
+  which stays capture- and search-only. Antigravity records no reasoning signal, so
+  `has_thinking` is always `False`. `component_tokens.thinking` accounts for the
+  volume regardless.
+- **Fail-soft / invariants.** `has_thinking` is a hint, explicitly **not** part
+  of the event `sha256` (adding it changes no identity), and the query row emits
+  it only when `True`. The default (`include_thinking=false`) output is
+  **byte-identical** to before the flag existed — `read_session` never inlined
+  thinking into `content`, so the default projection is unchanged; only the
+  opt-in path adds the extra field. SSOT `Message.thinking` + the
+  `include_thinking` plumbing in `ai_r.events` / `ai_r.mcp_server`.
