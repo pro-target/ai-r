@@ -97,8 +97,9 @@ from ._opencode_db import (
     _iter_dbs,
     _pooled_conn,  # noqa: F401  re-export
 )
-from ._common import _qa_from_structured_answers
+from ._common import _qa_from_structured_answers, fold_orphan_thinking
 from .models import AgentName, Message, Session
+from ..user_refs import make_user_ref
 
 
 _DEFAULT_DB = "~/.local/share/opencode/opencode.db"
@@ -660,6 +661,26 @@ def _part_metadata_input(part: dict) -> str:
     return _stringify(metadata)
 
 
+def _user_ref_from_file_part(part: dict) -> dict:
+    """Map a user-attached ``file`` part to a structured ``user_ref``.
+
+    OpenCode records a user attachment as a ``file`` part carrying
+    ``mime``/``filename`` alongside an inline ``url`` data-URL.  We reuse
+    :func:`_compact_part_metadata` (never parse the data-URL by hand) to
+    read the redacted metadata: an ``image/*`` mime → ``kind="image"``,
+    otherwise ``kind="file"``; ``target`` is the ``filename`` when present,
+    else ``None`` (honest absence).  ``origin`` is always ``"structured"``
+    — the part is a distinct block, so the user definitely attached it.
+    """
+    meta = _compact_part_metadata(part)
+    meta = meta if isinstance(meta, dict) else {}
+    mime = meta.get("mime")
+    filename = meta.get("filename")
+    kind = "image" if isinstance(mime, str) and mime.startswith("image/") else "file"
+    target = filename if isinstance(filename, str) and filename else None
+    return make_user_ref(kind, target, "structured")
+
+
 def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
     """Map ``message.data.role`` → our role, or ``None`` if unusable.
 
@@ -770,6 +791,7 @@ def _build_message(
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     qa: List[dict] = []
+    user_refs: List[dict] = []
 
     # Fallback: legacy DBs that stored content inside message.data.
     if message_data is not None and not parts:
@@ -832,7 +854,15 @@ def _build_message(
                     metadata.get("answers") if isinstance(metadata, dict) else None
                 )
                 qa.extend(_qa_from_structured_answers(questions, answers))
+        elif ptype == "file" and role == "user":
+            # A file the USER attached (image/document) — NOT an agent
+            # action.  It previously landed in ``tool_use`` unconditionally,
+            # making a user upload look like a tool the agent ran; route it
+            # to ``user_refs`` instead so intent/reaction reads it correctly.
+            user_refs.append(_user_ref_from_file_part(part))
         elif ptype in ("file", "patch"):
+            # ``patch`` (an applied edit) and any ``file`` on an assistant
+            # row are genuine agent artifacts → keep them as ``tool_use``.
             tool_use.append(
                 {"name": ptype, "input": _part_metadata_input(part), "timestamp": ts_for_entry}
             )
@@ -863,6 +893,7 @@ def _build_message(
             if role == "assistant" and message_data is not None
             else None
         ),
+        user_refs=tuple(user_refs),
     )
 
 
@@ -963,7 +994,9 @@ def read_messages(
         ValueError: ``uuid`` is malformed.
     """
     session = read_session(uuid, base_dir, override)
-    return _extract_messages_from_db(session.path, session.uuid)
+    return fold_orphan_thinking(
+        _extract_messages_from_db(session.path, session.uuid)
+    )
 
 
 def read_token_usage(

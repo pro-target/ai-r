@@ -186,7 +186,7 @@ _HAYSTACK_CACHE_CHARS_MAX = _resolve_haystack_cache_chars_max()
 # transiently-unreadable file does not pin stale content forever.
 _HAYSTACK_CACHE_TTL_SEC = 300
 
-_haystack_cache: "OrderedDict[tuple[str, str, float], tuple[str, bool]]" = OrderedDict()
+_haystack_cache: "OrderedDict[tuple[str, str, float, bool], tuple[str, bool]]" = OrderedDict()
 # Running sum of ``len(haystack)`` across cached entries, kept in lockstep with
 # ``_haystack_cache`` so the size-cap eviction never has to re-scan every value.
 _haystack_cache_chars = 0
@@ -616,6 +616,8 @@ def _message_token_blocks(
 def _project_messages(
     messages: Sequence[Any],
     hard_cap: int = 0,
+    *,
+    include_thinking: bool = False,
 ) -> List[dict[str, Any]]:
     """Project parser ``Message`` objects to ``{role, content}`` dicts.
 
@@ -623,6 +625,12 @@ def _project_messages(
     historical MCP output shape; ``tool`` messages are dropped.  When
     ``hard_cap`` is positive, projection stops after that many surfaced
     messages.
+
+    ``include_thinking`` (default OFF): when set, a message that carries model
+    reasoning (``m.thinking``) gets a separate ``thinking`` string field on its
+    projected entry — kept OUT of ``content`` so existing text extraction is
+    unchanged.  Default OFF leaves the entry byte-identical to the historical
+    ``{role, content, timestamp, ...}`` shape (no ``thinking`` key).
     """
     out: List[dict[str, Any]] = []
     for idx, m in enumerate(messages):
@@ -642,6 +650,14 @@ def _project_messages(
         # shape stays {user|assistant}.
         role = m.role if m.role in ("user", "assistant") else "user"
         entry: dict[str, Any] = {"role": role, "content": content}
+        # Reasoning (opt-in): surface model thinking as a SEPARATE field so it
+        # never contaminates ``content``.  Absent by default (byte-identical
+        # historical shape); present only when requested AND the message
+        # actually carried reasoning (fail-soft: no signal → no key).
+        if include_thinking:
+            thinking = getattr(m, "thinking", "")
+            if isinstance(thinking, str) and thinking:
+                entry["thinking"] = thinking
         # Timeline (Feature 2): surface the message timestamp in ISO form,
         # ``None`` when the parser carried no timestamp.  ``_iso`` requires a
         # datetime, so guard the ``None`` case explicitly.
@@ -749,13 +765,20 @@ def _session_source_mtime(session: Session) -> Optional[float]:
 def _get_cached_haystack(
     session: Session,
     agent_name: str,
+    *,
+    include_thinking: bool = False,
 ) -> tuple[str, bool]:
     """Return ``(haystack, body_truncated)`` for ``session``, cached by mtime.
 
-    Cache key: ``(agent_name, session.uuid, mtime)`` where ``mtime`` is the
-    mtime of ``session.path`` (JSONL file or, for OpenCode, the shared SQLite
-    DB).  When the source mtime changes the entry is rebuilt, so a HIT
-    produces byte-identical matching behavior to a MISS.
+    Cache key: ``(agent_name, session.uuid, mtime, include_thinking)`` where
+    ``mtime`` is the mtime of ``session.path`` (JSONL file or, for OpenCode,
+    the shared SQLite DB).  When the source mtime changes the entry is
+    rebuilt, so a HIT produces byte-identical matching behavior to a MISS.
+
+    ``include_thinking`` is part of the key so the two build modes never
+    poison each other: a haystack built WITHOUT reasoning (default) and one
+    built WITH it (``search_sessions(include_thinking=True)``) are distinct
+    documents, so a warm entry of one mode is never served for the other.
 
     Thread-safety: the lock is held only for the cheap OrderedDict check and
     the store; the expensive ``_body_search_messages`` + ``_build_haystack``
@@ -774,10 +797,10 @@ def _get_cached_haystack(
     # mtime (None) folds a wall-clock TTL into the key via a coarse bucket so
     # the entry self-expires without a separate reaper.
     if mtime is not None:
-        key = (agent_name, session.uuid, mtime)
+        key = (agent_name, session.uuid, mtime, include_thinking)
     else:
         bucket = int(now // _HAYSTACK_CACHE_TTL_SEC)
-        key = (agent_name, session.uuid, float(bucket))
+        key = (agent_name, session.uuid, float(bucket), include_thinking)
 
     with _haystack_cache_lock:
         cached = _haystack_cache.get(key)
@@ -789,7 +812,7 @@ def _get_cached_haystack(
     # Cache MISS — build outside the lock so concurrent reads of other
     # sessions are not blocked by this (potentially slow) read+concat.
     messages, body_truncated = _body_search_messages(session)
-    haystack = _build_haystack(messages)
+    haystack = _build_haystack(messages, include_thinking=include_thinking)
     value = (haystack, body_truncated)
 
     with _haystack_cache_lock:
@@ -798,28 +821,33 @@ def _get_cached_haystack(
 
 
 def _haystack_store(
-    key: "tuple[str, str, float]", value: "tuple[str, bool]"
+    key: "tuple[str, str, float, bool]", value: "tuple[str, bool]"
 ) -> None:
     """Insert ``value`` under ``key``, purging stale siblings and over-cap tail.
 
     Caller must hold :data:`_haystack_cache_lock`. Three invariants:
 
     * **No dead-key pileup on mtime change.** A rebuilt session (new mtime →
-      new key) would otherwise leave its previous ``(agent, uuid, old_mtime)``
-      entry wedged in the LRU until count-eviction reached it — the regression
-      fixed in 00e4248 re-appearing. We eagerly drop every prior entry for the
-      same ``(agent, uuid)`` so exactly one live version per session survives.
+      new key) would otherwise leave its previous
+      ``(agent, uuid, old_mtime, mode)`` entry wedged in the LRU until
+      count-eviction reached it — the regression fixed in 00e4248
+      re-appearing. We eagerly drop every prior entry for the same
+      ``(agent, uuid)`` whose ``mtime`` differs so exactly one live version
+      per session survives per build mode.  A sibling with the SAME ``mtime``
+      but a different ``include_thinking`` mode is a distinct-but-current
+      document (both modes may be warmed) and is kept.
     * **Count cap** (``_HAYSTACK_CACHE_MAX``): bound the number of entries.
     * **Char cap** (``_HAYSTACK_CACHE_CHARS_MAX``): bound summed haystack size
       so a long-lived shared server's RSS can't balloon to GiB from many large
       sessions. Both caps evict oldest-first (LRU) until satisfied.
     """
     global _haystack_cache_chars
-    # Purge any stale-mtime sibling(s) for this (agent, uuid) before inserting.
-    agent_name, uuid = key[0], key[1]
+    # Purge stale-mtime sibling(s) for this (agent, uuid) before inserting;
+    # keep same-mtime siblings that differ only by build mode (thinking on/off).
+    agent_name, uuid, mtime = key[0], key[1], key[2]
     stale = [
         k for k in _haystack_cache
-        if k[0] == agent_name and k[1] == uuid and k != key
+        if k[0] == agent_name and k[1] == uuid and k[2] != mtime
     ]
     for k in stale:
         old = _haystack_cache.pop(k)
@@ -1031,6 +1059,7 @@ def read_session(
     redact: bool = True,
     with_tokens: bool = False,
     include_subagents: bool = False,
+    include_thinking: bool = False,
 ) -> dict[str, Any]:
     """Read a single session by ``uuid``; ``agent`` is an optional hint.
 
@@ -1088,6 +1117,15 @@ def read_session(
             yields an empty ``children`` list and a ``total`` equal to the
             parent's own block — honest, not an error.  Independent of
             ``with_tokens``.  Default ``False``.
+        include_thinking: When ``True`` attach the model's reasoning
+            (``message.thinking``) as a separate ``thinking`` string field on
+            each projected message that carried it — kept OUT of ``content``
+            so the historical text projection is unchanged.  Default
+            ``False``: output is byte-identical to the historical shape (no
+            ``thinking`` key on any message).  Reasoning is opt-in to save the
+            caller's budget; ``Event.has_thinking`` / the presence of the key
+            signals which messages have it.  Fail-soft: a message without
+            reasoning never carries the key.
 
     Returns:
         A dict with session metadata plus:
@@ -1133,6 +1171,12 @@ def read_session(
                 "message": (
                     f"include_subagents must be a bool, "
                     f"got {include_subagents!r}"
+                )}
+    if not isinstance(include_thinking, bool):
+        return {"error": "invalid_argument",
+                "message": (
+                    f"include_thinking must be a bool, "
+                    f"got {include_thinking!r}"
                 )}
     try:
         targets = _target_agents(agent)
@@ -1193,7 +1237,8 @@ def read_session(
         except (FileNotFoundError, ValueError, OSError):
             raw_messages = []
     projected = _project_messages(
-        raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1
+        raw_messages, hard_cap=_MESSAGES_HARD_CAP + 1,
+        include_thinking=include_thinking,
     )
     messages_truncated = len(projected) > _MESSAGES_HARD_CAP
     if messages_truncated:
@@ -1899,6 +1944,7 @@ def search_sessions(
     sort: str = "relevance",
     noise: str = "include",
     redact: bool = True,
+    include_thinking: bool = False,
 ) -> dict[str, Any]:
     """Case-insensitive search across sessions.
 
@@ -1949,6 +1995,14 @@ def search_sessions(
             runs on the RAW stored text, so searching for a literal
             secret still finds its session — only the displayed
             snippet is masked.
+        include_thinking: When ``True`` fold model reasoning
+            (``message.thinking``) into the ``body``/``all`` search haystack
+            so a search matches text that lives only in the model's thoughts.
+            Default ``False``: reasoning is **excluded** from matching to save
+            the caller's budget (turn it on only when a query must reach into
+            reasoning).  No effect on ``scope="title"``.  The two modes are
+            cached under separate keys, so toggling never serves a stale
+            haystack of the other mode.
 
     Returns:
         A dict ``{"results": [...], "count": N}`` where ``results`` is the
@@ -2003,6 +2057,13 @@ def search_sessions(
                        f"got {noise!r}",
         }
 
+    if not isinstance(include_thinking, bool):
+        return {
+            "error": "invalid_argument",
+            "message": f"include_thinking must be a bool, "
+                       f"got {include_thinking!r}",
+        }
+
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
@@ -2046,7 +2107,7 @@ def search_sessions(
                 score_text = title_lc
             elif scope == "body":
                 haystack, body_truncated = _get_cached_haystack(
-                    session, agent_name
+                    session, agent_name, include_thinking=include_thinking
                 )
                 matched = _match(haystack, positive, negative, op_upper)
                 if matched and positive:
@@ -2055,7 +2116,7 @@ def search_sessions(
             else:
                 title_lc = session.title.lower()
                 haystack, body_truncated = _get_cached_haystack(
-                    session, agent_name
+                    session, agent_name, include_thinking=include_thinking
                 )
                 in_title = any(t in title_lc for t in positive)
                 in_body = any(t in haystack for t in positive)
@@ -2151,6 +2212,8 @@ def query(
     tool: Optional[str] = None,
     tool_kind: Optional[str] = None,
     model: Optional[str] = None,
+    user_ref: Optional[str] = None,
+    has_thinking: Optional[bool] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -2210,6 +2273,20 @@ def query(
       ``"(unknown)"``).  Model ids are agent-defined strings (no fixed
       vocabulary); events without a signal never match; an empty string
       is a fail-loud ``invalid_argument``.
+    * ``user_ref`` — filter ``user_turn`` events by the entity the user
+      referenced.  A string with special values: ``"any"`` matches every
+      user turn that referenced *some* target; a bare kind
+      (e.g. ``"file"`` / ``"session"``) matches turns referencing that
+      kind of target; any other string is a substring matched against the
+      referenced target.  Non-user events never match, so combining
+      ``user_ref`` with a non-``user_turn`` ``type`` yields an honest empty
+      result.
+    * ``has_thinking`` — filter by whether the event's message carried
+      model reasoning (``Event.has_thinking``).  ``True`` keeps only events
+      with reasoning, ``False`` only those without; unset (``None``,
+      default) does not filter.  Note the reasoning *text* itself is never
+      inlined — this only gates on its presence (fetch it with
+      ``get_body(id, include_thinking=True)``).
     * ``text`` — substring matched against event text.  With
       ``sort="relevance"`` survivors are BM25-ranked using the **same
       scorer** as ``search_sessions``; ``sort="semantic"`` (F5.1,
@@ -2315,6 +2392,8 @@ def query(
             tool=tool,
             tool_kind=tool_kind,
             model=model,
+            user_ref=user_ref,
+            has_thinking=has_thinking,
             text=text,
             sort=sort,
             relative_to=relative_to,
@@ -2356,6 +2435,8 @@ def query(
                 "tool": tool,
                 "tool_kind": tool_kind,
                 "model": model,
+                "user_ref": user_ref,
+                "has_thinking": has_thinking,
                 "text": text,
                 "relative_to": relative_to,
                 # "include" is the no-op default — never a cause of emptiness.
@@ -2493,6 +2574,7 @@ def get_body(
     shallow: bool = False,
     max_chars: int = 500_000,
     redact: bool = True,
+    include_thinking: bool = False,
 ) -> dict[str, Any]:
     """Return the on-demand body for an event / plan ``id``.
 
@@ -2516,11 +2598,26 @@ def get_body(
     a ``redactions`` type→count dict when any replacement happened;
     ``redact=False`` returns the raw content.
 
+    ``include_thinking=True`` (turn ids only): attach the model's reasoning
+    (``message.thinking``) as a separate ``thinking`` field on the returned
+    body, re-read from the hosting message.  Default ``False`` leaves the body
+    byte-identical to the historical shape (no ``thinking`` key).  Fail-soft:
+    a turn without reasoning never carries the key.
+
     Returns the body dict, or ``{"error": ..., "message": ...}`` on a bad id.
     """
     if not id or not str(id).strip():
         return {"error": "invalid_argument", "message": "id must be non-empty"}
-    return _get_body_core(id, shallow=shallow, max_chars=max_chars, redact=redact)
+    if not isinstance(include_thinking, bool):
+        return {"error": "invalid_argument",
+                "message": (
+                    f"include_thinking must be a bool, "
+                    f"got {include_thinking!r}"
+                )}
+    return _get_body_core(
+        id, shallow=shallow, max_chars=max_chars, redact=redact,
+        include_thinking=include_thinking,
+    )
 
 
 @mcp.tool()
@@ -2677,6 +2774,8 @@ def _parse_query(query: str) -> tuple[list[str], list[str]]:
 def _build_haystack(
     messages: Sequence[Any],
     max_chars: int = _HAYSTACK_CHARS_CAP,
+    *,
+    include_thinking: bool = False,
 ) -> str:
     """Concatenate message text + thinking + tool_use inputs + tool_result contents.
 
@@ -2685,11 +2784,14 @@ def _build_haystack(
     full-text search actually useful for finding references buried in
     Bash/file/etc. invocations.
 
-    ``m.thinking`` (model reasoning) is folded in too so body/search
-    matches reasoning for ALL agents (feature-for-all-where-signal).  This
-    also preserves OpenCode's searchability after its reasoning was moved
-    out of ``text`` into ``thinking``, and newly surfaces Claude / Codex /
-    Pi reasoning that was previously discarded.
+    ``m.thinking`` (model reasoning) is folded in **only** when
+    ``include_thinking`` is set (default OFF): reasoning is excluded from
+    the search haystack by default to save the caller's budget, opt-in via
+    the ``search_sessions(include_thinking=True)`` flag when reasoning must
+    be searchable.  When enabled it covers ALL agents
+    (feature-for-all-where-signal) — including OpenCode, whose reasoning was
+    moved out of ``text`` into ``thinking``, and Claude / Codex / Pi
+    reasoning that is otherwise discarded.
     """
     chunks: List[str] = []
     total_chars = 0
@@ -2698,10 +2800,11 @@ def _build_haystack(
         if isinstance(text, str) and text:
             chunks.append(text)
             total_chars += len(text)
-        thinking = getattr(m, "thinking", "")
-        if isinstance(thinking, str) and thinking:
-            chunks.append(thinking)
-            total_chars += len(thinking)
+        if include_thinking:
+            thinking = getattr(m, "thinking", "")
+            if isinstance(thinking, str) and thinking:
+                chunks.append(thinking)
+                total_chars += len(thinking)
         for tool in getattr(m, "tool_use", ()) or ():
             if isinstance(tool, dict):
                 inp = tool.get("input", "")

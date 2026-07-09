@@ -93,9 +93,11 @@ from ._common import (
     _qa_entry,
     _qa_options_from_question,
     _qa_pairs_from_result_text,
+    fold_orphan_thinking,
     iter_jsonl_records,
 )
 from .models import AgentName, Message, Session
+from ..user_refs import make_user_ref
 
 
 _TITLE_MAX_LEN = 100
@@ -1160,12 +1162,21 @@ def _message_from_record(record: dict) -> Optional[Message]:
     thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
+    user_refs: List[dict] = []
     if isinstance(content, list):
         for part in content:
             if not isinstance(part, dict):
                 continue
             part_type = part.get("type")
-            if part_type == "text":
+            if part_type == "image" and rec_type == "user":
+                # An image the USER attached in their turn (a distinct
+                # content block, not prose).  Claude stores it inline as
+                # ``source.type == "base64"`` — the raw bytes only, with no
+                # filename/path — so ``target`` is honestly ``None`` (never
+                # fabricated).  Assistant records carry no such user image,
+                # so this is gated on the user role.
+                user_refs.append(make_user_ref("image", None, "structured"))
+            elif part_type == "text":
                 text = part.get("text", "")
                 if isinstance(text, str) and text:
                     text_chunks.append(text)
@@ -1268,6 +1279,7 @@ def _message_from_record(record: dict) -> Optional[Message]:
         thinking="\n".join(thinking_chunks),
         tokens=tokens,
         model=_record_model(payload) if rec_type == "assistant" else None,
+        user_refs=tuple(user_refs),
     )
 
 
@@ -1283,7 +1295,7 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
         msg = _message_from_record(record)
         if msg is not None:
             messages.append(msg)
-    return _link_ask_user_questions(messages)
+    return fold_orphan_thinking(_link_ask_user_questions(messages))
 
 
 def _link_ask_user_questions(messages: List[Message]) -> List[Message]:

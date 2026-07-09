@@ -16,11 +16,14 @@ own modules.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
+
+from .models import Message
 
 
 # --- JSONL reading caps -------------------------------------------------
@@ -364,3 +367,94 @@ def project_dir_matches(candidate: Optional[str], wanted: str) -> bool:
         return True
     prefix = "/" if base == "/" else base + "/"
     return cand.startswith(prefix)
+
+
+def _is_orphan_thinking(msg: Message) -> bool:
+    """Whether ``msg`` is a pure-reasoning assistant record (a "thinking orphan").
+
+    True only for an assistant message that carries reasoning
+    (:attr:`Message.thinking` non-blank) but no narrative and no tool call:
+    an empty/whitespace :attr:`Message.text` AND no :attr:`Message.tool_use`.
+    Every streaming agent that separates the reasoning stream from the
+    answer stream produces these — Claude/Pi as a text-less JSONL record,
+    Codex/OpenCode as a text-less ``reasoning`` item — leaving the model's
+    thinking stranded on a record ``get_body``/``read_session`` naturally
+    drop (no visible content), which is exactly the 97%-empty defect.
+    """
+    if msg.role != "assistant":
+        return False
+    if not (msg.thinking or "").strip():
+        return False
+    if (msg.text or "").strip():
+        return False
+    return not msg.tool_use
+
+
+def fold_orphan_thinking(messages: List[Message]) -> List[Message]:
+    """Move stranded reasoning onto the answer message it belongs to.
+
+    Cross-agent normalisation for the "read the thinking on demand" defect:
+    on real transcripts the model's reasoning is streamed as its OWN
+    text-less record, separate from the answer text — so the reasoning is
+    lost the moment a projection drops content-less messages
+    (``read_session``/``get_body``/``has_thinking`` all saw nothing).
+
+    Each orphan (see :func:`_is_orphan_thinking`) has its ``thinking``
+    relocated to the NEAREST FOLLOWING assistant message that carries real
+    text, searched only up to the next ``user`` message (a turn boundary —
+    reasoning never migrates across turns).  Consecutive orphans accumulate
+    in order onto that one target; when the target already has its own
+    ``thinking`` the strings are joined with ``"\\n"``.  An orphan with no
+    text-bearing assistant before the turn boundary (only tool calls, or
+    the session simply ends) is left untouched — an honest tail edge.
+
+    The list is never re-ordered, extended or shortened: only the
+    ``thinking`` field moves between two existing messages, so every
+    ``message_index`` the event layer and ``get_body`` rely on stays
+    aligned.  A drained orphan keeps its slot as a now fully-empty message
+    (no text, no thinking, no tool call), which downstream projections drop
+    exactly as they already dropped it.  Only ``thinking`` is touched —
+    ``tokens``/usage, ``tool_use``, ``user_refs`` and every other field are
+    preserved verbatim (the usage-dedup that rides the next survivor is
+    unaffected).  Returns the same list object when nothing folds.
+    """
+    # 1. Resolve each orphan to its fold target: the nearest following
+    #    text-bearing assistant, stopping at the next user turn boundary.
+    #    ``pending`` accumulates orphans awaiting a target in encounter
+    #    order; a user message discards any that never found one (tail edge).
+    folded_into: dict[int, List[str]] = {}
+    drained: set[int] = set()
+    pending: List[int] = []
+    for idx, msg in enumerate(messages):
+        role = msg.role
+        if role == "user":
+            pending.clear()
+            continue
+        if role != "assistant":
+            continue
+        if _is_orphan_thinking(msg):
+            pending.append(idx)
+            continue
+        if pending and (msg.text or "").strip():
+            bucket = folded_into.setdefault(idx, [])
+            for orphan_idx in pending:
+                bucket.append(messages[orphan_idx].thinking)
+                drained.add(orphan_idx)
+            pending.clear()
+
+    if not drained:
+        return messages
+
+    # 2. Apply: drained orphans lose their thinking; targets gain it (their
+    #    own thinking, if any, stays first).  Frozen dataclass → ``replace``.
+    out: List[Message] = []
+    for idx, msg in enumerate(messages):
+        if idx in drained:
+            out.append(dataclasses.replace(msg, thinking=""))
+        elif idx in folded_into:
+            parts = [msg.thinking] if (msg.thinking or "").strip() else []
+            parts.extend(folded_into[idx])
+            out.append(dataclasses.replace(msg, thinking="\n".join(parts)))
+        else:
+            out.append(msg)
+    return out

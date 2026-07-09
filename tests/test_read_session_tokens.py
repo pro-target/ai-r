@@ -381,15 +381,271 @@ def opencode_reasoning_db(tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatc
     return "oc-reason"
 
 
-def test_search_finds_claude_thinking_term(claude_thinking_session: str) -> None:
-    """A term present only in a Claude thinking block is body-searchable now."""
+def test_search_excludes_claude_thinking_term_by_default(claude_thinking_session: str) -> None:
+    """Thinking is OUT of body search by default (budget); opt-in re-includes it."""
+    # Default: a term living only in a Claude thinking block is NOT matched.
     result = search_sessions(query="zephyrquux", agent="claude", scope="body")
+    assert result["count"] == 0
+    # Opt-in: include_thinking=True surfaces the reasoning term again.
+    result = search_sessions(
+        query="zephyrquux", agent="claude", scope="body", include_thinking=True
+    )
     assert result["count"] == 1
     assert result["results"][0]["uuid"] == claude_thinking_session
 
 
-def test_search_finds_opencode_reasoning_term(opencode_reasoning_db: str) -> None:
-    """OpenCode reasoning moved text→thinking; body search still finds it."""
+def test_search_excludes_opencode_reasoning_term_by_default(opencode_reasoning_db: str) -> None:
+    """OpenCode reasoning (text→thinking) is out of body search unless opted in."""
     result = search_sessions(query="wobblefrotz", agent="opencode", scope="body")
+    assert result["count"] == 0
+    result = search_sessions(
+        query="wobblefrotz", agent="opencode", scope="body", include_thinking=True
+    )
     assert result["count"] == 1
     assert result["results"][0]["uuid"] == opencode_reasoning_db
+
+
+# ---------------------------------------------------------------------------
+# Q2: the event-level ``has_thinking`` flag (discovery hint, never the text)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pi_thinking_session(tmp_sessions_dir: Path) -> str:
+    """Pi session whose assistant carries a thinking block beside its text."""
+    uuid = "rs-pi-think"
+    jsonl = (
+        tmp_sessions_dir / ".pi" / "agent" / "sessions" / "--tmp-work--"
+        / f"2026-06-14T10-00-00-000Z_{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {"type": "session", "id": uuid,
+             "timestamp": "2026-06-14T10:00:00.000Z", "cwd": "/tmp/work"},
+            {"type": "message", "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "plain question"}],
+                "timestamp": 1_718_360_002_000}},
+            {"type": "message", "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "pondering quibblewax"},
+                    {"type": "text", "text": "visible reply"},
+                ],
+                "timestamp": 1_718_360_004_000}},
+        ],
+    )
+    return uuid
+
+
+def test_has_thinking_true_when_assistant_reasoned_claude(
+    claude_thinking_session: str,
+) -> None:
+    """Claude assistant turn with a thinking block → ``has_thinking`` True;
+    the user turn (no reasoning) carries no flag."""
+    from ai_r.events import query
+
+    rows = query(session=claude_thinking_session, agent="claude")
+    asst = next(r for r in rows if r["type"] == "assistant_turn")
+    assert asst["has_thinking"] is True
+    user = next(r for r in rows if r["type"] == "user_turn")
+    # A bare True marker, never False → no-signal turns keep the base shape.
+    assert "has_thinking" not in user
+
+
+def test_has_thinking_true_opencode(opencode_reasoning_db: str) -> None:
+    from ai_r.events import query
+
+    rows = query(session=opencode_reasoning_db, agent="opencode")
+    asst = next(r for r in rows if r["type"] == "assistant_turn")
+    assert asst["has_thinking"] is True
+
+
+def test_has_thinking_true_pi(pi_thinking_session: str) -> None:
+    from ai_r.events import query
+
+    rows = query(session=pi_thinking_session, agent="pi")
+    asst = next(r for r in rows if r["type"] == "assistant_turn")
+    assert asst["has_thinking"] is True
+
+
+def test_has_thinking_only_on_reasoning_assistant_turn(
+    claude_thinking_session: str,
+) -> None:
+    """Within the reasoning session, the flag lands on exactly one row — the
+    reasoning assistant turn; the user turn stays flag-free."""
+    from ai_r.events import query
+
+    rows = query(session=claude_thinking_session, agent="claude")
+    flagged = [r for r in rows if r.get("has_thinking")]
+    assert len(flagged) == 1 and flagged[0]["type"] == "assistant_turn"
+
+
+def test_has_thinking_false_for_tool_call_and_plain_turns(
+    fake_claude_session_with_tools: object,
+) -> None:
+    """A session with a plain assistant turn + a tool_call (no reasoning
+    anywhere) → no row carries ``has_thinking`` (user, assistant, tool_call
+    all flag-free)."""
+    from ai_r.events import query
+
+    rows = query(session="claude-tools-1", agent="claude")
+    kinds = {r["type"] for r in rows}
+    assert "assistant_turn" in kinds
+    assert any(t.startswith("tool_call") for t in kinds)
+    assert not any(r.get("has_thinking") for r in rows)
+
+
+@pytest.fixture
+def antigravity_no_thinking_brain(tmp_sessions_dir: Path) -> str:
+    """Antigravity brain with a plain user/model exchange — no reasoning
+    channel exists in the format, so ``has_thinking`` is always False."""
+    uuid = "rs-ag-think"
+    brain = tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / uuid
+    (brain / ".system_generated" / "logs").mkdir(parents=True)
+    _write_jsonl(
+        brain / ".system_generated" / "logs" / "transcript_full.jsonl",
+        [
+            {"timestamp": "2026-06-14T10:00:00Z", "source": "USER_EXPLICIT",
+             "type": "USER_INPUT", "content": "set up the lab"},
+            {"timestamp": "2026-06-14T10:00:05Z", "source": "MODEL",
+             "type": "MODEL_OUTPUT", "content": "lab ready"},
+        ],
+    )
+    return uuid
+
+
+def test_has_thinking_false_antigravity(
+    antigravity_no_thinking_brain: str,
+) -> None:
+    from ai_r.events import query
+
+    rows = query(session=antigravity_no_thinking_brain, agent="antigravity")
+    assert rows  # the exchange produced events
+    assert not any(r.get("has_thinking") for r in rows)
+
+
+def test_query_has_thinking_filter(claude_thinking_session: str) -> None:
+    """``has_thinking=True/False`` gates the event stream tri-state."""
+    from ai_r.events import query
+
+    only_thinking = query(session=claude_thinking_session, has_thinking=True)
+    assert only_thinking and all(
+        r["type"] == "assistant_turn" for r in only_thinking
+    )
+    no_thinking = query(session=claude_thinking_session, has_thinking=False)
+    assert no_thinking and all(not r.get("has_thinking") for r in no_thinking)
+    # The two partitions are disjoint and cover the whole stream.
+    everything = query(session=claude_thinking_session)
+    assert len(only_thinking) + len(no_thinking) == len(everything)
+
+
+# ---------------------------------------------------------------------------
+# Q2: read_session(include_thinking=...) — reasoning as a SEPARATE field
+# ---------------------------------------------------------------------------
+
+
+def test_read_session_thinking_absent_by_default(
+    claude_thinking_session: str,
+) -> None:
+    """Default: NO ``thinking`` key on any projected message (byte-identical
+    historical shape); the reasoning text never contaminates ``content``."""
+    result = read_session(claude_thinking_session, agent="claude")
+    assert "error" not in result
+    assert all("thinking" not in m for m in result["messages"])
+    asst = next(m for m in result["messages"] if m["role"] == "assistant")
+    assert "zephyrquux" not in asst["content"]
+
+
+def test_read_session_include_thinking_adds_separate_field(
+    claude_thinking_session: str,
+) -> None:
+    """``include_thinking=True``: the reasoning arrives as a string ``thinking``
+    field ALONGSIDE ``content`` (never folded into content)."""
+    result = read_session(
+        claude_thinking_session, agent="claude", include_thinking=True
+    )
+    assert "error" not in result
+    asst = next(m for m in result["messages"] if m["role"] == "assistant")
+    assert isinstance(asst["thinking"], str)
+    assert "zephyrquux" in asst["thinking"]
+    # Content stays the historical text — reasoning is not inlined.
+    assert "zephyrquux" not in asst["content"]
+    assert asst["content"] == "visible answer"
+
+
+def test_read_session_include_thinking_invalid_type(
+    claude_thinking_session: str,
+) -> None:
+    result = read_session(
+        claude_thinking_session, agent="claude",
+        include_thinking="yes",  # type: ignore[arg-type]
+    )
+    assert result["error"] == "invalid_argument"
+    assert "include_thinking" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Q2: get_body(include_thinking=...) — reasoning re-read on demand
+# ---------------------------------------------------------------------------
+
+
+def test_get_body_turn_thinking_opt_in(claude_thinking_session: str) -> None:
+    """A turn body has no ``thinking`` by default; ``include_thinking=True``
+    re-reads the model reasoning from the hosting message."""
+    from ai_r.events import query
+    from ai_r.mcp_server import get_body
+
+    rows = query(session=claude_thinking_session, agent="claude")
+    asst = next(r for r in rows if r["type"] == "assistant_turn")
+
+    default = get_body(asst["id"])
+    assert "error" not in default
+    assert "thinking" not in default
+
+    opted = get_body(asst["id"], include_thinking=True)
+    assert isinstance(opted["thinking"], str)
+    assert "zephyrquux" in opted["thinking"]
+    # The turn text is unchanged by the flag.
+    assert opted["text"] == default["text"]
+
+
+def test_get_body_include_thinking_invalid_type(
+    claude_thinking_session: str,
+) -> None:
+    from ai_r.events import query
+    from ai_r.mcp_server import get_body
+
+    rows = query(session=claude_thinking_session, agent="claude")
+    asst = next(r for r in rows if r["type"] == "assistant_turn")
+    result = get_body(asst["id"], include_thinking="yes")  # type: ignore[arg-type]
+    assert result["error"] == "invalid_argument"
+    assert "include_thinking" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Q2: haystack cache is not poisoned across include_thinking modes
+# ---------------------------------------------------------------------------
+
+
+def test_search_cache_not_poisoned_across_thinking_modes(
+    claude_thinking_session: str,
+) -> None:
+    """Both build modes are valid at ONE mtime: a default search primes the
+    cache WITHOUT reasoning, then an ``include_thinking=True`` search on the
+    SAME session still finds the reasoning-only term (distinct cache key, not
+    a stale default hit).  Order-independent: default first, then opt-in."""
+    # Prime the cache in default mode: reasoning term is not matched.
+    first = search_sessions(query="zephyrquux", agent="claude", scope="body")
+    assert first["count"] == 0
+    # Same session, same mtime, opt-in mode: the reasoning term IS found.
+    second = search_sessions(
+        query="zephyrquux", agent="claude", scope="body", include_thinking=True
+    )
+    assert second["count"] == 1
+    assert second["results"][0]["uuid"] == claude_thinking_session
+    # And the default mode still returns 0 afterwards (opt-in did not poison
+    # the default-keyed entry).
+    third = search_sessions(query="zephyrquux", agent="claude", scope="body")
+    assert third["count"] == 0

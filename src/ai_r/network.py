@@ -52,7 +52,6 @@ instead of being guessed into this audit.
 from __future__ import annotations
 
 import ipaddress
-import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
@@ -61,6 +60,7 @@ from ai_r.events.query import query as _query
 from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.security import coerce_tool_input as _coerce_input
+from ai_r.user_refs import URL_IN_TEXT_RE as _URL_IN_TEXT_RE
 
 __all__ = [
     "KIND_VALUES",
@@ -102,9 +102,9 @@ _URL_KEYS = ("url",)
 _QUERY_KEYS = ("query",)
 _PROMPT_KEYS = ("prompt",)
 
-# First http(s) URL embedded in free text (the Gemini ``web_fetch`` prompt
-# shape).  Conservative charset: stop at whitespace/quotes/brackets.
-_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>\)\]]+", re.IGNORECASE)
+# ``_URL_IN_TEXT_RE`` (first http(s) URL embedded in free text — the Gemini
+# ``web_fetch`` prompt shape) is imported from :mod:`ai_r.user_refs` so this
+# network audit and user-ref extraction share ONE URL vocabulary (no dup).
 
 # Hostname suffixes that denote a non-public destination.
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")

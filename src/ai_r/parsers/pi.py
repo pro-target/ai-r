@@ -30,7 +30,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from ._common import _is_valid_uuid, _normalise_title, iter_jsonl_records
+from ._common import (
+    _is_valid_uuid,
+    _normalise_title,
+    fold_orphan_thinking,
+    iter_jsonl_records,
+)
 from .models import AgentName, Message, Session
 
 
@@ -464,7 +469,7 @@ def read_messages(
         ValueError: ``uuid`` is malformed.
     """
     session = read_session(uuid, base_dir)
-    return _extract_messages_from_jsonl(Path(session.path))
+    return fold_orphan_thinking(_extract_messages_from_jsonl(Path(session.path)))
 
 
 def read_token_usage(

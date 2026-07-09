@@ -57,14 +57,23 @@ from typing import (
 )
 
 
-def _row_group_key(row: dict[str, Any], group_by: Any) -> str:
-    """Resolve a row's bucket label under ``group_by`` (field name or callable)."""
+def _row_group_keys(row: dict[str, Any], group_by: Any) -> List[str]:
+    """Resolve a row's bucket label(s) under ``group_by`` (field name or callable).
+
+    A row lands in EVERY key it yields, so a list-valued field explodes: a
+    ``user_ref_kinds=["file", "url"]`` row is counted under both ``file`` and
+    ``url`` (each element its own bucket), matching the docs' "lands in each".
+    Scalars are unchanged — one key, ``"(unknown)"`` for missing/empty.  An
+    empty list yields NO keys (the row sits out this ``group_by`` dimension).
+    """
     if callable(group_by):
-        return str(group_by(row))
+        return [str(group_by(row))]
     val = row.get(group_by)
+    if isinstance(val, (list, tuple)):
+        return [str(x) for x in val]
     if val is None or (isinstance(val, str) and not val):
-        return "(unknown)"
-    return str(val)
+        return ["(unknown)"]
+    return [str(val)]
 
 
 def _metric_sessions(rows: Sequence[dict[str, Any]]) -> int:
@@ -347,8 +356,12 @@ def aggregate(
 
     buckets: "OrderedDictType[str, List[dict[str, Any]]]" = _OrderedDict()
     for row in rows:
-        key = _row_group_key(row, group_by)
-        buckets.setdefault(key, []).append(row)
+        # A row may resolve to several keys (list-valued ``group_by`` explodes:
+        # a file+url turn lands in both ``file`` and ``url``), so a bucket's
+        # ``count`` is rows-that-landed and ``sum(counts)`` may exceed
+        # ``len(rows)``.  ``totals`` below still folds the UNduplicated row set.
+        for key in _row_group_keys(row, group_by):
+            buckets.setdefault(key, []).append(row)
 
     def _row_metrics(bucket_rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         out: dict[str, Any] = {}

@@ -670,6 +670,33 @@ def _resolve_tool_use(event: Any, stream: Sequence[Any]) -> Optional[dict]:
     return None
 
 
+def _reread_thinking(event: Any) -> str:
+    """Re-read the model reasoning (``thinking``) of a turn event's message.
+
+    Reuses the same re-read path as :func:`_resolve_tool_use`: resolve the
+    parser for ``event.agent``, read the session's messages, and pick the
+    hosting message by ``event.message_index``.  Reasoning is kept OFF the
+    :class:`Event` (reference-by-default) so it is only paid for on demand
+    here.  Fail-soft — returns ``""`` when the message can't be read, the
+    index is out of range, or the message carried no reasoning.
+    """
+    idx = getattr(event, "message_index", None)
+    if not isinstance(idx, int):
+        return ""
+    try:
+        parser = PARSERS[coerce_agent(event.agent)]
+    except (KeyError, ValueError):
+        return ""
+    try:
+        messages = parser.read_messages(event.session_id)
+    except (FileNotFoundError, ValueError, OSError):
+        return ""
+    if not (0 <= idx < len(messages)):
+        return ""
+    thinking = getattr(messages[idx], "thinking", "")
+    return thinking if isinstance(thinking, str) else ""
+
+
 def _tool_call_body(
     event: Any,
     stream: Sequence[Any],
@@ -710,6 +737,7 @@ def get_body(
     *,
     max_chars: int = _BODY_CHARS_CAP,
     redact: bool = True,
+    include_thinking: bool = False,
 ) -> dict[str, Any]:
     """Return the on-demand body for an event / plan / plan-feedback id.
 
@@ -732,18 +760,25 @@ def get_body(
     cut; pass ``0`` to disable.
 
     ``redact`` (default ``True``) masks secrets in the emitted
-    ``text``/``body``/``title``/``steps`` as ``[REDACTED_<TYPE>]`` and adds
-    a ``redactions`` type→count dict when any replacement happened (see
-    :mod:`ai_r.redact`); ``False`` returns the raw content.
+    ``text``/``body``/``title``/``steps``/``thinking`` as ``[REDACTED_<TYPE>]``
+    and adds a ``redactions`` type→count dict when any replacement happened
+    (see :mod:`ai_r.redact`); ``False`` returns the raw content.
+
+    ``include_thinking`` (default ``False``, turn/tool bodies only): re-read
+    the model's reasoning (``message.thinking``) from the hosting message and
+    attach it as a SEPARATE ``thinking`` field — kept out of ``text`` so the
+    historical body is unchanged.  Fail-soft: a turn without reasoning carries
+    no ``thinking`` key.  A plan body ignores the flag.
 
     Returns:
         ``{"id", "type", "title"?, "body"?, "steps"?, "status"?, "path"?,
         "shallow", "body_truncated"?}`` for a plan, ``{"id", "type",
-        "text", "body_truncated"?}`` for a turn, or ``{"id", "type", "tool",
-        "body", "body_truncated"?}`` for a ``tool_call`` — where ``body`` is
-        the full call ``input`` (the same payload ``find_file_edits``
-        fingerprints as ``input_sha256``).  ``{"error": ...}`` when the id
-        cannot be resolved.
+        "text", "thinking"?, "body_truncated"?}`` for a turn (``thinking``
+        present only when ``include_thinking`` and reasoning exists), or
+        ``{"id", "type", "tool", "body", "body_truncated"?}`` for a
+        ``tool_call`` — where ``body`` is the full call ``input`` (the same
+        payload ``find_file_edits`` fingerprints as ``input_sha256``).
+        ``{"error": ...}`` when the id cannot be resolved.
     """
     if not id or ":" not in id:
         return {"error": "invalid_argument", "message": f"invalid id {id!r}"}
@@ -776,8 +811,16 @@ def get_body(
         # FULL text first, THEN cap (F2.1 order; defect #3) so a secret sliced
         # by the cap edge can never leak its unmasked prefix.
         out: dict[str, Any] = {"id": id, "type": event.type, "text": event.text}
+        # Reasoning (opt-in): re-read the model's thinking on demand and attach
+        # it as a SEPARATE field so ``text`` stays byte-identical to the
+        # historical shape.  Fail-soft: no reasoning → no ``thinking`` key.
+        if include_thinking:
+            thinking = _reread_thinking(event)
+            if thinking:
+                out["thinking"] = thinking
+        cap_fields = ("text", "thinking") if include_thinking else ("text",)
         out = _redact_body_fields(out, redact)
-        return _cap_body_fields(out, max_chars, ("text",))
+        return _cap_body_fields(out, max_chars, cap_fields)
 
     sig = _resolve_plan_signal(id)
     title = _plan_ref_value(event.refs, "title") or event.text or ""
@@ -837,14 +880,14 @@ def get_body(
 def _redact_body_fields(result: dict[str, Any], redact: bool) -> dict[str, Any]:
     """Emission-time redaction for a ``get_body`` payload (F2.1), in place.
 
-    Masks ``text``/``body``/``title``/``steps``/``pairs``; attaches per-type
-    ``redactions`` counts only when something was actually masked.  No-op
-    when ``redact`` is ``False``.
+    Masks ``text``/``body``/``title``/``steps``/``pairs``/``thinking``;
+    attaches per-type ``redactions`` counts only when something was actually
+    masked.  No-op when ``redact`` is ``False``.
     """
     if not redact:
         return result
     redactions: dict[str, int] = {}
-    for field in ("text", "body", "title", "steps", "pairs"):
+    for field in ("text", "body", "title", "steps", "pairs", "thinking"):
         if field not in result:
             continue
         new_val, counts = redact_value(result[field])

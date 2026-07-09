@@ -195,6 +195,15 @@ class Message:
             ``message.model``.  ``None`` for user/tool messages and where
             the format carries no signal (Antigravity) — absence is
             honest, never fabricated.
+        user_refs: Structured references the USER attached in this message —
+            image/file/attachment content parts the format exposes as a
+            distinct block (Claude ``image``, OpenCode ``file``/``patch``,
+            Codex ``input_image``), normalized to
+            :func:`ai_r.user_refs.make_user_ref` dicts with
+            ``origin="structured"``.  The event layer merges these with the
+            ``origin="text"`` refs it extracts from :attr:`text`.  Empty where
+            the format exposes no such part — honest absence.  Not part of the
+            equality contract.
     """
 
     role: str
@@ -206,6 +215,7 @@ class Message:
     thinking: str = ""
     tokens: Optional[dict] = field(default=None, compare=False)
     model: Optional[str] = None
+    user_refs: Tuple[dict, ...] = field(default=(), compare=False)
 
 
 __all__ = ["AgentName", "Message", "Session"]

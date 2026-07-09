@@ -26,6 +26,7 @@ from ai_r.find_file_edits import to_utc_aware
 from ai_r.parsers import PARSERS, Message, iso, target_agents
 from ai_r.parsers._common import project_dir_matches
 from ai_r.parsers._noise import noise_allows, validate_noise
+from ai_r.user_refs import dedup_user_refs, extract_user_refs_from_text
 
 from ai_r.events._common import (
     Event,
@@ -726,9 +727,18 @@ def _messages_to_events(
 
         if role == "user":
             if isinstance(text, str) and text.strip():
+                # User-attached references (Q1): structured parts the parser
+                # captured (``msg.user_refs``) + links/paths/IDE tags pulled
+                # from the prose, de-duplicated (structured beats text).  ai-r
+                # only MARKS the external source here — never fetches it.
+                raw_user_refs = list(getattr(msg, "user_refs", ()) or ())
+                raw_user_refs.extend(extract_user_refs_from_text(text))
+                user_refs = tuple(
+                    {"user_ref": r} for r in dedup_user_refs(raw_user_refs)
+                )
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=ts_iso,
-                    event_type="user_turn", text=text, refs=(),
+                    event_type="user_turn", text=text, refs=user_refs,
                     message_index=idx, model=msg_model,
                 ))
                 seq += 1
@@ -736,10 +746,15 @@ def _messages_to_events(
 
         if role == "assistant":
             if isinstance(text, str) and text.strip():
+                # ``has_thinking`` is a discovery hint (Q2): the reasoning text
+                # stays out of the default output/search; a consumer opts in
+                # via ``include_thinking`` only when it actually needs it.
+                had_thinking = bool((getattr(msg, "thinking", "") or "").strip())
                 events.append(_mk_event(
                     session_id=session_id, agent=agent, seq=seq, ts=ts_iso,
                     event_type="assistant_turn", text=text, refs=(),
                     message_index=idx, model=msg_model,
+                    has_thinking=had_thinking,
                 ))
                 seq += 1
             for tool in getattr(msg, "tool_use", ()) or ():

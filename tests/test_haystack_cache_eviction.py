@@ -154,7 +154,7 @@ def test_get_cached_haystack_rebuilds_on_mtime_change(monkeypatch) -> None:
         return ([], False)
 
     monkeypatch.setattr(m, "_body_search_messages", fake_build)
-    monkeypatch.setattr(m, "_build_haystack", lambda msgs: "H")
+    monkeypatch.setattr(m, "_build_haystack", lambda msgs, *, include_thinking=False: "H")
 
     mtime = {"v": 100.0}
     monkeypatch.setattr(m, "_session_source_mtime", lambda s: mtime["v"])
@@ -164,10 +164,10 @@ def test_get_cached_haystack_rebuilds_on_mtime_change(monkeypatch) -> None:
     m._get_cached_haystack(sess, "claude")
     m._get_cached_haystack(sess, "claude")  # HIT — no second build
     assert builds == ["s1"]
-    assert list(m._haystack_cache) == [("claude", "s1", 100.0)]
+    assert list(m._haystack_cache) == [("claude", "s1", 100.0, False)]
 
     mtime["v"] = 200.0  # file rewritten
     m._get_cached_haystack(sess, "claude")  # MISS — rebuild
     assert builds == ["s1", "s1"]
     # Old-mtime key gone; only the fresh one remains (no dead-key pileup).
-    assert list(m._haystack_cache) == [("claude", "s1", 200.0)]
+    assert list(m._haystack_cache) == [("claude", "s1", 200.0, False)]

@@ -228,6 +228,14 @@ class Event:
             input is empty.  Match-only: NOT emitted in the query row (the
             body is surfaced on demand via ``plan``/``find_tool_calls``)
             and — like :attr:`model` — NOT part of the ``sha256`` hash.
+        has_thinking: ``True`` when the hosting assistant message carried
+            model reasoning (:attr:`~ai_r.parsers.models.Message.thinking`).
+            A discovery HINT so a consumer can tell "there is reasoning here,
+            pull it on demand" without loading it — the thinking text stays
+            out of the default output/search (opt-in via ``include_thinking``).
+            Set on ``assistant_turn`` events; ``False`` elsewhere and where the
+            format has no reasoning signal (Antigravity).  Like :attr:`model` /
+            :attr:`body`, NOT part of the ``sha256`` hash.
     """
 
     id: str
@@ -242,6 +250,7 @@ class Event:
     message_index: int = -1
     model: Optional[str] = None
     body: Optional[str] = None
+    has_thinking: bool = False
 
 
 def _sha256(event_type: str, text: Optional[str], refs: Sequence[dict]) -> str:
@@ -265,6 +274,7 @@ def _mk_event(
     message_index: int,
     model: Optional[str] = None,
     body: Optional[str] = None,
+    has_thinking: bool = False,
 ) -> Event:
     refs_tuple = tuple(refs)
     return Event(
@@ -280,6 +290,7 @@ def _mk_event(
         message_index=message_index,
         model=model,
         body=body or None,
+        has_thinking=has_thinking,
     )
 
 

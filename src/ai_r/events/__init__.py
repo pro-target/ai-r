@@ -123,7 +123,7 @@ from ai_r.events.aggregate import (  # noqa: F401
     _metric_files,
     _metric_messages,
     _metric_sessions,
-    _row_group_key,
+    _row_group_keys,
 )
 from ai_r.events.diff import _edit_input_from_event  # noqa: F401
 

@@ -45,9 +45,11 @@ from ._common import (
     _is_valid_uuid,
     _parse_iso_timestamp,
     _qa_from_codex,
+    fold_orphan_thinking,
     iter_jsonl_records,
 )
 from .models import AgentName, Message, Session
+from ..user_refs import make_user_ref
 
 
 _TITLE_MAX_LEN = 100
@@ -339,6 +341,25 @@ def _codex_message_text(payload: dict) -> str:
     return _extract_text_from_parts(payload.get("content", []))
 
 
+def _codex_user_refs(payload: dict) -> List[dict]:
+    """Collect structured user attachments from a Codex message payload.
+
+    Codex encodes a user-attached image as an ``input_image`` content part
+    carrying only an inline ``image_url`` data-URL (no filename/path), so
+    ``target`` is honestly ``None`` (never fabricated).  The ``input_file``
+    part is absent from the observed corpus, so no branch is written for it
+    (honest absence).  Returns ``[]`` when the content carries no such part.
+    """
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return []
+    refs: List[dict] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "input_image":
+            refs.append(make_user_ref("image", None, "structured"))
+    return refs
+
+
 def _safe_json(blob: object) -> object:
     """Best-effort ``json.loads`` returning ``None`` on any failure."""
     if not isinstance(blob, str) or not blob.strip():
@@ -407,6 +428,13 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                     text=text,
                     timestamp=env_ts,
                     model=current_model if role == "assistant" else None,
+                    # ``input_image`` parts the user attached in this turn
+                    # (assistant messages carry none) → structured refs.
+                    user_refs=(
+                        tuple(_codex_user_refs(payload))
+                        if role == "user"
+                        else ()
+                    ),
                 ))
             elif ptype in ("function_call", "local_shell_call"):
                 name = payload.get("name") or ptype
@@ -553,7 +581,7 @@ def read_messages(
         ValueError: ``uuid`` is malformed.
     """
     session = read_session(uuid, base_dir)
-    return _extract_messages_from_rollout(Path(session.path))
+    return fold_orphan_thinking(_extract_messages_from_rollout(Path(session.path)))
 
 
 def read_token_usage(

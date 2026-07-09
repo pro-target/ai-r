@@ -18,6 +18,7 @@ from ai_r.parsers import PARSERS, Message, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.semantic import semantic_order as _semantic_order
+from ai_r.user_refs import USER_REF_KIND
 
 from ai_r.parsers._noise import validate_noise
 
@@ -83,6 +84,22 @@ def _ref_value(refs: Sequence[dict], key: str) -> Optional[Any]:
     return None
 
 
+def _copy_ref(ref: dict) -> dict:
+    """Copy one ref, deep-copying a nested ``user_ref`` payload.
+
+    ``dict(ref)`` is a shallow copy — fine for the flat ``tool``/``file``/
+    ``tool_resolved`` refs, but a ``user_ref`` nests a mutable
+    ``{kind,target,origin}`` payload that emission-time redaction rewrites in
+    place; sharing it would leak the mask back into the source
+    :class:`Event`.  Copy that one payload a level deeper so the raw stored
+    ref stays untouched (redaction is emission-only, F2.1).
+    """
+    out = dict(ref)
+    if isinstance(out.get("user_ref"), dict):
+        out["user_ref"] = dict(out["user_ref"])
+    return out
+
+
 def _event_to_dict(event: Event) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": event.id,
@@ -91,7 +108,7 @@ def _event_to_dict(event: Event) -> dict[str, Any]:
         "ts": event.ts,
         "type": event.type,
         "text": event.text,
-        "refs": [dict(r) for r in event.refs],
+        "refs": [_copy_ref(r) for r in event.refs],
         "source": event.source,
         "sha256": event.sha256,
         "message_index": event.message_index,
@@ -111,6 +128,23 @@ def _event_to_dict(event: Event) -> dict[str, Any]:
     # row without a signal folds into the honest "(unknown)" bucket.
     if event.model is not None:
         out["model"] = event.model
+    # User references (F: user_ref dimension): hoist the payloads and their
+    # kinds out of refs so ``aggregate(group_by="user_ref_kinds")`` works on
+    # rows directly — mirrors the tool_kind hoist, emitted ONLY when the event
+    # carries one so a no-signal row keeps the base shape.  The hoisted list
+    # points at the SAME payload objects as the copied ``refs`` mirror above,
+    # so emission-time redaction masks both in one pass (never the source).
+    urefs = [r["user_ref"] for r in out["refs"] if "user_ref" in r]
+    if urefs:
+        out["user_refs"] = urefs
+        out["user_ref_kinds"] = sorted(
+            {u["kind"] for u in urefs if u.get("kind")}
+        )
+    # Thinking hint: a bare ``True`` marker (never ``False``) so a consumer can
+    # tell "this assistant turn reasoned before answering" without re-reading
+    # the session — no-signal turns keep the base shape.
+    if event.has_thinking:
+        out["has_thinking"] = True
     return out
 
 
@@ -186,6 +220,33 @@ def _redact_events(
                     for ref in ev.get("refs") or ():
                         if isinstance(ref, dict) and "tool_resolved" in ref:
                             ref["tool_resolved"] = new_val
+        # A ``user_ref.target`` can carry a secret (a URL with a token), so
+        # run it through the SAME ``redact_text``.  The ``refs`` mirror and the
+        # hoisted ``user_refs`` list share ONE payload object (see
+        # ``_event_to_dict``), so masking the refs entry masks both — no
+        # double pass, no double count.  ``kind``/``origin`` are closed
+        # vocabularies and never masked.
+        for ref in ev.get("refs") or ():
+            if not isinstance(ref, dict) or "user_ref" not in ref:
+                continue
+            _redact_user_ref_target(ref["user_ref"], redactions_out)
+
+
+def _redact_user_ref_target(
+    payload: Any,
+    redactions_out: Optional[dict[str, int]],
+) -> None:
+    """Mask a secret in one ``user_ref`` payload's ``target``, in place."""
+    if not isinstance(payload, dict):
+        return
+    target = payload.get("target")
+    if not isinstance(target, str) or not target:
+        return
+    new_val, counts = redact_text(target)
+    if counts:
+        payload["target"] = new_val
+        if redactions_out is not None:
+            merge_redaction_counts(redactions_out, counts)
 
 
 def _walk_relative(
@@ -236,6 +297,8 @@ def query(
     tool: Optional[str] = None,
     tool_kind: Optional[str] = None,
     model: Optional[str] = None,
+    user_ref: Optional[str] = None,
+    has_thinking: Optional[bool] = None,
     text: Optional[str] = None,
     sort: str = "date",
     relative_to: Optional[str] = None,
@@ -284,6 +347,20 @@ def query(
       vocabulary (ids are agent-defined strings), so any non-empty string
       is accepted; events without a model signal never match.  An
       empty-string value is a fail-loud :class:`ValueError`.
+    * ``user_ref`` — value-typed filter over the user-attached references a
+      user_turn carries (``refs[*].user_ref`` — see :mod:`ai_r.user_refs`).
+      The value picks the mode: ``"any"`` keeps events with ≥1 user_ref; a
+      :data:`~ai_r.user_refs.USER_REF_KIND` member (``file``/``url``/``image``/
+      ``attachment``/``ide_context``) keeps events with a ref of that
+      ``kind``; anything else is a case-insensitive substring over any ref
+      ``target``.  Events with no user_ref never match; an empty-string value
+      is a fail-loud :class:`ValueError` (a caller mistake, not "match
+      anything").
+    * ``has_thinking`` — tri-state (``None`` = no filter) boolean on the
+      event's :attr:`~ai_r.events._common.Event.has_thinking` flag (an
+      assistant turn whose hosting message carried a reasoning/thinking
+      block): ``True`` keeps only turns that reasoned, ``False`` only those
+      that did not.
     * ``text`` — substring matched against event ``text``
       (case-insensitive) AND, for a ``tool_call``, its FULL input body —
       so a pattern buried inside a multi-line command (an ``rm`` in a
@@ -388,6 +465,21 @@ def query(
         raise ValueError(
             f"model must be a non-empty model-id string or None, got {model!r}"
         )
+    # ``user_ref`` is value-typed (like ``tool_kind``/``model``): ``"any"``
+    # (has-any-ref), a :data:`~ai_r.user_refs.USER_REF_KIND` member (has-that-
+    # kind), else a case-insensitive substring over any ref ``target``.  The
+    # value decides the behaviour — no separate function.  An empty string is
+    # a caller mistake, not "match anything": fail loud, like ``model``.
+    if user_ref is not None and (
+        not isinstance(user_ref, str) or not user_ref
+    ):
+        raise ValueError(
+            f"user_ref must be a non-empty string or None, got {user_ref!r}"
+        )
+    if has_thinking is not None and not isinstance(has_thinking, bool):
+        raise ValueError(
+            f"has_thinking must be a bool or None, got {has_thinking!r}"
+        )
     if project_dir is not None and (
         not isinstance(project_dir, str) or not project_dir.strip()
     ):
@@ -478,6 +570,17 @@ def query(
     tool_needle = tool.lower() if tool else None
     model_needle = model.strip().lower() if model else None
     text_needle = text.lower() if text else None
+    # ``user_ref`` matching mode is chosen from the value: ``"any"`` and a
+    # known kind are exact tests; anything else is a case-insensitive
+    # substring over the ref ``target`` (lowercased once here).
+    uref_needle = user_ref if user_ref else None
+    uref_target_needle = (
+        uref_needle.lower()
+        if uref_needle is not None
+        and uref_needle != "any"
+        and uref_needle not in USER_REF_KIND
+        else None
+    )
 
     # ``type="tool_call(task|skill|mcp|web)"`` is a wrapper-aware kind, not an
     # event-``type`` subtype: split it into the base ``tool_call`` type gate
@@ -527,6 +630,26 @@ def query(
             files = [r.get("file", "") for r in ev.refs if "file" in r]
             if not any(file_needle in f for f in files):
                 continue
+        if uref_needle is not None:
+            urefs = [r["user_ref"] for r in ev.refs if "user_ref" in r]
+            if not urefs:
+                continue
+            if uref_needle == "any":
+                pass  # has ≥1 user_ref — already satisfied
+            elif uref_target_needle is None:
+                # A known kind: any user_ref with that ``kind``.
+                if not any(u.get("kind") == uref_needle for u in urefs):
+                    continue
+            else:
+                # Free value: case-insensitive substring over any ``target``.
+                if not any(
+                    uref_target_needle in str(u.get("target")).lower()
+                    for u in urefs
+                    if u.get("target")
+                ):
+                    continue
+        if has_thinking is not None and ev.has_thinking != has_thinking:
+            continue
         if tool_needle is not None:
             # Match the raw name AND the resolved name under a wrapper, so
             # a Skill/Task/MCP call is findable by what it really ran.
