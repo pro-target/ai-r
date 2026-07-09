@@ -31,6 +31,7 @@ from ai_r.parsers import (
     target_agents,
 )
 from ai_r.events._common import resolve_tool
+from ai_r.events.model import normalize_session_filter
 from ai_r.redact import merge_redaction_counts, redact_value
 from ai_r.security import coerce_tool_input as _coerce_input
 
@@ -135,6 +136,7 @@ def find_tool_calls(
     tool_name: Optional[str] = None,
     tool_name_pattern: Optional[str] = None,
     agent: Optional[str] = None,
+    session: Optional[Any] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
@@ -156,6 +158,15 @@ def find_tool_calls(
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
             ``"opencode"``, ``"antigravity"``, ``"pi"``. ``None`` =
             all agents.
+        session: Optional session scope — a single session uuid string
+            or a list of uuid strings (same semantics/validation as the
+            ``query`` facet, SSOT
+            :func:`~ai_r.events.model.normalize_session_filter`).  ``None``
+            = every session; a scan with a wide ``since``/``until`` but no
+            ``session`` therefore surfaces calls from UNRELATED sessions,
+            so pin the session when auditing one conversation.  An empty
+            list or a non-string item raises :class:`ValueError` (never a
+            silent unfiltered scan).
         since: Optional ISO 8601 lower bound (inclusive) on call
             timestamp.  Pass ``""`` or ``None`` to leave open.
         until: Optional ISO 8601 upper bound (inclusive) on call
@@ -231,7 +242,8 @@ def find_tool_calls(
             AND no content filter (none of ``input_contains``/
             ``output_contains``/``output_excludes``/``is_error``) given;
             ``limit`` negative; unparseable ``since``/``until``; unknown
-            ``agent``; empty ``*_contains``/``output_excludes``; non-bool
+            ``agent``; malformed ``session`` (empty list or non-string
+            item); empty ``*_contains``/``output_excludes``; non-bool
             ``is_error``; unknown ``output_mode``.  A name filter is
             OPTIONAL: omitting both ``tool_name`` and
             ``tool_name_pattern`` is valid as long as at least one content
@@ -290,6 +302,10 @@ def find_tool_calls(
     since_dt = parse_iso_bound(since, "since")
     until_dt = parse_iso_bound(until, "until")
     targets = target_agents(agent)
+    # F3.2-style session scope: single uuid or a list of uuids, validated
+    # by the same SSOT the ``query`` facet uses (fail-loud on an empty list
+    # or non-string items).  ``None`` = every session.
+    wanted_sessions = normalize_session_filter(session)
 
     exact_lc = name_exact.strip().lower() if name_exact is not None else None
     substr_lc = name_substr.strip().lower() if name_substr is not None else None
@@ -303,14 +319,16 @@ def find_tool_calls(
         parser = PARSERS[agent_name]
         agent_sessions = parser.list_sessions()
         scanned_sessions[agent_name.value.lower()] = agent_sessions
-        for session in agent_sessions:
+        for sess in agent_sessions:
+            if wanted_sessions is not None and sess.uuid not in wanted_sessions:
+                continue
             try:
-                messages = parser.read_messages(session.uuid)
+                messages = parser.read_messages(sess.uuid)
             except (FileNotFoundError, ValueError, OSError):
                 continue
-            session_iso = iso(session.date)
-            session_title = session.title
-            session_ts: Optional[Any] = to_utc_aware(session.date)
+            session_iso = iso(sess.date)
+            session_title = sess.title
+            session_ts: Optional[Any] = to_utc_aware(sess.date)
             # Correlate each tool call with its result (which lives on a
             # DIFFERENT, following message) by ``tool_use_id``.  Both the
             # ``tool_use`` call and its ``tool_result`` carry the same id when
@@ -449,7 +467,7 @@ def find_tool_calls(
                     )
                     records.append({
                         "agent": agent_name.value.lower(),
-                        "session_uuid": session.uuid,
+                        "session_uuid": sess.uuid,
                         "session_title": session_title,
                         "session_date": session_iso,
                         "message_index": idx,
@@ -529,6 +547,7 @@ def find_tool_calls(
             since=since,
             until=until,
             filters={
+                "session": session,
                 "tool_name": tool_name,
                 "tool_name_pattern": tool_name_pattern,
                 "input_contains": input_contains,

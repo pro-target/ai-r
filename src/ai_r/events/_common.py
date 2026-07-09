@@ -218,6 +218,16 @@ class Event:
             — absence is honest, never fabricated.  Provenance metadata
             like ``agent``/``ts``: NOT part of the ``sha256`` content
             hash.
+        body: The FULL serialized tool-call input (the command text for a
+            shell call, the JSON body otherwise) — the searchable payload
+            behind a ``tool_call`` whose :attr:`text` holds only the raw
+            tool NAME.  Lets the ``text`` facet match a pattern that lives
+            inside a multi-line command body (e.g. an ``rm`` buried in a
+            ``for … do rm …; done`` loop) which the name-only :attr:`text`
+            can never surface.  ``None`` for non-tool events and when the
+            input is empty.  Match-only: NOT emitted in the query row (the
+            body is surfaced on demand via ``plan``/``find_tool_calls``)
+            and — like :attr:`model` — NOT part of the ``sha256`` hash.
     """
 
     id: str
@@ -231,6 +241,7 @@ class Event:
     sha256: str = ""
     message_index: int = -1
     model: Optional[str] = None
+    body: Optional[str] = None
 
 
 def _sha256(event_type: str, text: Optional[str], refs: Sequence[dict]) -> str:
@@ -253,6 +264,7 @@ def _mk_event(
     refs: Sequence[dict],
     message_index: int,
     model: Optional[str] = None,
+    body: Optional[str] = None,
 ) -> Event:
     refs_tuple = tuple(refs)
     return Event(
@@ -267,6 +279,7 @@ def _mk_event(
         sha256=_sha256(event_type, text, refs_tuple),
         message_index=message_index,
         model=model,
+        body=body or None,
     )
 
 

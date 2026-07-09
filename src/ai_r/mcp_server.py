@@ -1379,6 +1379,7 @@ def find_tool_calls(
     tool_name: Optional[str] = None,
     tool_name_pattern: Optional[str] = None,
     agent: Optional[str] = None,
+    session: Optional[Any] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 100,
@@ -1395,6 +1396,12 @@ def find_tool_calls(
     ``[REDACTED_<TYPE>]`` and adds a ``redactions`` type→count dict when
     any replacement happened; ``redact=False`` returns raw content.
     Filters always match the RAW, pre-redaction text.
+
+    ``session`` scopes the scan to a single session uuid (or a list of
+    uuids) — same semantics as the ``query`` facet.  ``None`` = every
+    session; a wide ``since``/``until`` with NO ``session`` therefore
+    surfaces calls from unrelated sessions, so pin it when auditing one
+    conversation.
 
     Exactly one of ``tool_name`` (exact, case-insensitive) or
     ``tool_name_pattern`` (substring, case-insensitive) must be set.
@@ -1424,6 +1431,7 @@ def find_tool_calls(
             tool_name=tool_name,
             tool_name_pattern=tool_name_pattern,
             agent=agent,
+            session=session,
             since=since,
             until=until,
             limit=limit,

@@ -16,6 +16,7 @@ Moved verbatim from the former ``ai_r/events.py`` monolith — no logic change.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -626,6 +627,26 @@ def _anchor_quote_to_section(
     return None
 
 
+def _input_body_text(payload: Any) -> Optional[str]:
+    """Serialize a (coerced) tool input into its full searchable body text.
+
+    A string payload is the body itself (a raw shell command); a dict/list
+    is JSON-serialized (so a ``text`` facet can match a pattern that lives
+    inside a multi-line ``command`` field or any other nested value).  This
+    is what the :class:`~ai_r.events._common.Event` ``body`` carries so the
+    ``text`` facet reaches INSIDE a tool call whose ``text`` is only the raw
+    tool name.  ``None`` when there is nothing (empty / unserializable).
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload or None
+    try:
+        return json.dumps(payload, ensure_ascii=False) or None
+    except (TypeError, ValueError):
+        return str(payload) or None
+
+
 def _messages_to_events(
     messages: Sequence[Any],
     *,
@@ -755,6 +776,9 @@ def _messages_to_events(
                     session_id=session_id, agent=agent, seq=seq, ts=tool_iso,
                     event_type=f"tool_call({sub})", text=name, refs=refs,
                     message_index=idx, model=msg_model,
+                    # Full input body so the ``text`` facet reaches inside a
+                    # multi-line command (the name-only ``text`` cannot).
+                    body=_input_body_text(payload),
                 ))
                 seq += 1
             # Emit any plan_event(s) triggered by this assistant message,

@@ -46,6 +46,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Restrict to a single agent (default: all).",
     )
     ftc_p.add_argument(
+        "--session",
+        default=None,
+        metavar="UUID",
+        help=(
+            "Restrict to a single session uuid (default: all sessions). "
+            "Pin this when auditing one conversation so a wide "
+            "--since/--until does not pull in unrelated sessions."
+        ),
+    )
+    ftc_p.add_argument(
         "--since",
         default=None,
         metavar="ISO8601",
@@ -137,6 +147,7 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
             tool_name=args.tool_name,
             tool_name_pattern=args.tool_name_pattern,
             agent=args.agent,
+            session=args.session,
             since=args.since,
             until=args.until,
             limit=args.limit,

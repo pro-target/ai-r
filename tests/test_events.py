@@ -741,3 +741,190 @@ def test_relevance_order_on_real_data(real_claude_dir: Path) -> None:
     docs = [(e["text"] or "").lower() for e in events]
     scores = bm25_scores(tokenize(term), [tokenize(d) for d in docs])
     assert scores == sorted(scores, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Regression: forensic-audit bugs (session 80be56fc), hermetic reproductions.
+#   Bug 1 — type="tool_call(task)" must match wrapper-kind calls.
+#   Bug 3 — text= must reach inside a multi-line command body.
+#   Bug 4 — an unknown session uuid gets an explicit "not in corpus" hint.
+# ---------------------------------------------------------------------------
+
+
+# The exact multi-line rm shape the audit missed: an ``rm`` buried in a
+# ``for … do rm …; done`` loop, so ``ev.text`` (the tool NAME "Bash") can
+# never surface it — only the input body can.
+_MULTILINE_RM = (
+    "set -u\n"
+    "DIR=/repo/memory\n"
+    'slugs="a b c"\n'
+    "\n"
+    'echo "=== before ==="\n'
+    'for s in $slugs; do rm -f "$DIR/$s.md"; done\n'
+    'echo "=== after ==="\n'
+)
+
+
+@pytest.fixture
+def wrapper_kinds_session(tmp_sessions_dir: Path) -> str:
+    """A Claude session with one call of each wrapper kind + a multi-line rm.
+
+    Task (subagent spawn), WebFetch (web), Skill (skill),
+    ``mcp__server__tool`` (mcp) and a Bash whose command hides ``rm`` inside
+    a loop — the fixtures for Bug 1 (wrapper-kind ``type`` facet) and Bug 3
+    (body-aware ``text`` facet).
+    """
+    session_id = "wrapper-kinds-1"
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-w"
+        / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "clean up the notes"},
+                "timestamp": "2026-07-01T10:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "spawning + cleaning"},
+                        {"type": "tool_use", "name": "Task",
+                         "input": {"subagent_type": "explorer",
+                                   "prompt": "scan"}},
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": _MULTILINE_RM,
+                                   "description": "remove stale notes"}},
+                        {"type": "tool_use", "name": "WebFetch",
+                         "input": {"url": "http://example.com/x"}},
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "commit"}},
+                        {"type": "tool_use",
+                         "name": "mcp__serena__find_symbol",
+                         "input": {"q": "foo"}},
+                    ],
+                },
+                "timestamp": "2026-07-01T10:00:05Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return session_id
+
+
+def test_type_facet_wrapper_kind_task(wrapper_kinds_session: str) -> None:
+    """Bug 1: ``type="tool_call(task)"`` matches the Task call.
+
+    The call is recorded as ``tool_call(other)`` with ``tool_kind="task"``
+    in refs (the F3.1 asymmetry); the ``type`` facet must translate the
+    wrapper kind into a ``tool_kind`` filter, not match ``event.type``.
+    """
+    rows = query(type="tool_call(task)", agent="claude")
+    assert len(rows) == 1
+    assert rows[0]["type"] == "tool_call(other)"
+    assert rows[0]["tool_kind"] == "task"
+    assert rows[0]["tool_resolved"] == "explorer"
+
+
+@pytest.mark.parametrize("kind", ["task", "skill", "mcp", "web"])
+def test_type_facet_wrapper_kind_parity(
+    wrapper_kinds_session: str, kind: str
+) -> None:
+    """Bug 1: ``type="tool_call(<kind>)"`` == ``tool_kind="<kind>"`` for all
+    wrapper kinds — the two spellings pick the same rows."""
+    by_type = query(type=f"tool_call({kind})", agent="claude")
+    by_kind = query(tool_kind=kind, agent="claude")
+    assert {r["id"] for r in by_type} == {r["id"] for r in by_kind}
+    assert len(by_type) == 1
+
+
+@pytest.mark.parametrize("sub", ["edit", "write", "read", "bash", "other"])
+def test_type_facet_base_subtype_unaffected(
+    wrapper_kinds_session: str, sub: str
+) -> None:
+    """Bug 1 guard: a base subtype still matches by ``event.type`` (the
+    translation only fires for wrapper kinds)."""
+    rows = query(type=f"tool_call({sub})", agent="claude")
+    assert all(r["type"] == f"tool_call({sub})" for r in rows)
+
+
+def test_type_facet_wrapper_kind_contradiction_empty(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 1: ``type="tool_call(task)"`` + ``tool_kind="web"`` is an honest
+    empty result (AND of two kinds), never a silent override."""
+    assert query(type="tool_call(task)", tool_kind="web", agent="claude") == []
+
+
+def test_type_facet_bare_and_unknown_subtype(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 1 guard: bare ``tool_call`` still matches every subtype; an
+    unknown inner token stays an honest empty result (no crash)."""
+    assert len(query(type="tool_call", agent="claude")) == 5
+    assert query(type="tool_call(bogus)", agent="claude") == []
+
+
+def test_text_facet_matches_multiline_command_body(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 3: ``text="rm "`` finds the Bash call whose ``rm`` lives inside a
+    multi-line ``for … do rm …; done`` body.
+
+    ``ev.text`` holds only the tool NAME ("Bash"), so the pre-fix
+    substring match over ``text`` alone returned zero — the fix also
+    searches the full input ``body``.
+    """
+    rows = query(text="rm ", agent="claude", redact=False)
+    bash_hits = [r for r in rows if r.get("tool_kind") == "bash"]
+    assert len(bash_hits) == 1
+    assert bash_hits[0]["tool_kind"] == "bash"
+    # The name-only text is what made the bug invisible; assert we did NOT
+    # merely start matching the name.
+    assert bash_hits[0]["text"] == "Bash"
+
+
+def test_text_facet_body_not_emitted_in_row(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 3 guard: the searchable ``body`` is match-only — it must not leak
+    into the emitted query row (full body stays on-demand)."""
+    rows = query(text="rm ", agent="claude", redact=False)
+    assert rows and all("body" not in r for r in rows)
+
+
+def test_unknown_session_uuid_diagnostic_hint(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 4: an empty result for an unknown session uuid carries an explicit
+    "not in the scanned corpus" hint — so a 0 from a typo'd uuid is
+    distinguishable from a genuine no-match in a real session."""
+    from ai_r.diagnostics import empty_result_diagnostics
+
+    diag = empty_result_diagnostics(
+        agent="claude",
+        filters={"session": "no-such-uuid"},
+    )
+    joined = " ".join(diag["hints"])
+    assert "no-such-uuid" in joined
+    assert "corpus" in joined
+
+
+def test_known_session_uuid_no_missing_hint(
+    wrapper_kinds_session: str,
+) -> None:
+    """Bug 4 guard: a session that DOES exist gets no "not in corpus" hint —
+    its empty result is a trustworthy no-match, attributed to the filters."""
+    from ai_r.diagnostics import empty_result_diagnostics
+
+    diag = empty_result_diagnostics(
+        agent="claude",
+        filters={"session": wrapper_kinds_session},
+    )
+    joined = " ".join(diag["hints"])
+    assert "not in" not in joined and "absent from" not in joined

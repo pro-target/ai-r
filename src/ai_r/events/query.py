@@ -21,11 +21,40 @@ from ai_r.semantic import semantic_order as _semantic_order
 
 from ai_r.parsers._noise import validate_noise
 
-from ai_r.events._common import Event, TOOL_KIND
+from ai_r.events._common import Event, TOOL_KIND, TOOL_SUBTYPE
 from ai_r.events.model import iter_events, normalize_session_filter
 
 
 # --- query facets ----------------------------------------------------------
+
+# The wrapper-aware tool kinds (F3.1) that are NOT event-``type`` subtypes: a
+# Task/Skill/MCP/web call keeps ``type="tool_call(other)"`` (or its base
+# subtype) and carries the real kind in ``refs.tool_kind`` — so a
+# ``type="tool_call(task)"`` facet cannot match by ``event.type`` alone and is
+# instead translated into a ``tool_kind`` filter (see ``_split_type_facet``).
+_TYPE_ONLY_KINDS: frozenset[str] = TOOL_KIND - TOOL_SUBTYPE
+
+
+def _split_type_facet(wanted: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Split a ``type`` facet into ``(type_needle, kind_from_type)``.
+
+    ``type="tool_call(<k>)"`` where ``<k>`` is a wrapper-aware kind that is
+    NOT an event-``type`` subtype (``task``/``skill``/``mcp``/``web`` — see
+    :data:`_TYPE_ONLY_KINDS`) resolves to ``("tool_call", "<k>")``: the base
+    ``tool_call`` type gate plus a ``tool_kind`` filter, since those calls are
+    recorded as ``tool_call(other)`` with the real kind in ``refs`` (a
+    ``tool_call(task)`` filter that matched only ``event.type`` would find
+    nothing — the F3.1 asymmetry).  Every other value (``tool_call(edit)``,
+    bare ``tool_call``, ``user_turn`` …) passes through as
+    ``(wanted, None)``.
+    """
+    if wanted is None:
+        return None, None
+    if wanted.startswith("tool_call(") and wanted.endswith(")"):
+        sub = wanted[len("tool_call("):-1]
+        if sub in _TYPE_ONLY_KINDS:
+            return "tool_call", sub
+    return wanted, None
 
 
 def _type_matches(event_type: str, wanted: str) -> bool:
@@ -34,6 +63,10 @@ def _type_matches(event_type: str, wanted: str) -> bool:
     * ``"tool_call"`` matches every ``tool_call(<sub>)`` event.
     * ``"tool_call(edit)"`` matches only that subtype.
     * ``"user_turn"`` / ``"assistant_turn"`` / ``"plan_event"`` match exactly.
+
+    Wrapper-aware kinds (``tool_call(task)`` etc.) are NOT handled here —
+    they are translated to a base ``tool_call`` gate + ``tool_kind`` filter
+    by :func:`_split_type_facet` before this is called.
     """
     if event_type == wanted:
         return True
@@ -252,8 +285,12 @@ def query(
       is accepted; events without a model signal never match.  An
       empty-string value is a fail-loud :class:`ValueError`.
     * ``text`` — substring matched against event ``text``
-      (case-insensitive).  With ``sort="relevance"`` the survivors are
-      BM25-ranked using the **same scorer** as ``search_sessions``.
+      (case-insensitive) AND, for a ``tool_call``, its FULL input body —
+      so a pattern buried inside a multi-line command (an ``rm`` in a
+      ``for … do rm …; done`` loop) is found even though a tool_call's
+      ``text`` holds only the raw tool name.  With ``sort="relevance"``
+      the survivors are BM25-ranked using the **same scorer** as
+      ``search_sessions`` (ranking is over the turn ``text``, unchanged).
     * ``sort`` — ``"date"`` (default, ts-ascending), ``"relevance"``
       (BM25 over ``text``; requires a ``text`` facet, else falls back to
       date order), or ``"semantic"`` (F5.1: the BM25 top-50 candidates
@@ -442,12 +479,27 @@ def query(
     model_needle = model.strip().lower() if model else None
     text_needle = text.lower() if text else None
 
+    # ``type="tool_call(task|skill|mcp|web)"`` is a wrapper-aware kind, not an
+    # event-``type`` subtype: split it into the base ``tool_call`` type gate
+    # plus a ``tool_kind`` filter (the F3.1 asymmetry — those calls are
+    # recorded as ``tool_call(other)`` with the kind in refs).  A plain
+    # subtype / bare type passes through unchanged.
+    type_needle, kind_from_type = _split_type_facet(type)
+    # Combine with an explicit ``tool_kind`` facet: both must hold (AND).  A
+    # contradiction (``type="tool_call(task)"`` + ``tool_kind="web"``) is an
+    # honest empty result, never a silent override.
+    if kind_from_type is not None and tool_kind is not None and (
+        tool_kind != kind_from_type
+    ):
+        return []
+    kind_needle = tool_kind if tool_kind is not None else kind_from_type
+
     # ``group`` is a plan-only facet: pre-restrict the type gate to
     # plan_event so a non-plan event never survives (and it composes with an
     # explicit ``type`` — a contradictory ``type != plan_event`` then yields an
     # honest empty result).
-    if group is not None and type is not None and not _type_matches(
-        "plan_event", type
+    if group is not None and type_needle is not None and not _type_matches(
+        "plan_event", type_needle
     ):
         return []
 
@@ -463,7 +515,7 @@ def query(
     ):
         if group is not None and ev.type != "plan_event":
             continue
-        if type is not None and not _type_matches(ev.type, type):
+        if type_needle is not None and not _type_matches(ev.type, type_needle):
             continue
         if since_dt is not None or until_dt is not None:
             ev_dt = parse_iso_bound(ev.ts, "ts") if ev.ts else None
@@ -486,9 +538,9 @@ def query(
             ]
             if not any(tool_needle in t for t in tools):
                 continue
-        if tool_kind is not None:
+        if kind_needle is not None:
             kinds = [r.get("tool_kind") for r in ev.refs if "tool_kind" in r]
-            if tool_kind not in kinds:
+            if kind_needle not in kinds:
                 continue
         if model_needle is not None:
             # Exact, case-insensitive: model ids are identity-like values
@@ -497,7 +549,13 @@ def query(
             if ev.model is None or ev.model.lower() != model_needle:
                 continue
         if text_needle is not None:
-            if not ev.text or text_needle not in ev.text.lower():
+            # Match the turn text AND — for a tool_call — the FULL input
+            # body, so a pattern buried in a multi-line command (e.g. an
+            # ``rm`` inside a ``for … do rm …; done`` loop) is found even
+            # though ``ev.text`` holds only the raw tool name.
+            hay = ev.text.lower() if ev.text else ""
+            body_hay = ev.body.lower() if ev.body else ""
+            if text_needle not in hay and text_needle not in body_hay:
                 continue
         survivors.append(ev)
         score_texts.append((ev.text or "").lower())

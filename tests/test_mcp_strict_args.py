@@ -54,17 +54,40 @@ def test_call_tool_rejects_phantom_list_sessions_since() -> None:
     assert "since" in result["message"]
 
 
-def test_call_tool_rejects_phantom_find_tool_calls_session() -> None:
-    """The observed incident: ``find_tool_calls(session=…)`` — a parameter
-    the tool does not declare — silently scanned the whole corpus on an
-    older installed build.  The guard must reject it before any data read.
+def test_call_tool_accepts_find_tool_calls_session() -> None:
+    """``find_tool_calls(session=…)`` is now a DECLARED parameter (Bug 2 fix).
+
+    The original incident was that ``session`` was a *phantom* argument the
+    tool did not declare, so the guard rejected it (and an older build had
+    silently scanned the whole corpus).  Now that ``session`` is a real
+    facet, the guard must let it THROUGH — the call reaches the tool rather
+    than hitting the unknown-argument envelope.
     """
     result = asyncio.run(
         mcp.call_tool("find_tool_calls", {"tool_name": "Bash", "session": "abc"})
     )
+    # Not our rejection envelope for an unknown key: either non-dict tool
+    # content, or a dict that is not the invalid_argument-for-unknown-arg
+    # error (a scoped scan of the bogus uuid legitimately returns an empty
+    # result dict with diagnostics).
+    if isinstance(result, dict):
+        assert not (
+            result.get("error") == "invalid_argument"
+            and "unknown argument" in result.get("message", "")
+        )
+
+
+def test_call_tool_rejects_phantom_find_tool_calls_arg() -> None:
+    """A genuinely undeclared ``find_tool_calls`` argument still fails loud —
+    the guard was narrowed to admit ``session``, not disabled."""
+    result = asyncio.run(
+        mcp.call_tool(
+            "find_tool_calls", {"tool_name": "Bash", "sesion": "abc"}
+        )
+    )
     assert isinstance(result, dict)
     assert result["error"] == "invalid_argument"
-    assert "session" in result["message"]
+    assert "sesion" in result["message"]
     assert "find_tool_calls accepts:" in result["message"]
 
 

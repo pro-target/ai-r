@@ -154,6 +154,29 @@ def _scan_agent(
     return entry, date_min, date_max
 
 
+def _session_uuids(session_filter: Any) -> List[str]:
+    """The requested session uuid(s) as a list, or ``[]`` when no scope.
+
+    Accepts the ``session`` facet's shape (a single uuid string or a list of
+    them); a blank string is ignored (the historical "matches nothing"
+    sentinel is not a real uuid).  Never raises — diagnostics run on the
+    already-empty path and must not add a failure of their own.
+    """
+    if isinstance(session_filter, str):
+        return [session_filter] if session_filter.strip() else []
+    if isinstance(session_filter, (list, tuple, set, frozenset)):
+        return [s for s in session_filter if isinstance(s, str) and s.strip()]
+    return []
+
+
+def _safe_list_sessions(agent_name: AgentName) -> Sequence[Any]:
+    """``parser.list_sessions()`` for one agent, or ``()`` on any failure."""
+    try:
+        return PARSERS[agent_name].list_sessions()
+    except (FileNotFoundError, ValueError, OSError):  # pragma: no cover
+        return ()
+
+
 def empty_result_diagnostics(
     *,
     agent: Optional[str] = None,
@@ -225,6 +248,38 @@ def empty_result_diagnostics(
             active_filters[key] = val
 
     hints: List[str] = []
+    # Session-scope trust (F3.2): distinguish "the session exists but has no
+    # matching event" (a trustworthy 0) from "this uuid is absent from the
+    # scanned corpus" (a typo / wrong agent → 0 for a reason unrelated to the
+    # other filters).  Uses ONLY the sessions the caller already enumerated —
+    # no extra corpus walk when a scan was provided.
+    wanted_uuids = _session_uuids((filters or {}).get("session"))
+    if wanted_uuids:
+        if provided:
+            known_uuids = {
+                getattr(s, "uuid", None)
+                for sessions in provided.values()
+                for s in (sessions or ())
+            }
+        else:
+            known_uuids = {
+                getattr(s, "uuid", None)
+                for agent_name in targets
+                for s in (_safe_list_sessions(agent_name) or ())
+            }
+        missing = sorted(u for u in wanted_uuids if u not in known_uuids)
+        if missing and len(missing) == len(wanted_uuids):
+            hints.append(
+                "none of the requested session uuid(s) exist in the scanned "
+                f"corpus: {', '.join(missing)} — the empty result is the "
+                "missing session(s), not the other filters (check the uuid, "
+                "or the agent filter if set)"
+            )
+        elif missing:
+            hints.append(
+                "some requested session uuid(s) are absent from the scanned "
+                f"corpus: {', '.join(missing)}"
+            )
     if total == 0:
         if agent:
             hints.append(

@@ -1639,3 +1639,86 @@ def test_cli_find_tool_calls_input_contains_errors_only_smart_json(
     assert rec["session_uuid"] == "cli-filt"
     assert rec["is_error"] is True
     assert rec["is_error_reliable"] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression (Bug 2, session 80be56fc): find_tool_calls must accept a
+# ``session=`` scope so a wide since/until does not pull tool calls from
+# UNRELATED sessions into a single-session audit.
+# ---------------------------------------------------------------------------
+
+
+def test_find_tool_calls_session_scope_isolates(tmp_sessions_dir: Path) -> None:
+    """``session=<uuid>`` keeps only that session's calls (Bug 2).
+
+    Two Claude sessions each run a ``Bash`` call; without a session scope
+    both surface, with ``session=`` exactly one does.
+    """
+    _write_claude_tool_session(
+        tmp_sessions_dir, "ftc-sess-a",
+        user_text="clean a", tool_name="Bash",
+        tool_input={"command": "rm -f /a.md"},
+    )
+    _write_claude_tool_session(
+        tmp_sessions_dir, "ftc-sess-b",
+        user_text="clean b", tool_name="Bash",
+        tool_input={"command": "rm -f /b.md"},
+    )
+
+    both = find_tool_calls(
+        tool_name="Bash", input_contains="rm ", agent="claude", redact=False
+    )
+    assert both["count"] == 2
+    assert {r["session_uuid"] for r in both["records"]} == {
+        "ftc-sess-a", "ftc-sess-b"
+    }
+
+    scoped = find_tool_calls(
+        tool_name="Bash", input_contains="rm ", agent="claude",
+        session="ftc-sess-a", redact=False,
+    )
+    assert scoped["count"] == 1
+    assert {r["session_uuid"] for r in scoped["records"]} == {"ftc-sess-a"}
+
+
+def test_find_tool_calls_session_list_scope(tmp_sessions_dir: Path) -> None:
+    """``session=[uuid, ...]`` scopes to the union of the listed sessions."""
+    for slug in ("ftc-list-a", "ftc-list-b", "ftc-list-c"):
+        _write_claude_tool_session(
+            tmp_sessions_dir, slug,
+            user_text="go", tool_name="Bash",
+            tool_input={"command": f"echo {slug}"},
+        )
+    rows = find_tool_calls(
+        tool_name="Bash", agent="claude",
+        session=["ftc-list-a", "ftc-list-c"], redact=False,
+    )
+    assert {r["session_uuid"] for r in rows["records"]} == {
+        "ftc-list-a", "ftc-list-c"
+    }
+
+
+def test_find_tool_calls_session_empty_list_fails_loud(
+    tmp_sessions_dir: Path,
+) -> None:
+    """An empty ``session`` list is a fail-loud error (SSOT
+    ``normalize_session_filter``), never a silent unfiltered scan."""
+    with pytest.raises(ValueError):
+        find_tool_calls(tool_name="Bash", session=[])
+
+
+def test_find_tool_calls_unknown_session_diagnostic(
+    tmp_sessions_dir: Path,
+) -> None:
+    """An unknown session uuid yields an empty result whose diagnostics name
+    the session as absent from the corpus (trustworthy 0)."""
+    _write_claude_tool_session(
+        tmp_sessions_dir, "ftc-known",
+        user_text="go", tool_name="Bash", tool_input={"command": "true"},
+    )
+    res = find_tool_calls(
+        tool_name="Bash", agent="claude", session="ftc-missing",
+    )
+    assert res["count"] == 0
+    joined = " ".join(res["diagnostics"]["hints"])
+    assert "ftc-missing" in joined
