@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write # gitleaks-action comments on PRs; without it PR runs fail 403
 
 jobs:
   gitleaks:
