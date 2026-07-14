@@ -197,7 +197,7 @@ Tokens fold in at request time — exact where the agent recorded its own usage,
 an honest estimate where it didn't, never faked. At a glance one project ate
 two-thirds of the whole token budget — you'd never eyeball that across scattered
 logs. `session_stats` is a preset over `aggregate(rank_by=stats)`; `group_by`
-takes `agent`/`dir`/`date`/`kind`.
+takes `agent`/`dir`/`date`/`kind`/`model`.
 
 ## 13. External sources the user handed the agent — `query(user_ref)` + `aggregate`
 
@@ -247,12 +247,47 @@ lose it; ai-r stitches it onto the next answer itself, so the thoughts are actua
 visible for every agent that has them (Claude/Codex/OpenCode/Pi; Antigravity has no
 reasoning at all).
 
+## 15. Subagent cost — what each spawn burned, and on which model — `find_tool_calls` (sidecar) + `session_stats(group_by=model)`
+
+"Spread work across 18 subagents — what did each actually burn, and on which
+tier?" The spawn itself ai-r already classified (`tool_kind=task`); what was
+missing was the **price**. Now each spawn's `find_tool_calls` emits a `subagent`
+sidecar: the model the child **resolved** to (a persona can be pinned to a tier
+cheaper than its parent — so the parent's model doesn't answer what the run cost),
+the persona, the **exact** billed tokens (`source: exact`, full token-block shape)
+plus `status`/`duration_ms`/`tool_uses`. One orchestrator session:
+
+```
+find_tool_calls(tool_name="Agent") → 18 spawns with sidecar
+by model:   haiku-4-5 ×11 = 488k · sonnet-5 ×1 = 215k · opus-4-8[1m] ×6 = 209k
+by persona: general-purpose ×6 · session-auditor ×1 · researcher ×3
+            · explorer ×2 · builder ×2 · pentester ×1
+```
+
+The breakdown inverts intuition: **one** sonnet-5 auditor spawn (215k) burned more
+than **all six** opus spawns combined (209k), and eleven "cheap" haiku readers were
+the session's biggest bill (488k). "Cheap tier × many spawns = the most expensive
+line item" — the raw log won't show you this by eye.
+
+Honesty over invention: two **background** spawns (`status: async_launched`, sidecar
+written before any usage exists) report the model but **no** token block — real cost
+and persona are recovered from the child's own transcript and `agent-*.meta.json`,
+not invented as zero. Another honesty nail: a record carrying several `tool_result`
+parts drops the sidecar entirely rather than billing the **wrong** subagent.
+
+Rollup on top — `session_stats(group_by="model")` (and `ai-r stats --group-by model`);
+mixed/unset tiers are honestly labeled `(mixed)`/`(unknown)`, never guessed.
+`read_session(include_subagents=true)` returns those same children with exact
+`tokens`/`models`/`subagent_type`/`status`.
+
 ---
 
 **Coverage:** 15 verbs — `find_tool_calls` · `incidents` · `network` ·
 `read_session` · `plan` · `find_file_edits` · `aggregate` · `search_sessions` ·
 `list_sessions` · `session_diff` · `diff` · `query` · `get_body` ·
 `detect_current` · `session_stats`. Plus dimensions over them: `model`,
-`user_ref` (what the user attached) and thinking (opt-in) — facets on
-`query`/`aggregate`/`read_session`, not separate verbs. Different tasks need different
-verbs; the gallery shows each on a real example.
+**subagent cost** (the `subagent` sidecar on `find_tool_calls` +
+`session_stats(group_by=model)`), `user_ref` (what the user attached) and thinking
+(opt-in) — facets on `query`/`aggregate`/`find_tool_calls`/`read_session`, not
+separate verbs. Different tasks need different verbs; the gallery shows each on a
+real example.
