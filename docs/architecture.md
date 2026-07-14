@@ -419,3 +419,96 @@ body". This ADR records the reversal to **opt-in** and why.
   thinking into `content`, so the default projection is unchanged; only the
   opt-in path adds the extra field. SSOT `Message.thinking` + the
   `include_thinking` plumbing in `ai_r.events` / `ai_r.mcp_server`.
+
+### ADR: subagent cost — a price on the existing `task` call, not a new taxonomy
+
+ai-r could say a subagent was spawned (`tool_kind=task`, `resolve_tool`), but not
+what it *cost*. The parent transcript carried the answer all along — a
+record-level `toolUseResult` sidecar with the child's resolved model and its
+exact billed usage — and the parser dropped it, keeping only
+`{content, is_error, tool_use_id}` from the tool result. "Which subagent burned
+the budget, and on which model" therefore required hand-parsing JSONL.
+
+- **What changed.** The sidecar is normalised onto the EXISTING tool-result entry
+  as `subagent` (`model` / `agent_type` / `tokens` / `status` / `duration_ms` /
+  `tool_uses`) and surfaced by `find_tool_calls` alongside a new `tool_use_id`.
+  `read_session(include_subagents=True)` children gained `tokens`, `models`, and
+  a joined `subagent_type`/`status`. `session_stats` gained `group_by="model"`.
+- **The child join is opt-in (`with_subagent_cost`), because it costs disk.** The
+  parent-side sidecar answers "what did this spawn cost" for a COMPLETED spawn,
+  but for a background spawn it was written at launch and names neither the
+  persona nor the tokens — and background spawns are the majority (measured:
+  701 of 981 sidecars `async_launched`, none carrying `agentType` or `usage`).
+  Recovering those requires reading the child's own transcript + meta, one small
+  file per spawn. On a single `read_session` that is already paid; on a
+  cross-corpus `find_tool_calls` scan it would be a per-spawn I/O storm nobody
+  asked for. So `find_tool_calls` keeps the join behind `with_subagent_cost=True`
+  (default off = the parent sidecar verbatim, byte-identical to before, zero
+  extra reads), and both callers route through ONE resolver —
+  `session_stats.subagent_cost_facts` / `subagent_costs_by_spawn` — rather than a
+  second, drifting copy of the persona/token join (the DRY rule this repo
+  enforces). The child is the source; the parent sidecar is the fallback for a
+  child that cannot be joined (not yet on disk, meta corrupt), and only a child's
+  `exact` tokens are lifted into `find_tool_calls`' billing field — an estimate
+  is never merged there.
+- **Child tokens follow the honest three-tier `source` ladder — `exact` is NOT
+  guaranteed per child.** `read_session` rollup children carry
+  `session_tokens(child)`, which is `exact` only where the child's transcript
+  records usage; a truncated or reference-only child yields a labeled `estimate`,
+  and a signal-less one `source: null`. On the real corpus a single parent's
+  rollup returned children `{exact: 8, estimate: 2}`. The emitted field was
+  always honestly labeled — this ADR (and the docs) simply stopped *claiming*
+  a blanket `exact` the code never promised, because a project selling honest
+  measurement cannot ship a spec that reports `estimate` as `exact`. A
+  regression test seeds a usage-less child and asserts the rollup marks it
+  `source != "exact"` (not a fabricated `exact`, not a zero).
+- **Why a dimension, not a second classifier.** The spawn is already classified
+  by `resolve_tool`; cost is a new *measurement* over that call, exactly as
+  `model` was a dimension over the event taxonomy rather than a parallel one.
+  Building a separate "subagent registry" would have duplicated the classifier
+  the project already trusts (the DRY rule this repo enforces).
+- **Why `model` is the load-bearing field.** A subagent may resolve to a model
+  DIFFERENT from its parent's — a persona can pin a cheaper tier. So the parent's
+  model does not answer what a child cost, and a child still running the parent's
+  model is precisely the signal that an unpinned persona is burning the expensive
+  tier. This is the measurement that makes a model-pinning policy auditable
+  instead of aspirational.
+- **Honesty guards.** The sidecar is record-level while one record may carry
+  several `tool_result` parts; with more than one, attribution would be a guess,
+  so the sidecar is **dropped** rather than billed to the wrong subagent (fail
+  closed). Ordinary tools also carry a `toolUseResult` (often a plain string) —
+  only a subagent-shaped payload is lifted. `tokens.source` is always `"exact"`:
+  billed usage, never an estimate mixed into the same field.
+- **Background spawns (fail-soft) — and why the persona comes from the CHILD.**
+  A background spawn writes its sidecar at launch (`status: async_launched`),
+  before the run exists: it names a model but carries neither usage nor
+  `agentType`. These are the MAJORITY of spawns in a real vault, so a design
+  that read the persona from the parent's sidecar would leave most children
+  anonymous — an adversarial review of this very change measured 0 of 54
+  children named. The persona is therefore read from the child's own
+  `agent-*.meta.json` (`extra.subagent_type`, alongside the `toolUseId` /
+  `spawnDepth` that file already supplied), and the exact tokens from the
+  child's own transcript. The parent sidecar is the FALLBACK, not the source.
+  Absence still stays absence — a background spawn's `subagent.tokens` is
+  omitted rather than reported as zero, because "free" and "not yet measured"
+  are different claims. SSOT `_subagent_sidecar` + `_read_subagent_meta`
+  (`ai_r.parsers.claude`) + the rollup in `ai_r.mcp_server`.
+- **What is NOT claimed.** `total` is the harness's `totalTokens` where present.
+  In the corpus checked it equals the sum of the `usage` components in every
+  completed spawn (280 of 280), so no claim is made that it captures rounds
+  `usage` misses — it is simply the number the harness bills, preferred over a
+  locally recomputed sum. Where a sidecar records `usage` but no `totalTokens`
+  (never seen in the corpus, but not forbidden by the format) the sum is the
+  documented fallback, and where it records neither there is **no** token block
+  at all. `tests/test_claude_subagent_cost.py` pins all three branches, so a
+  later "simplification" to a locally recomputed sum turns the suite red instead
+  of silently changing what every cost report means. Numbers are ints: a JSON
+  `true` is not a token count (a bool is an `int` in Python — the parser rejects
+  it explicitly, and a regression test seeds a bool-poisoned sidecar).
+- **Measured, not assumed.** The two claims this design rests on were checked
+  against the real corpus at the time of the change: background spawns are the
+  majority (701 of 981 sidecars are `async_launched`, and none of them carries
+  `agentType` or `usage`), and every child's own `agent-*.meta.json` names its
+  persona (1191 of 1191). That is why the persona is read from the child and the
+  parent sidecar is only the fallback — the reverse would leave ~72 % of spawns
+  anonymous.

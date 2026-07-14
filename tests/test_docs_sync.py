@@ -112,6 +112,26 @@ def test_every_mcp_tool_has_a_scenario() -> None:
     )
 
 
+def test_scenario_count_in_summary_matches_the_sections() -> None:
+    """The "N LLM-executed end-to-end scenarios" headline == the real count.
+
+    The headline is hand-maintained while scenarios are added in bulk, so it
+    silently rots (it read 97 while 104 sections existed). One scenario = one
+    ``### `` heading, so the count is derivable — assert it instead of trusting
+    the prose.
+    """
+    text = _SCENARIOS_DOC.read_text(encoding="utf-8")
+    sections = len(re.findall(r"^### ", text, flags=re.MULTILINE))
+    assert sections, "no `### ` scenario headings found — the regex broke"
+    claimed = re.search(r"^(\d+) LLM-executed end-to-end scenarios", text,
+                        flags=re.MULTILINE)
+    assert claimed, "scenarios.md lost its acceptance-summary headline"
+    assert int(claimed.group(1)) == sections, (
+        f"scenarios.md headline claims {claimed.group(1)} scenarios but "
+        f"{sections} `### ` sections exist — update the headline"
+    )
+
+
 def test_scenario_exemptions_are_still_tools() -> None:
     # Keep the exempt-list from rotting: every exempted name must still be a
     # real tool, else the list is silently masking a rename.

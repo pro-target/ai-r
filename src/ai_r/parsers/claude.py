@@ -86,7 +86,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from ._common import (
     _parse_iso_timestamp,
@@ -341,8 +341,9 @@ def _parent_uuid_from_subagent_path(
 
 def _read_subagent_meta(
     jsonl_path: Path,
-) -> Tuple[Optional[str], Optional[int]]:
-    """Return ``(tool_use_id, spawn_depth)`` from a subagent's ``.meta.json``.
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """Return ``(tool_use_id, spawn_depth, agent_type)`` from a subagent's
+    ``.meta.json``.
 
     Claude writes a sidecar ``agent-*.meta.json`` next to every
     ``subagents/agent-*.jsonl`` transcript.  Observed shape::
@@ -357,19 +358,26 @@ def _read_subagent_meta(
     top-level session).  ``spawnDepth`` is 1 for a subagent spawned by the
     top-level session and increments per nesting level.
 
-    Returns ``(None, None)`` when the file is absent, unreadable, not a
+    ``agentType`` is the PERSONA the child ran as (``explorer`` / ``auditor``
+    / …) — the dimension model pins are set on, and the one a cost audit
+    groups by.  It is read HERE, from the child's own meta, and NOT from the
+    spawner's result sidecar: a background spawn's sidecar is written at
+    launch and carries no ``agentType`` at all (the majority of spawns in a
+    real vault), whereas the meta file names every child.
+
+    Returns ``(None, None, None)`` when the file is absent, unreadable, not a
     JSON object, or carries no usable ``toolUseId`` — absence is honest and
     the caller falls back to the folder/``sessionId`` parent signal.
     """
     if jsonl_path.suffix != ".jsonl":
-        return None, None
+        return None, None, None
     meta_path = jsonl_path.with_suffix(".meta.json")
     try:
         record = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError, RecursionError):
-        return None, None
+        return None, None, None
     if not isinstance(record, dict):
-        return None, None
+        return None, None, None
     raw_tuid = record.get("toolUseId")
     tool_use_id = (
         raw_tuid.strip()
@@ -382,7 +390,13 @@ def _read_subagent_meta(
         if isinstance(raw_depth, int) and not isinstance(raw_depth, bool)
         else None
     )
-    return tool_use_id, spawn_depth
+    raw_type = record.get("agentType")
+    agent_type = (
+        raw_type.strip()
+        if isinstance(raw_type, str) and raw_type.strip()
+        else None
+    )
+    return tool_use_id, spawn_depth, agent_type
 
 
 def _project_dir_from_slug(slug: str) -> Optional[str]:
@@ -611,11 +625,18 @@ def _scan_file(
     # reconciliation pass can wire depth>1 subagents to their real parent
     # instead of collapsing every subagent to the top-level session.
     if in_subagents_dir:
-        spawn_tool_use_id, spawn_depth = _read_subagent_meta(jsonl_path)
+        spawn_tool_use_id, spawn_depth, subagent_type = _read_subagent_meta(
+            jsonl_path
+        )
         if spawn_tool_use_id is not None:
             extra["spawn_tool_use_id"] = spawn_tool_use_id
         if spawn_depth is not None:
             extra["spawn_depth"] = spawn_depth
+        if subagent_type is not None:
+            # The persona this child ran as. From the child's OWN meta, so a
+            # background spawn (whose parent-side sidecar names no persona) is
+            # still attributable.
+            extra["subagent_type"] = subagent_type
     if spawn_tool_use_ids:
         extra["_emitted_spawn_ids"] = tuple(spawn_tool_use_ids)
 
@@ -1151,6 +1172,95 @@ def _record_model(payload: dict) -> Optional[str]:
     return model
 
 
+#: Claude's ``usage`` wire names → the field names ai_r.tokens speaks.
+_SUBAGENT_USAGE_FIELDS = {
+    "input_tokens": "input",
+    "output_tokens": "output",
+    "cache_creation_input_tokens": "cache_write",
+    "cache_read_input_tokens": "cache_read",
+}
+
+#: Mirror of :data:`ai_r.tokens.TOKEN_FIELDS`.  Restated rather than imported:
+#: ``ai_r.tokens`` imports ``ai_r.parsers``, so importing it here would close a
+#: cycle.  ``test_subagent_token_block_matches_tokens_ssot`` fails if the two
+#: ever drift apart.
+_TOKEN_FIELDS = (
+    "input",
+    "output",
+    "reasoning",
+    "cache_read",
+    "cache_write",
+    "total",
+)
+
+
+def _subagent_sidecar(tool_use_result: Any) -> Optional[dict]:
+    """Normalise a ``Task`` call's record-level ``toolUseResult``, or ``None``.
+
+    When Claude Code finishes a subagent it records what the child actually
+    cost — ``resolvedModel`` (which can differ from the parent's model, since a
+    persona may pin a cheaper tier), the billed ``usage``, wall time, tool
+    count, and status.  Ordinary tools carry a ``toolUseResult`` too (commonly
+    a plain string), so the shape is checked rather than assumed: without a
+    ``resolvedModel`` or ``agentType`` this is not a subagent payload and is
+    left alone.
+
+    ``tokens`` reports EXACT billed usage (``source="exact"``), never an
+    estimate, and always carries the FULL :data:`ai_r.tokens.TOKEN_FIELDS`
+    shape (``None`` for what the harness did not record) so a consumer can
+    index it like any other token block instead of guarding every key.
+    ``total`` is the harness's own ``totalTokens`` where present — it is the
+    figure the harness bills — and falls back to the sum of the components.
+    """
+    if not isinstance(tool_use_result, dict):
+        return None
+    model = tool_use_result.get("resolvedModel")
+    agent_type = tool_use_result.get("agentType")
+    if not isinstance(model, str) and not isinstance(agent_type, str):
+        return None
+
+    def _int(value: Any) -> Optional[int]:
+        # JSON ``true`` is an int in Python — a bool is not a token count.
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    usage = tool_use_result.get("usage")
+    counted: dict[str, int] = {}
+    if isinstance(usage, dict):
+        for wire, field_name in _SUBAGENT_USAGE_FIELDS.items():
+            value = _int(usage.get(wire))
+            if value is not None:
+                counted[field_name] = value
+    total = _int(tool_use_result.get("totalTokens"))
+
+    tokens: Optional[dict[str, Any]] = None
+    if counted or total is not None:
+        tokens = {field: counted.get(field) for field in _TOKEN_FIELDS}
+        tokens["total"] = (
+            total if total is not None else sum(counted.values())
+        )
+        tokens["source"] = "exact"
+
+    sidecar: dict[str, Any] = {}
+    if isinstance(agent_type, str) and agent_type:
+        sidecar["agent_type"] = agent_type
+    if isinstance(model, str) and model:
+        sidecar["model"] = model
+    status = tool_use_result.get("status")
+    if isinstance(status, str) and status:
+        sidecar["status"] = status
+    duration = _int(tool_use_result.get("totalDurationMs"))
+    if duration is not None:
+        sidecar["duration_ms"] = duration
+    tool_uses = _int(tool_use_result.get("totalToolUseCount"))
+    if tool_uses is not None:
+        sidecar["tool_uses"] = tool_uses
+    if tokens is not None:
+        sidecar["tokens"] = tokens
+    return sidecar or None
+
+
 def _message_from_record(record: dict) -> Optional[Message]:
     """Build a :class:`Message` from a parsed Claude record, or skip it.
 
@@ -1172,6 +1282,20 @@ def _message_from_record(record: dict) -> Optional[Message]:
     tool_use: List[dict] = []
     tool_result: List[dict] = []
     user_refs: List[dict] = []
+    # ``toolUseResult`` is RECORD-level while ``content`` may hold several
+    # ``tool_result`` parts.  With more than one, the sidecar cannot be
+    # attributed to a particular call — drop it rather than bill the wrong
+    # subagent.  (``_derive_tool_result_error`` is unaffected: an error string
+    # is safe to apply per-part, a cost figure is not.)
+    result_part_count = (
+        sum(
+            1
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "tool_result"
+        )
+        if isinstance(content, list)
+        else 0
+    )
     if isinstance(content, list):
         for part in content:
             if not isinstance(part, dict):
@@ -1256,6 +1380,10 @@ def _message_from_record(record: dict) -> Optional[Message]:
                     # the event layer can correlate result↔call.  The qa-pair
                     # linker keys off this same field.
                     result_entry["tool_use_id"] = tuid
+                if result_part_count == 1:
+                    sidecar = _subagent_sidecar(record.get("toolUseResult"))
+                    if sidecar is not None:
+                        result_entry["subagent"] = sidecar
                 tool_result.append(result_entry)
     elif isinstance(content, str):
         text_chunks.append(content)

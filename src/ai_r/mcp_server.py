@@ -74,6 +74,7 @@ from ai_r.session_stats import (  # noqa: E402
     TOKEN_SCAN_LIMIT as _SESSION_STATS_TOKEN_SCAN_LIMIT,
     children_of as _children_of,
     session_stats as _session_stats_core,
+    subagent_cost_facts as _subagent_cost_facts,
 )
 from ai_r.tokens import (  # noqa: E402
     component_tokens,
@@ -1112,7 +1113,18 @@ def read_session(
             ``component_tokens`` block plus one per spawned subagent child
             (resolved via :func:`ai_r.session_stats.children_of` on
             ``parent_uuid``) and a ``total`` folding parent + children through
-            the ``aggregate`` ``component_tokens`` metric.  A childless parent
+            the ``aggregate`` ``component_tokens`` metric.  Each child entry
+            carries ``uuid`` / ``agent`` / ``component_tokens`` (the estimate)
+            plus **what it actually cost**: ``tokens`` read from the child's own
+            transcript on the honest three-tier ``source`` ladder — billed
+            ``"exact"`` where the child's transcript records usage, a labeled
+            ``"estimate"`` where it does not (a truncated / reference-only run),
+            ``source=None`` without any signal (never a fabricated zero) —
+            ``models`` (the model(s) it ran on — a persona pinned to a cheaper
+            tier shows up here), ``subagent_type`` (its persona, from the
+            child's own spawn metadata, falling back to the spawning call's
+            sidecar) and ``status`` where the spawn recorded one
+            (``"async_launched"`` for a background spawn).  A childless parent
             (or an agent like Antigravity that never records ``parent_uuid``)
             yields an empty ``children`` list and a ``total`` equal to the
             parent's own block — honest, not an error.  Independent of
@@ -1298,6 +1310,20 @@ def read_session(
     # and a ``total`` equal to the parent block.
     if include_subagents:
         parent_block = component_tokens(raw_messages, agent=session.agent)
+        # The spawning call's sidecar, keyed by ``tool_use_id`` — the same id
+        # the child stores as ``extra.spawn_tool_use_id``.  Index it once so
+        # each child can be joined to its own spawn without re-reading the
+        # parent.  It supplies the spawn ``status`` and is the FALLBACK source
+        # of the persona (the child's own meta is preferred — see below).
+        sidecars: dict[str, dict] = {}
+        for msg in raw_messages:
+            for entry in getattr(msg, "tool_result", ()) or ():
+                if not isinstance(entry, dict):
+                    continue
+                side = entry.get("subagent")
+                tuid = entry.get("tool_use_id")
+                if side and isinstance(tuid, str) and tuid:
+                    sidecars[tuid] = side
         children_out: List[dict[str, Any]] = []
         child_blocks: List[Optional[dict[str, Any]]] = []
         for child in _children_of(session.uuid):
@@ -1309,11 +1335,39 @@ def read_session(
                 except (FileNotFoundError, ValueError, OSError):
                     child_msgs = []
             child_block = component_tokens(child_msgs, agent=child.agent)
-            children_out.append({
+            # Cost facts read from the child's OWN files — the SSOT join shared
+            # with ``find_tool_calls(with_subagent_cost)`` (no second resolver).
+            # ``tokens`` follows the honest ``source`` ladder: EXACT where the
+            # child's transcript records usage, a labeled ``estimate`` where it
+            # does not (a truncated / reference-only run), ``source=None``
+            # without any signal — never a fabricated zero.  This is also the
+            # only usable source for a background spawn, whose parent-side
+            # sidecar is written at launch (``status: async_launched``) before
+            # any usage exists.
+            facts = _subagent_cost_facts(child, messages=child_msgs)
+            child_out: dict[str, Any] = {
                 "uuid": child.uuid,
                 "agent": child.agent.value.lower(),
                 "component_tokens": child_block,
-            })
+                "tokens": facts["tokens"],
+            }
+            if facts.get("models"):
+                child_out["models"] = facts["models"]
+            child_extra = getattr(child, "extra", None) or {}
+            side = sidecars.get(child_extra.get("spawn_tool_use_id") or "")
+            # Persona (``explorer``/``auditor``/…) — the dimension model pins
+            # are set on.  Prefer the child's OWN meta: a background spawn's
+            # parent-side sidecar is written at launch and names no persona,
+            # and those are the majority of spawns in a real vault.  The
+            # sidecar is only a fallback for a child whose meta lacks it.
+            persona = facts.get("subagent_type") or (
+                side.get("agent_type") if side else None
+            )
+            if persona:
+                child_out["subagent_type"] = persona
+            if side and side.get("status"):
+                child_out["status"] = side["status"]
+            children_out.append(child_out)
             child_blocks.append(child_block)
         summary["subagent_rollup"] = {
             "parent": parent_block,
@@ -1433,6 +1487,7 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    with_subagent_cost: bool = False,
     redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
@@ -1466,6 +1521,33 @@ def find_tool_calls(
     ``"<server>:<tool>"``); ``None`` when there is no wrapper or the
     input carries no name signal.
 
+    A record whose call has a correlated result also carries
+    ``tool_use_id`` — the join key back to a spawned subagent's own session
+    (the child stores it as ``extra.spawn_tool_use_id``).  On a spawn
+    (``tool_kind="task"``) it additionally carries ``subagent``: what the
+    child COST — ``model`` (the model it actually resolved to, which may be a
+    cheaper pinned tier than the parent's), ``agent_type`` (persona),
+    ``tokens`` (EXACT billed usage, ``source="exact"``, full token-block
+    shape), ``status``, ``duration_ms``, ``tool_uses``.  Honest gaps: a
+    background spawn (``status="async_launched"``, sidecar written before the
+    run exists) reports its model with **no** ``tokens`` key — never a
+    fabricated zero; its real cost and persona come from
+    ``read_session(include_subagents=True)`` → ``subagent_rollup.children``.
+    A record carrying several tool results drops the sidecar rather than
+    billing it to the wrong subagent.
+
+    ``with_subagent_cost=True`` (opt-in) recovers exactly that for the spawn
+    records here: each ``subagent`` sidecar is JOINED to the spawned child's
+    own files, adding the persona (``agent_type``) from the child's
+    ``agent-*.meta.json``, the ``models`` it ran on, its EXACT billed
+    ``tokens`` (``source="exact"``, an estimate is never merged into the
+    billing field) and ``child_uuid``. So a background spawn — anonymous and
+    price-less in the launch-time sidecar — becomes a named, priced row. The
+    child is preferred over the sidecar, which stays the fallback for a child
+    that cannot be joined (not yet on disk, meta corrupt): its ``tokens`` are
+    then left absent, never zeroed. Default ``False`` reads no per-spawn child
+    file (a cross-corpus scan does not pay the join).
+
     Thin wrapper over :func:`ai_r.find_tool_calls.find_tool_calls`
     that translates the core ``ValueError`` contract into the
     ``{"error": "invalid_argument", "message": str(exc)}`` shape the
@@ -1485,6 +1567,7 @@ def find_tool_calls(
             output_excludes=output_excludes,
             is_error=is_error,
             output_mode=output_mode,
+            with_subagent_cost=with_subagent_cost,
             redact=redact,
         )
     except ValueError as exc:
@@ -1517,6 +1600,11 @@ def session_stats(
       ``"(unknown)"`` for agents without any signal).
     * ``"date"``  — by calendar day (``YYYY-MM-DD``).
     * ``"kind"``  — top-level *agent* sessions vs spawned *subagent* sessions.
+    * ``"model"`` — by the model that produced the session.  A session that
+      mixed models buckets as ``"(mixed)"`` rather than being attributed to
+      one of them; one whose transcript records no model is ``"(unknown)"``.
+      Neither is guessed.  Pair with ``with_tokens=True`` to see what each
+      model actually cost.
 
     Each group carries its session count plus enrichment from the shared
     ``find_file_edits`` core: ``edits`` (file edits attributed to the group's
