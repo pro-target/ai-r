@@ -11,18 +11,18 @@
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
-      "identifier": "ai-r",
+      "identifier": "ai-reader",
       "version": "0.4.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "positional",
           "value": "--from",
-          "description": "uvx flag: resolve the console script from the ai-r package"
+          "description": "uvx flag: resolve the console script from the ai-reader package"
         },
         {
           "type": "positional",
-          "value": "ai-r",
+          "value": "ai-reader",
           "description": "PyPI package that ships the ai-r-mcp entry point"
         },
         {
