@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-14
+
+### Fixed
+
+- **Parser hardening found by fuzzing.** Deeply nested JSON no longer raises
+  `RecursionError` (one hostile line used to take down listing for the whole
+  store); Claude records whose `message` is a list or scalar, OpenCode BLOB
+  titles and out-of-range epochs no longer crash search. Every case is a
+  skipped record now, per the fail-soft contract.
+
+### Changed
+
+- **PyPI distribution name is `agent-session-reader`.** `ai-r` is rejected by
+  PyPI (it folds to `air`, an existing project) and `ai-reader` is taken. The
+  commands (`ai-r`, `ai-r-mcp`) and the import package (`ai_r`) are unchanged;
+  only the install source differs: `uvx --from agent-session-reader ai-r-mcp`.
+
 ### Added
 
 - **Property-based parser fuzzing** (`tests/test_fuzz_parsers.py`, `hypothesis`

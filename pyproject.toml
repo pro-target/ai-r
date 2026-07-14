@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # else. The CLI commands (ai-r, ai-r-mcp) and the import package (ai_r) are
 # unaffected by the distribution name.
 name = "agent-session-reader"
-version = "0.4.0"
+version = "0.4.1"
 description = "Multi-agent session reader (Claude, Codex, OpenCode, Antigravity, Pi) with MCP server"
 readme = "README.md"
 license = {text = "MIT"}
