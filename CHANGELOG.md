@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Subagent cost — what each spawned agent actually burned, and on which
+  model.** A spawn was already classified (`tool_kind=task`); what was missing
+  was its price. `find_tool_calls` now emits `tool_use_id` and, on a spawn, a
+  `subagent` sidecar: the model the child *resolved to* (a persona can be
+  pinned to a cheaper tier than its parent, so the parent's model does not
+  answer what the run cost), the persona, exact billed `tokens`
+  (`source: "exact"`, full token-block shape), plus `status` / `duration_ms` /
+  `tool_uses`. `read_session(include_subagents=True)` children gained exact
+  `tokens`, `models`, `subagent_type` and `status`. New
+  `session_stats(group_by="model")` (also `ai-r stats --group-by model`);
+  `"(mixed)"` / `"(unknown)"` are never guessed. Docs: `docs/methods.md`
+  → *Subagent cost*, ADR in `docs/architecture.md`, scenarios SUB-1/SUB-2.
+- **`find_tool_calls(with_subagent_cost=True)`** (also `ai-r find-tool-calls
+  --with-subagent-cost`) — opt-in join of each spawn's `subagent` sidecar to the
+  spawned child's OWN files: the persona from the child's `agent-*.meta.json`,
+  the `models` it ran on, its **exact** billed `tokens`, and `child_uuid`. This
+  recovers the cost of a *background* spawn (anonymous and price-less in the
+  launch-time sidecar — the majority in a real vault), so a per-persona ×
+  per-model cost table covers them too. Default off reads no per-spawn file, so
+  a cross-corpus scan is unchanged. Shares one resolver
+  (`session_stats.subagent_costs_by_spawn`) with the `read_session` rollup.
+- Honesty guards: a record carrying several `tool_result` parts drops the
+  sidecar rather than billing the wrong subagent; a background spawn
+  (`status: async_launched`, sidecar written before any usage exists) reports
+  its model with **no** token block — its real cost and persona are recovered
+  from the child's own transcript and `agent-*.meta.json` instead of being
+  invented as a zero; and `read_session(include_subagents=True)` child `tokens`
+  carry the honest three-tier `source` (`exact` where the child's transcript
+  records usage, labeled `estimate` where it does not, `null` without a signal)
+  — never a blanket `exact` nor a fabricated zero.
+
 ## [0.4.2] - 2026-07-14
 
 <!-- 0.4.1 was tagged but never published: the release workflow pinned an

@@ -118,6 +118,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     ftc_p.add_argument(
+        "--with-subagent-cost",
+        dest="with_subagent_cost",
+        action="store_true",
+        help=(
+            "On a spawn (tool_kind=task), join the subagent sidecar to the "
+            "child's own files: persona, model(s) and EXACT billed tokens — "
+            "recovering the cost of a background spawn. Reads one small file "
+            "per spawn (default off)."
+        ),
+    )
+    ftc_p.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
@@ -156,6 +167,7 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
             output_excludes=args.output_excludes,
             is_error=is_error,
             output_mode=args.output_mode,
+            with_subagent_cost=args.with_subagent_cost,
             redact=_want_redact(args),
         )
     except ValueError as exc:

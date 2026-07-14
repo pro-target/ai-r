@@ -221,7 +221,7 @@ def test_session_stats_bad_since_raises() -> None:
 
 
 def test_group_by_set_is_complete() -> None:
-    assert GROUP_BY == {"agent", "dir", "date", "kind"}
+    assert GROUP_BY == {"agent", "dir", "date", "kind", "model"}
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,8 @@ __all__ = [
     "GROUP_BY",
     "children_of",
     "group_key",
+    "subagent_cost_facts",
+    "subagent_costs_by_spawn",
     "session_stats",
 ]
 
@@ -84,10 +86,96 @@ def children_of(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Subagent cost — what a spawned child ACTUALLY cost, read from the child
+# ---------------------------------------------------------------------------
+#
+# The spawning call's parent-side sidecar (``toolUseResult``) is written at
+# LAUNCH for a background spawn, before any usage or persona exists — and those
+# are the majority of spawns in a real vault.  The authoritative source is the
+# CHILD: its own transcript carries the billed usage, its own
+# ``agent-*.meta.json`` carries the persona and the ``spawn_tool_use_id`` that
+# links it back to the spawning call.  This is the ONE place that reads those
+# facts, so ``read_session(include_subagents)`` and
+# ``find_tool_calls(with_subagent_cost)`` share identical join semantics (no
+# second, drifting resolver).
+
+
+def subagent_cost_facts(
+    child: Session, *, messages: Optional[List[Any]] = None
+) -> Dict[str, Any]:
+    """Return what a spawned ``child`` cost, read from the child's OWN files.
+
+    * ``child_uuid`` — the child session's uuid (join provenance).
+    * ``tokens`` — the child's :func:`ai_r.tokens.session_tokens` block:
+      ``source="exact"`` where the child's transcript records usage, an honest
+      labeled ``estimate`` where it does not, ``source=None`` without any
+      signal — the same three-tier ``source`` ladder ``session_stats`` uses,
+      never a fabricated zero.
+    * ``models`` — the model(s) the child ran on, when the transcript records
+      one (a persona pinned to a cheaper tier shows up here); omitted otherwise.
+    * ``subagent_type`` — the persona from the child's OWN spawn metadata
+      (``extra.subagent_type``); omitted when the meta names none.
+    * ``spawn_tool_use_id`` — the id of the spawning call, from the child's own
+      meta (``extra.spawn_tool_use_id``); omitted when the meta carries none,
+      in which case the child cannot be joined to a specific call.
+
+    ``messages`` may be passed to reuse an already-parsed transcript (as
+    ``read_session`` does); when ``None`` they are read from the owning parser
+    on demand.  Any I/O failure degrades to an empty transcript — this never
+    raises on a readable inventory row.
+    """
+    if messages is None:
+        parser = PARSERS.get(child.agent)
+        messages = []
+        if parser is not None:
+            try:
+                messages = list(parser.read_messages(child.uuid))
+            except (FileNotFoundError, ValueError, OSError):
+                messages = []
+    facts: Dict[str, Any] = {
+        "child_uuid": child.uuid,
+        "tokens": _session_tokens(child, messages=messages),
+    }
+    models = tuple(getattr(child, "models", ()) or ())
+    if models:
+        facts["models"] = list(models)
+    extra = getattr(child, "extra", None) or {}
+    persona = extra.get("subagent_type")
+    if isinstance(persona, str) and persona:
+        facts["subagent_type"] = persona
+    spawn_id = extra.get("spawn_tool_use_id")
+    if isinstance(spawn_id, str) and spawn_id:
+        facts["spawn_tool_use_id"] = spawn_id
+    return facts
+
+
+def subagent_costs_by_spawn(
+    parent_uuid: str, *, agent: Optional[str] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Map ``spawn_tool_use_id`` → :func:`subagent_cost_facts` for a parent.
+
+    Resolves the parent's spawned children (:func:`children_of`) and keys each
+    by the spawning call's id, so a caller holding a spawn record can join it
+    to what the child cost.  A child whose meta carries no join key is dropped
+    (it cannot be attributed to a specific call — absence over a guess).
+
+    Reads one small transcript per child, so callers gate it behind an opt-in
+    flag rather than paying it on every scan.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for child in children_of(parent_uuid, agent=agent):
+        facts = subagent_cost_facts(child)
+        spawn_id = facts.get("spawn_tool_use_id")
+        if isinstance(spawn_id, str) and spawn_id:
+            out[spawn_id] = facts
+    return out
+
+
 # The dimensions a caller may roll up by.  Kept as an explicit, validated
 # set so an unknown ``group_by`` fails fast with a clear message instead of
 # silently bucketing everything under ``None``.
-GROUP_BY: frozenset[str] = frozenset({"agent", "dir", "date", "kind"})
+GROUP_BY: frozenset[str] = frozenset({"agent", "dir", "date", "kind", "model"})
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +247,18 @@ def group_key(session: Any, group_by: str) -> str:
     * ``date``  → the ``YYYY-MM-DD`` calendar day of ``session.date``
       (``"(undated)"`` when the session has no usable timestamp).
     * ``kind``  → ``session.kind`` (``"agent"`` / ``"subagent"``).
+    * ``model`` → the model that produced the session.  A session that mixed
+      several models buckets as ``"(mixed)"`` rather than being attributed to
+      one of them, and one whose transcript records no model at all is
+      ``"(unknown)"`` — neither is guessed.
     """
     if group_by == "agent":
         return session.agent.value.lower()
+    if group_by == "model":
+        models = tuple(getattr(session, "models", ()) or ())
+        if not models:
+            return "(unknown)"
+        return models[0] if len(models) == 1 else "(mixed)"
     if group_by == "kind":
         # Defensive: an unexpected/empty kind folds into "agent" so the
         # split stays binary and never grows a stray bucket.
@@ -366,6 +463,7 @@ def session_stats(
                 "dir": group_key(session, "dir"),
                 "date": group_key(session, "date"),
                 "kind": group_key(session, "kind"),
+                "model": group_key(session, "model"),
                 "edits": enrich["edits"] if enrich is not None else 0,
                 "intents": sorted(enrich["intents"]) if enrich is not None else [],
                 "messages": int(getattr(session, "message_count", 0) or 0),

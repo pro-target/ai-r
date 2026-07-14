@@ -131,6 +131,41 @@ def _match_ci(haystack: str, needle: str) -> bool:
     return needle.lower() in haystack.lower()
 
 
+def _join_subagent_cost(
+    sidecar: dict[str, Any], facts: Optional[dict[str, Any]]
+) -> dict[str, Any]:
+    """Enrich a spawn's parent-side ``sidecar`` with the child's OWN cost facts.
+
+    ``facts`` is one :func:`ai_r.session_stats.subagent_cost_facts` entry (or
+    ``None`` when the child could not be joined).  Returns a NEW dict — the
+    parser-owned sidecar is never mutated.  The child is preferred over the
+    sidecar for the persona, model(s) and tokens; the sidecar stays the
+    fallback:
+
+    * ``child_uuid`` is set only when a child was actually joined (its absence
+      is the honest signal that no join ran / no child was found);
+    * ``tokens`` are lifted from the child ONLY when they are ``exact`` — an
+      estimate is never merged into a billing field, and a child with no usage
+      leaves the sidecar's own ``tokens`` (or absence) untouched, never a zero;
+    * ``agent_type`` / ``models`` from the child override the sidecar when the
+      child names them, else the sidecar's own values stand.
+    """
+    if not facts:
+        return sidecar
+    joined = dict(sidecar)
+    joined["child_uuid"] = facts["child_uuid"]
+    persona = facts.get("subagent_type")
+    if persona:
+        joined["agent_type"] = persona
+    models = facts.get("models")
+    if models:
+        joined["models"] = models
+    tokens = facts.get("tokens")
+    if isinstance(tokens, dict) and tokens.get("source") == "exact":
+        joined["tokens"] = tokens
+    return joined
+
+
 def find_tool_calls(
     *,
     tool_name: Optional[str] = None,
@@ -145,6 +180,7 @@ def find_tool_calls(
     output_excludes: Optional[str] = None,
     is_error: Optional[bool] = None,
     output_mode: Optional[str] = None,
+    with_subagent_cost: bool = False,
     redact: bool = True,
 ) -> dict[str, Any]:
     """Find every tool call across sessions, cross-agent by default.
@@ -188,6 +224,25 @@ def find_tool_calls(
             (first chars), ``"tail"`` (last chars), or ``"smart"``
             (error lines + tail).  ``None`` = adaptive — ``"smart"`` for
             error records, ``"head"`` otherwise.
+        with_subagent_cost: When ``True`` (opt-in) each spawn record's
+            ``subagent`` sidecar is enriched by JOINING it to the spawned
+            child's OWN files — the persona from the child's
+            ``agent-*.meta.json`` (``subagent.agent_type``), the model(s) it
+            ran on (``subagent.models``) and its EXACT billed usage
+            (``subagent.tokens``, ``source="exact"``), plus ``subagent.
+            child_uuid`` naming the joined child.  This recovers the cost of a
+            **background** spawn, whose parent-side sidecar was written at
+            launch (``status="async_launched"``) before any usage or persona
+            existed — the majority of spawns in a real vault.  The child is
+            preferred over the parent sidecar; the sidecar stays the FALLBACK
+            for a child that cannot be joined (not yet on disk, meta corrupt),
+            in which case ``tokens`` is left absent rather than reported as
+            zero, and only the child's ``exact`` tokens are lifted (an estimate
+            is never merged into the billing field).  Default ``False``: the
+            sidecar is the parent-side record verbatim and NO per-spawn child
+            file is read — a cross-corpus scan does not pay the join.  The join
+            reuses :func:`ai_r.session_stats.subagent_costs_by_spawn` (the same
+            resolver ``read_session(include_subagents=True)`` uses).
         redact: When ``True`` (default) secrets in emitted record fields
             (``session_title``/``input``/``intent``/``assistant``/
             ``output``) are masked as ``[REDACTED_<TYPE>]`` and the
@@ -296,6 +351,10 @@ def find_tool_calls(
             "output_mode must be one of 'head', 'tail', 'smart', "
             f"got {output_mode!r}"
         )
+    if not isinstance(with_subagent_cost, bool):
+        raise ValueError(
+            f"with_subagent_cost must be a bool, got {with_subagent_cost!r}"
+        )
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
 
@@ -326,6 +385,11 @@ def find_tool_calls(
                 messages = parser.read_messages(sess.uuid)
             except (FileNotFoundError, ValueError, OSError):
                 continue
+            # ``with_subagent_cost`` join map, built lazily on the FIRST spawn
+            # in this session so a session with no spawns never pays for a
+            # child scan.  ``None`` = not yet computed; ``{}`` = computed, no
+            # joinable child.
+            cost_map: Optional[dict[str, dict[str, Any]]] = None
             session_iso = iso(sess.date)
             session_title = sess.title
             session_ts: Optional[Any] = to_utc_aware(sess.date)
@@ -465,7 +529,7 @@ def find_tool_calls(
                     call_kind, call_resolved = resolve_tool(
                         name, coerced_input
                     )
-                    records.append({
+                    record = {
                         "agent": agent_name.value.lower(),
                         "session_uuid": sess.uuid,
                         "session_title": session_title,
@@ -486,7 +550,33 @@ def find_tool_calls(
                         ),
                         "output": capped_output,
                         "truncated_fields": truncated_fields,
-                    })
+                    }
+                    if isinstance(tu_id, str) and tu_id:
+                        # Join key: a spawned subagent's own session carries
+                        # this id as ``extra.spawn_tool_use_id``, so caller and
+                        # child transcript can be correlated.
+                        record["tool_use_id"] = tu_id
+                    # What the subagent behind a ``Task`` call actually cost
+                    # (model it resolved to + exact billed tokens).  Present
+                    # only on Claude Task calls; absent everywhere else.
+                    subagent = result.get("subagent") if result else None
+                    if subagent:
+                        if with_subagent_cost:
+                            if cost_map is None:
+                                from ai_r.session_stats import (
+                                    subagent_costs_by_spawn,
+                                )
+                                cost_map = subagent_costs_by_spawn(
+                                    sess.uuid,
+                                    agent=agent_name.value.lower(),
+                                )
+                            subagent = _join_subagent_cost(
+                                subagent,
+                                cost_map.get(tu_id) if isinstance(tu_id, str)
+                                else None,
+                            )
+                        record["subagent"] = subagent
+                    records.append(record)
 
     records.sort(key=lambda r: (r["timestamp"] is None, r["timestamp"] or ""))
     total = len(records)

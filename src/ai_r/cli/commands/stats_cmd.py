@@ -10,7 +10,7 @@ from ai_r.cli.shared import _AGENT_CHOICES, _exit_with_error
 
 # Kept in step with :data:`ai_r.session_stats.GROUP_BY` (a test guards the
 # sync); an explicit tuple pins the ``--help`` ordering.
-_GROUP_BY_CHOICES = ("agent", "dir", "date", "kind")
+_GROUP_BY_CHOICES = ("agent", "dir", "date", "kind", "model")
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
