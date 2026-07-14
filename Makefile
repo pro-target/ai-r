@@ -1,4 +1,4 @@
-.PHONY: test test-hermetic test-host lint usage-audit
+.PHONY: test test-hermetic test-host lint docs-lint usage-audit
 
 # Interpreter: env has python3, not always bare `python` (CI/lint died on
 # "python: not found"). Override if your venv exposes a different name.
@@ -24,6 +24,11 @@ lint:
 	$(PYTHON) -c "import ai_r, ai_r.cli, ai_r.mcp_server, ai_r.parsers"
 	ruff check src/
 	mypy src/
+
+# Mirrors the CI `docs-lint` job (no Cyrillic in the English docs, no broken
+# relative links). Stdlib only — no venv, no install. Run after touching docs.
+docs-lint:
+	$(PYTHON) scripts/docs_lint.py
 
 # Self-referential usage audit (CONTRIBUTING → Releasing): which ai-r verbs/params were
 # actually called since the last release. Reads a real vault. Run once per
