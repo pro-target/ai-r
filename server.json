@@ -11,18 +11,18 @@
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
-      "identifier": "ai-reader",
+      "identifier": "agent-session-reader",
       "version": "0.4.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "positional",
           "value": "--from",
-          "description": "uvx flag: resolve the console script from the ai-reader package"
+          "description": "uvx flag: resolve the console script from the agent-session-reader package"
         },
         {
           "type": "positional",
-          "value": "ai-reader",
+          "value": "agent-session-reader",
           "description": "PyPI package that ships the ai-r-mcp entry point"
         },
         {

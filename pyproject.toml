@@ -3,11 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Distribution name on PyPI. NOT "ai-r": PyPI's anti-typosquatting check folds
-# separators and look-alike chars, so "ai-r" collapses to "air" — an existing
-# project — and is rejected. The CLI commands (ai-r, ai-r-mcp) and the import
-# package (ai_r) are unaffected.
-name = "ai-reader"
+# Distribution name on PyPI. NOT "ai-r": PyPI folds separators and look-alike
+# chars (l/i→1, o→0) when checking for typosquats, so "ai-r" collapses to "air",
+# an existing project, and is rejected. "ai-reader" is registered by someone
+# else. The CLI commands (ai-r, ai-r-mcp) and the import package (ai_r) are
+# unaffected by the distribution name.
+name = "agent-session-reader"
 version = "0.4.0"
 description = "Multi-agent session reader (Claude, Codex, OpenCode, Antigravity, Pi) with MCP server"
 readme = "README.md"
