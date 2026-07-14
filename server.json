@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.pro-target/ai-r",
+  "description": "Read local AI agent sessions (Claude Code, Codex, OpenCode, Antigravity, Pi): intents, plans, tools",
+  "repository": {
+    "url": "https://github.com/pro-target/ai-r",
+    "source": "github"
+  },
+  "version": "0.4.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "ai-r",
+      "version": "0.4.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "--from",
+          "description": "uvx flag: resolve the console script from the ai-r package"
+        },
+        {
+          "type": "positional",
+          "value": "ai-r",
+          "description": "PyPI package that ships the ai-r-mcp entry point"
+        },
+        {
+          "type": "positional",
+          "value": "ai-r-mcp",
+          "description": "MCP server console script (stdio transport by default)"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
