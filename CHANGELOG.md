@@ -6,7 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-07-14
+## [0.4.2] - 2026-07-14
+
+<!-- 0.4.1 was tagged but never published: the release workflow pinned an
+     old pypa/gh-action-pypi-publish whose twine rejects Metadata-Version 2.4. -->
 
 ### Fixed
 
