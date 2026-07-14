@@ -75,6 +75,25 @@ Even with a **single** agent it works: you audit your own Claude history (or
 Codex…). The five formats are so your history doesn't break when you switch
 tools — not a requirement to have all five.
 
+### As a source for RAG
+
+In an "LLM + external data source" setup (RAG), `ai-r` is the **source** — more
+precisely, a retrieval layer over agent sessions. For a query it returns not a
+slice of log but parsed entities: the plan, the intent, the authorship of an
+edit — with a reference to the body the agent can pull if it needs it.
+
+It **doesn't replace** your RAG over code and docs; it adds a source the others
+can't reach. The usual sources you retrieve from: documentation, commit history,
+Stack Overflow, internal wikis, code bases, bug reports. Agent sessions aren't on
+that list — even though only there is it recorded **why** an edit happened at
+all.
+
+Retrieval is BM25 (ranked keyword search), with optional semantic re-ranking. No
+vector database, no second LLM: all local, results reproducible. BM25 here isn't
+a shortcut — GitHub lists it alongside vector retrievers: ["Common retrievers
+include sparse methods like BM25 and dense vector retrievers using neural
+networks."](https://github.com/resources/articles/software-development-with-retrieval-augmentation-generation-rag)
+
 ## Key features
 
 Each item is a trust question from the first screen and the verb that answers it:
@@ -233,7 +252,20 @@ What you do next (knowledge graph, Obsidian, persistent memory) is on your side,
 outside this repo. For the full layering and the MCP tool list, see
 [docs/architecture.md](./docs/architecture.md).
 
-## Quick start (1 command)
+## Quick start
+
+**Try it without installing** — if you have [uv](https://docs.astral.sh/uv/):
+
+```bash
+uvx --from agent-session-reader ai-r list          # CLI: list sessions
+uvx --from agent-session-reader ai-r-mcp           # MCP server (stdio)
+```
+
+Nothing lands on your system: `uvx` downloads the package into a temporary cache
+and runs it. Good for looking at your sessions right now, or for wiring
+`ai-r-mcp` into an agent's MCP config by hand.
+
+**Full install (1 command)** — also patches your configs:
 
 Requirements: Python 3.11+ with `venv` or `pip`, and `jq` (used to auto-patch
 the Claude and Antigravity MCP configs — the others don't need `jq`).
@@ -245,7 +277,8 @@ cd ~/dev/ai-r && bash install.sh
 
 The installer creates a venv, installs the runtime package, patches MCP configs
 for **Claude**, **Codex**, **OpenCode**, **Antigravity** (where the configs
-exist), installs the **Pi** CLI skill, and runs smoke tests.
+exist), installs the **Pi** CLI skill, and runs smoke tests. That auto-patch is
+exactly what `uvx` doesn't do — there you edit the configs yourself.
 
 Optional extra — `tokens`: `AI_R_EXTRAS=tokens bash install.sh` (or
 `pip install "ai-r[tokens]"`) adds [tiktoken](https://github.com/openai/tiktoken)
@@ -342,7 +375,7 @@ A gallery of real examples — one per capability (error analysis, dangerous com
 
 - Method vocabulary (verbs + presets) — [`docs/methods.md`](./docs/methods.md)
   (English SSOT) · [`docs/methods.ru.md`](./docs/methods.ru.md) (Russian mirror)
-- Acceptance scenarios (97 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
+- Acceptance scenarios (104 e2e) — [`docs/scenarios.md`](./docs/scenarios.md)
 - Architecture & layering — [`docs/architecture.md`](./docs/architecture.md)
 - Search operators — [`docs/search-operators.md`](./docs/search-operators.md)
 - Per-agent MCP registration — [`docs/mcp-registration.md`](./docs/mcp-registration.md)
@@ -373,6 +406,8 @@ pytest --cov=src/ai_r
 
 claude code session reader · claude code session parser · codex session parser ·
 opencode session reader · antigravity brain parser · pi agent session reader ·
+rag over agent sessions · bm25 retriever · retrieval layer for ai agents ·
+grounding · mcp server · structured context ·
 cross-agent attribution · ai coding agent audit · ai agent session history ·
 mcp session tools · read-only session reader · agent session replay ·
 resume agent session · agent handoff · plan extraction · tool-call audit ·
@@ -386,6 +421,7 @@ MIT — see [LICENSE](./LICENSE).
 
 ---
 
-**Get started:** clone + `bash install.sh`, then register the MCP server for your
-agent ([docs/mcp-registration.md](./docs/mcp-registration.md)) and restart the
-host tool. One read-only surface to every agent's history.
+**Get started:** `uvx --from agent-session-reader ai-r list` — see your sessions
+right now; or clone + `bash install.sh` for the full install with MCP-config
+auto-patching ([docs/mcp-registration.md](./docs/mcp-registration.md)). One
+read-only surface over every agent's history.
