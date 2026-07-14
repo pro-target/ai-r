@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.pro-target/ai-r -->
 # ai-r
 
 [![CI](https://github.com/pro-target/ai-r/workflows/CI/badge.svg)](https://github.com/pro-target/ai-r/actions)
