@@ -1,0 +1,25 @@
+name: Dependency review
+
+# Blocks a PR that introduces a dependency with a known vulnerability, before it
+# lands — free for public repos. Reads the dependency-graph diff of the PR, so it
+# only ever fires when a manifest/lockfile (pyproject.toml, uv.lock) changes.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          # Moderate-and-below land with a warning in the job log; high/critical
+          # fail the check. A NEW vulnerable dep is a merge blocker, not a note.
+          fail-on-severity: high
