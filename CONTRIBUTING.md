@@ -10,32 +10,47 @@ fastest path from idea to merge is:
    `fix/<short-name>`, `docs/<short-name>`.
 3. **Write the change + tests.** New parsers need unit tests with
    fixtures under `tests/fixtures/`.
-4. **Run the full test suite + linters locally — before every push:**
+4. **Run the gates locally — before every push:**
    ```bash
-   pip install -e ".[dev]"
-   pytest --cov=src/ai_r
-   make lint          # import smoke + `ruff check src/` + `mypy src/`
+   pip install -e ".[dev]"   # dev setup; install.sh is for *using* ai-r, not hacking on it
+   make test                 # full suite, uses your host session data where present
+   make test-hermetic        # same suite on an EMPTY HOME, host tests deselected
+   make lint                 # import smoke + `ruff check src/` + `mypy src/`
+   make docs-lint            # no Cyrillic in the English docs, no broken relative links
    ```
-   Coverage must stay ≥ 85% (`pyproject.toml` enforces this in CI).
-   `make lint` mirrors the CI `lint` job exactly, so a red lint (e.g. a
-   `mypy` type error) is caught here, not after the push.
-5. **Run the LLM e2e acceptance scenarios** whenever the change adds
+   Each target mirrors a CI job exactly, so a red gate (a `mypy` error,
+   a broken link) surfaces here — not after the push. Coverage must stay
+   ≥ 85%. `make test-hermetic` is the one people forget: tests must pass
+   on a machine with **zero** local session data, so anything that
+   secretly reads your real `~/.claude` fails there. Host-dependent tests
+   are marked `@pytest.mark.host` and skipped, never failed, on a bare
+   host.
+5. **Keep the docs in the same commit as the code.** These are merge
+   gates, not chores — CI enforces the first one, reviewers the rest:
+   - `docs/methods.md` (English SSOT; mirror `docs/methods.ru.md`) —
+     when the public surface changes;
+   - [docs/scenarios.md](./docs/scenarios.md) — every MCP tool needs a
+     scenario (`tests/test_docs_sync.py` fails otherwise);
+   - [docs/architecture.md](./docs/architecture.md) — a new
+     `src/ai_r/*.py` subsystem, or a reversal of an earlier decision,
+     needs its ADR entry.
+
+   Prose in `README*.md` is a separate, human-reviewed flow — do not
+   bundle it into a code PR.
+6. **Run the LLM e2e acceptance scenarios** whenever the change adds
    or modifies functionality (a new MCP tool or parameter, any
-   behaviour change on the public surface). Both gates must pass —
-   the pytest suite AND the scenario run:
-   - update [docs/scenarios.md](./docs/scenarios.md) first — it is the
-     SSOT for the public surface; CI fails when an MCP tool has no
-     scenario (`tests/test_docs_sync.py`);
-   - then have an LLM agent execute the affected scenarios against a
-     **live** MCP server (see *How to run* in `docs/scenarios.md`).
-     Every runnable scenario must resolve **GO** or
-     **GO-with-caveats**; `[needs-real-vault]` scenarios without the
-     required vault data are skipped, not failed. A **NO-GO blocks
-     the merge**.
-6. **Conventional Commits.** Allowed prefixes: `feat:`, `fix:`,
+   behaviour change on the public surface). Both gates must pass — the
+   pytest suite AND the scenario run. With `docs/scenarios.md` updated
+   (step 5), have an LLM agent execute the affected scenarios against a
+   **live** MCP server (see *How to run* in `docs/scenarios.md`). Every
+   runnable scenario must resolve **GO** or **GO-with-caveats**;
+   `[needs-real-vault]` scenarios without the required vault data are
+   skipped, not failed. A **NO-GO blocks the merge**.
+7. **Conventional Commits.** Allowed prefixes: `feat:`, `fix:`,
    `docs:`, `test:`, `refactor:`, `chore:`, `ci:`. Example:
-   `feat(parsers): add Gemini parser`.
-7. **Open a PR.** The PR template will guide you. CI must be green.
+   `feat(parsers): add Gemini parser`. Keep commits atomic — one
+   concern per commit, code and its docs together.
+8. **Open a PR.** The PR template will guide you. CI must be green.
    A maintainer will review within a few days.
 
 ## Releasing
