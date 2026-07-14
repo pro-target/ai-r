@@ -366,7 +366,9 @@ def _safe_json(blob: object) -> object:
         return None
     try:
         return json.loads(blob)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
+        # RecursionError: a pathologically nested blob (the decoder gives up)
+        # — treated like any other unparseable payload.
         return None
 
 

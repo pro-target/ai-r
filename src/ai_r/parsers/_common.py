@@ -74,6 +74,10 @@ def iter_jsonl_records(
       non-UTF-8 byte yields a replacement character rather than raising
       ``UnicodeDecodeError`` and making the whole session vanish.
 
+    * **Nesting-tolerant.** A line whose JSON nests deeper than the
+      interpreter's decoder can descend is skipped like any other
+      malformed line (see :func:`_parse_jsonl_line_str`).
+
     Reading stops once ``max_total_bytes`` of decoded text has been
     consumed.  ``OSError`` while reading is swallowed (iteration simply
     ends) so callers keep whatever they collected — matching the prior
@@ -133,9 +137,13 @@ def _parse_jsonl_line_str(raw: str, max_line_bytes: int) -> Iterator[dict]:
         return
     try:
         record = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
         # ValueError is the base of json.JSONDecodeError; also covers the
-        # rare non-decode ValueError from json.loads.
+        # rare non-decode ValueError from json.loads.  RecursionError is
+        # what the decoder raises on a pathologically nested blob (CPython
+        # <= 3.13: the recursion limit at ~1k levels; 3.14: the C-stack
+        # guard) — a corrupt/hostile line, so it is SKIPPED like any other
+        # unparseable one instead of killing the whole scan.
         return
     if isinstance(record, dict):
         yield record

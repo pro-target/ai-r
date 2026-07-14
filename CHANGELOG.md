@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Property-based parser fuzzing** (`tests/test_fuzz_parsers.py`, `hypothesis`
+  in the `dev` extra). The parsers are the ingestion point for untrusted input
+  — five foreign agents' transcripts, possibly truncated mid-write, corrupt or
+  hostile — so their fail-soft contract is now asserted against *generated*
+  input (truncated JSON, NUL bytes, invalid UTF-8, lone surrogates, missing /
+  extra / mistyped fields, deep nesting, epoch-sized integers) rather than
+  hand-picked samples: every entry point of every parser must return a
+  well-typed value or `FileNotFoundError`, never anything else.
+
 - **Model dimension: which model produced what.** Parsers extract the
   per-message `model` where the format records one — Claude assistant
   `message.model` (`<synthetic>` stubs mapped to absence; the Desktop
@@ -48,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed in `0.6.0`, by when callers have moved to `noise`.
 
 ### Fixed
+
+- **Parsers no longer crash on corrupt/hostile transcripts** (found by the new
+  property-based parser fuzz). Every entry point of every parser now honours
+  the documented fail-soft contract — an unreadable record is skipped, never
+  raised. Four escapes are closed: (1) a pathologically nested JSON blob raised
+  `RecursionError` out of `json.loads` (the shared JSONL reader, Claude's
+  `read_token_usage` / `.meta.json` / Desktop-index readers, Codex's
+  `_safe_json`, OpenCode's `message.data` / `part.data` decode) and took down
+  `list_sessions` for the whole vault; (2) a Claude record whose `message` is a
+  list/scalar instead of an object raised `AttributeError`; (3) an OpenCode row
+  with an out-of-range or non-numeric epoch (SQLite type affinity lets TEXT sit
+  in an INTEGER column) raised `ValueError`/`TypeError` — such a row now falls
+  back to the format's own "no time recorded" value; (4) a BLOB `session.title`
+  leaked `bytes` into `Session.title` and crashed `search()` one call later.
+  A deeply nested OpenCode `file`/`patch` part is now redacted past a depth cap
+  (`{"omitted": "too-deep"}`) instead of recursing to death.
 
 - **Unknown MCP tool arguments now fail loud instead of being silently
   dropped.** FastMCP validated arguments against each tool's pydantic schema

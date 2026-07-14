@@ -9,7 +9,10 @@ fastest path from idea to merge is:
 2. **Fork and branch.** Branch names: `feat/<short-name>`,
    `fix/<short-name>`, `docs/<short-name>`.
 3. **Write the change + tests.** New parsers need unit tests with
-   fixtures under `tests/fixtures/`.
+   fixtures under `tests/fixtures/`. Parser changes must also survive
+   the property-based fuzz (`tests/test_fuzz_parsers.py`, `hypothesis`,
+   installed by the `dev` extra): parsers eat untrusted transcripts, so
+   corrupt input is skipped, never raised.
 4. **Run the gates locally — before every push:**
    ```bash
    pip install -e ".[dev]"   # dev setup; install.sh is for *using* ai-r, not hacking on it

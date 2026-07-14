@@ -55,6 +55,23 @@ caps body-search messages and haystack bytes. These guards protect MCP
 payload size; they are not a trust decision and do not make session
 content safe to execute.
 
+### Hostile bytes must not take the reader down
+
+The same untrusted content also reaches the parsers as *bytes*. A
+transcript can be truncated mid-write (the agent is still running),
+half-corrupt (a killed process), or hostile: a single line nesting a
+JSON blob 60 000 levels deep used to raise `RecursionError` out of
+`json.loads` and kill `list_sessions` for the *whole* vault -- one bad
+file denying service for every session.
+
+The parsers are therefore fail-soft by contract: an unparseable record
+is skipped, and the only exceptions an entry point may raise are
+`FileNotFoundError` (unknown uuid) and `ValueError` (malformed uuid).
+The contract is enforced by property-based fuzzing against generated
+corrupt input -- see
+[tests/test_fuzz_parsers.py](../tests/test_fuzz_parsers.py) and
+[docs/parsers.md](parsers.md).
+
 ## What consumers must do
 
 Treat every string returned by `read_session` / `read_messages` /

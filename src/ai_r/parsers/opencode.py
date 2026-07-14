@@ -373,8 +373,27 @@ _PartTuple = Tuple[dict, Optional[int]]
 _TITLE_MAX_LEN = 100
 
 
-def _epoch_ms_to_datetime(ms: int) -> datetime:
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+# What a row with no usable timestamp collapses to — the value the format
+# itself means by "no time recorded" (already produced by the ``or 0``
+# fallback in :func:`_row_to_session`).  A corrupt cell must not fabricate a
+# plausible-looking date, and it must not crash the scan either.
+_EPOCH_ZERO = datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _epoch_ms_to_datetime(ms: object) -> Optional[datetime]:
+    """Epoch-millis → tz-aware datetime, or ``None`` when the cell is unusable.
+
+    SQLite is dynamically typed: an INTEGER-affinity column happily holds TEXT
+    or a BLOB (a corrupt or foreign writer), and an int64 epoch can sit far
+    outside ``datetime``'s 1..9999 year range.  Both used to escape
+    ``list_sessions`` as TypeError / ValueError — found by the parser fuzz.
+    """
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
@@ -392,8 +411,12 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
     directory = row["directory"] if "directory" in row.keys() else None
     if not (isinstance(directory, str) and directory.strip()):
         directory = None
-    date = _epoch_ms_to_datetime(time_updated or time_created or 0)
-    clean_title = (title or "").strip() or "Untitled"
+    date = _epoch_ms_to_datetime(time_updated or time_created or 0) or _EPOCH_ZERO
+    # ``title`` / ``parent_id`` are untrusted cells too: SQLite returns
+    # whatever was stored (BLOB, int, NULL).  A bytes title used to land in
+    # ``Session.title`` and blow up ``search`` one call later on ``.lower()``.
+    clean_title = (title.strip() if isinstance(title, str) else "") or "Untitled"
+    parent = parent_id if isinstance(parent_id, str) and parent_id else None
     return Session(
         uuid=sid,
         agent=AgentName.OPENCODE,
@@ -401,10 +424,10 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         date=date,
         path=db_path,
         message_count=0,  # filled by the caller with a per-row count
-        parent_uuid=parent_id,
+        parent_uuid=parent,
         # A row with a parent is a spawned sub-session: keep ``kind``
         # consistent with ``parent_uuid`` so kind-based filters see it.
-        kind="subagent" if parent_id else "agent",
+        kind="subagent" if parent else "agent",
         project_dir=directory,
         # OpenCode's schema carries no launch-surface signal (the
         # ``agent`` column is the *mode* — plan/build — not a surface).
@@ -611,7 +634,10 @@ def _json_or_none(blob: object) -> Optional[dict]:
         return None
     try:
         rec = json.loads(blob)
-    except (json.JSONDecodeError, TypeError):
+    except (TypeError, ValueError, RecursionError):
+        # ValueError covers json.JSONDecodeError; RecursionError is what the
+        # decoder raises on a pathologically nested blob.  Both mean "this
+        # cell is not usable JSON" → skipped, never raised.
         return None
     return rec if isinstance(rec, dict) else None
 
@@ -631,8 +657,18 @@ def _stringify(value: object) -> str:
 _BINARY_PART_KEYS = {"base64", "blob", "bytes", "content", "contents", "data"}
 
 
-def _compact_part_metadata(value: object, key: str = "") -> object:
+# Deepest structure the metadata redactor will walk.  A corrupt ``file`` /
+# ``patch`` part can nest deeper than the interpreter's recursion limit, which
+# used to escape as RecursionError; past this depth the subtree is replaced by
+# a marker — the same "omitted" idiom already used for binary / data-url
+# payloads.  60 is an order of magnitude above any real part.
+_MAX_PART_DEPTH = 60
+
+
+def _compact_part_metadata(value: object, key: str = "", depth: int = 0) -> object:
     """Return part metadata with inline binary/blob payloads removed."""
+    if depth > _MAX_PART_DEPTH:
+        return {"omitted": "too-deep"}
     key_l = key.lower()
     if isinstance(value, str):
         if value.startswith("data:"):
@@ -645,10 +681,12 @@ def _compact_part_metadata(value: object, key: str = "") -> object:
         for child_key, child_value in value.items():
             if not isinstance(child_key, str):
                 continue
-            compact[child_key] = _compact_part_metadata(child_value, child_key)
+            compact[child_key] = _compact_part_metadata(
+                child_value, child_key, depth + 1
+            )
         return compact
     if isinstance(value, list):
-        return [_compact_part_metadata(item, key) for item in value]
+        return [_compact_part_metadata(item, key, depth + 1) for item in value]
     return value
 
 

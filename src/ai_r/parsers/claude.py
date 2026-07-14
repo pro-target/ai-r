@@ -174,7 +174,14 @@ def source_roots(
 
 
 def _extract_text_from_user_message(message: dict) -> str:
-    """Return the first plain-text part of a user message, or empty string."""
+    """Return the first plain-text part of a user message, or empty string.
+
+    ``message`` is untrusted: a corrupt record can carry a list/str/int
+    where the format promises an object, so a non-dict yields "" rather
+    than an ``AttributeError`` from ``.get`` (found by the parser fuzz).
+    """
+    if not isinstance(message, dict):
+        return ""
     content = message.get("content", "")
     if isinstance(content, str):
         return content.strip()
@@ -359,7 +366,7 @@ def _read_subagent_meta(
     meta_path = jsonl_path.with_suffix(".meta.json")
     try:
         record = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None, None
     if not isinstance(record, dict):
         return None, None
@@ -652,7 +659,7 @@ def _load_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
             continue
         try:
             record = json.loads(json_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
             continue
         if not isinstance(record, dict):
             continue
@@ -1059,7 +1066,9 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
         return None
     try:
         record = json.loads(line)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # RecursionError: a pathologically nested blob — skipped like any
+        # other unparseable line (see ``_common._parse_jsonl_line_str``).
         return None
     if not isinstance(record, dict):
         return None
@@ -1491,7 +1500,10 @@ def read_token_usage(
                     continue
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except (ValueError, RecursionError):
+                    # Same skip-the-line contract as the shared reader: a
+                    # malformed OR pathologically nested record is dropped;
+                    # the healthy records around it still count.
                     continue
                 if not isinstance(record, dict) or record.get("type") != "assistant":
                     continue

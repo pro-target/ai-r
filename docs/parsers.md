@@ -225,6 +225,16 @@ def _build_session(entry: Path, messages: Path) -> Session:
   matters for sorting "recent" sessions.
 - **Don't import private helpers from other parsers.** Copy small
   utilities; share only the data models.
+- **Fail soft on hostile input.** A transcript is untrusted: it may be
+  truncated mid-write, carry invalid UTF-8 / NUL bytes, miss required
+  fields, or nest a blob deeper than the JSON decoder can descend. A
+  record that cannot be understood is SKIPPED — the only exception any
+  entry point may raise is `FileNotFoundError` (unknown uuid) or
+  `ValueError` (malformed uuid). Use `iter_jsonl_records`
+  (`parsers/_common.py`), which already enforces the line/size caps and
+  the skip-on-unparseable contract, instead of hand-rolling the read
+  loop. The invariant is enforced by property-based fuzzing —
+  [tests/test_fuzz_parsers.py](../tests/test_fuzz_parsers.py).
 
 ## Step 3 — re-export
 
@@ -319,6 +329,8 @@ Use the existing `tests/conftest.py` helpers if it provides
 - [ ] `read_session()` raises `FileNotFoundError` for unknown uuid
 - [ ] All five functions honour `base_dir` and `$AI_R_HOME`
 - [ ] Tests cover: happy path, missing root, missing uuid, search
+- [ ] Fail-soft under fuzz: the new parser is exercised by
+      `tests/test_fuzz_parsers.py` (corrupt input -> skipped, never raised)
 - [ ] Title truncated to 100 chars, newlines collapsed
 - [ ] `AgentName` extended; `parsers/__init__.py` updated
 - [ ] `cli.py`, `mcp_server.py` `_PARSERS` updated
