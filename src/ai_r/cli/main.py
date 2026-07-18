@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 
 from ai_r import __version__
 from ai_r.cli.commands import (
+    audit_brief_cmd,
     detect_agent,
     detect_session,
     export,
@@ -21,6 +22,7 @@ from ai_r.cli.commands import (
     find_file_edits,
     find_tool_calls,
     list_cmd,
+    locate_cmd,
     read_cmd,
     search_cmd,
     stats_cmd,
@@ -56,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     find_tool_calls.register(sub)
     file_frequency.register(sub)
     stats_cmd.register(sub)
+    audit_brief_cmd.register(sub)
+    locate_cmd.register(sub)
     detect_agent.register(sub)
     detect_session.register(sub)
     export.register(sub)

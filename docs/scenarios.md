@@ -39,7 +39,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-104 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+108 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
@@ -54,6 +54,8 @@ Each scenario resolves to one of:
 | [`incidents` (preset)](#incidents-preset) | 4 | One call finds dangerous shell commands + regret reactions (F4.1) via a baked chain — ONE `query(type=tool_call, tool_kind=bash)` scan → deterministic danger dictionary on the extracted command (a Bash `description` alone never fires; `--force-with-lease` is not force-push) → bilingual (ru+en) regret-marker scan over the next `reaction_window` messages (default 6) — the two-step `confirmed` verdict, never guessed; each record carries the query event `id` (context on-demand via `relative_to`), `patterns`+`categories`, a char-capped `command` fragment centred on the hit, tri-state `is_error` (`null` where the agent's format has no correlated outcome signal) and `reaction` (marker labels + capped preview, `null` when unconfirmed); `count`/`confirmed_count`/`by_pattern` reflect the FULL match set independent of `limit`; `category`/`confirmed` filters fail loud on unknown values; emitted fields are redacted by default while matching runs on RAW text; zero incidents → `diagnostics`; documented dictionary caveat: quoting a dangerous string (echo/grep/test payloads) can still match — mention vs execution is not decidable by regex. |
 | [`network` (preset)](#network-preset) | 4 | One call audits network egress (F4.3) via a baked chain — ONE `query(type=tool_call, tool_kind=web)` scan (Claude `WebFetch`/`WebSearch`, OpenCode `webfetch`, Codex `web_search` surfaced from `web_search_call` rollout records, Gemini/Antigravity `web_fetch`/`google_web_search`; Pi records no web tool — honest absence) → the request target (`url`/`query`) extracted from the call's own input (never guessed from the tool name; no target → honest `null` fields, `kind: null`) → a deterministic **risk dictionary** (`plain_http`, `credentials_in_url`, `secret_in_url`/`secret_in_query` — the redaction patterns double as the detector, `ip_literal_host`, `private_or_local_host`, `punycode_host`); each record carries the query event `id` (context on-demand via `relative_to`), derived `kind` (`fetch`\|`search`), char-capped `url`/`query`, `domain`, `risks` and tri-state `is_error`; `count`/`risky_count`/`by_domain`/`by_risk` reflect the FULL match set independent of `limit`; `kind`/`risk` filters fail loud on unknown values, `domain` matches equals-or-subdomain; risk assessment runs on RAW strings while emitted fields are redacted by default (cap applied AFTER redaction — a boundary-sliced secret never leaks); zero requests → `diagnostics`; documented caveat: MCP-mediated network access stays under `tool_kind="mcp"` — never guessed into the audit. |
 | [`quotes` (preset)](#quotes-preset) | 3 | One call finds «user quote → user comment» pairs (F5.2) cross-agent — when a user selects a chunk of a prior message and comments on it, the quoted text is embedded VERBATIM in their turn (no client records a marker), so `query(type=user_turn)` commenters are matched against `query(type=assistant_turn)` sources: each user turn's full text (`read_messages`) is diffed against its preceding assistant turns with `difflib.SequenceMatcher` over normalized text (`_normalize_rendered_text`), the longest run ≥40 chars is the quote and the rest is the comment; each record carries the user_turn `id`, `source_id` (the quoted turn), `source_kind`, `quote_chars`, char-capped `quote`+`comment`; `count`/`by_source_kind` reflect the FULL set independent of `limit`; `source_kind` fails loud on unknown; emitted fields redacted by default; external paste (no in-session source) → no quote; zero quotes → `diagnostics`; the cross-agent generalization of `plan(feedback)` beyond Claude plans. |
+| [`audit_brief` (preset)](#audit_brief-preset) | 2 | One call = a token-lean, budgeted session digest for auditors (stage 4) via a baked chain — ONE `query(session=…)` scan → user turns VERBATIM (the auditor's ground truth, NEVER truncated by the budget) + tool footprint folded by `aggregate(group_by=tool_kind)` (counts + notable `is_error` rows, not dumps) + file footprint from the edit/write rows' `file` refs + the `plan`/`plan_feedback` decision trail + the `ai_r.tokens` breakdown; deterministic budget ladder on the ACTUAL serialized JSON (`budget_chars`, default 15000, `0`=unlimited): (1) tool-error details → (2) per-file list → (3) plan bodies/feedback texts, counts/references always stay; still over after the full ladder ⇒ honest `budget.over_budget: true` + note naming the full projections; unknown session → `not_found`; bad args fail loud; emitted title/user texts/plan bodies redacted by default. |
+| [`locate` (preset)](#locate-preset) | 2 | One call finds a session across all agents by full uuid, id-prefix (8-hex head) or case-insensitive title substring — a thin preset over the per-parser `list_sessions` inventory (zero new scanning code): matches ranked by last activity (mtime) desc, each carrying path/agent/`project_dir`/date/`size_bytes`, the honest `readable` local-content claim (`false` for a reference-only stub) and the ready-to-run `read_command` (`ai-r read <uuid> --agent <agent>`) + `resume_command`; `limit` bounds the list while `count` keeps the full total; zero matches → honest empty + closest-title `suggestions` + `diagnostics`, never a fabricated match; `web=true` (v1 honest scope) adds ONLY locally-known web traces — `$SW_HOME/web-sessions` hook exports (readable files) and `~/.claude.json` teleport stubs (`content_local: false` — id known, transcript NOT local); the per-repo teleport-picker sweep is a documented PTY follow-up, not guessed. |
 | [`find_file_edits`](#find_file_edits) | 4 | Default MCP call is **reference-by-default** (`input_sha256`+`input_chars`, NOT full `input`); `include_input=true` restores the body; body otherwise fetched on-demand via `get_body`; records are size-bounded like `find_tool_calls` (`intent`/`assistant` capped with `…[truncated]` + per-record `truncated_fields`, total byte budget → `output_truncated`; the opt-in full `input` body is never field-capped) and a fully-unscoped call (no `agent`/`since`/`until`) is narrowed to the last 7 days with `default_since` + `note` in the response. |
 | [`list_sessions`](#list_sessions) | 6 | Newest-first, paginated (`limit`/`offset`, `truncated` flag) inventory; each summary carries `kind`+`parent_uuid` (subagent detection: Claude/OpenCode/Codex/Pi; Antigravity has no signal); `agent` filter narrows the set; `noise=exclude\|include\|only` splits the inventory into top-level vs subagent sessions and composes with `kind` by AND; the Claude parser merges the CLI transcript root with the Claude Desktop metadata root — dedup by uuid, Desktop title wins (CLI title kept in `extra["cli_title"]`), origin marked `extra["source_root"]="cli"\|"desktop"`, a metadata-only session stays visible as a zero-message reference; each summary carries top-level `project_dir`+`launch_surface` (null when the format has no signal) and `project_dir` filters the inventory exact-or-descendant; each summary also carries the A3 recency signal `last_activity`+`age_sec`+`activity` (`fresh`/`stale` vs `AI_R_STALL_SEC`, default 600s) — record recency only, never a process-liveness claim. |
 | [`outcome` (read_session field)](#outcome-read_session-field) | 2 | `read_session` carries `outcome` — `status ∈ success\|failure\|mixed\|unknown` from two honest signals: tool-call error rate (real flag only for Claude/OpenCode — `tool_errors`/`error_rate` are `null` elsewhere, `error_rate_reliable` says which) and a calibrated bilingual (ru+en) success/failure dictionary over the last 3 *human* user turns (assistant self-reports never trusted); every deciding reason spelled out in `signals` (empty ⇔ `unknown`); no raw session text in the block; nothing guessed — no signal is `unknown`, never a fabricated verdict. |
@@ -690,6 +692,58 @@ chat-wide generalization of `plan(feedback)` (which is Claude-plan-only).
 - **Function:** `quotes`
 - **Steps:** run over a **codex** session where a user quotes an assistant line; then a session where the user pastes text NOT present earlier; then `mcp__ai-r__quotes(source_kind="tool")`.
 - **Expected:** the codex quote is found (all agents equal — the match runs on the normalized event stream, not client markup); the external paste yields NO record (a quote with no in-session source is never fabricated); an unknown `source_kind` fails loud with `invalid_argument`; a filtered-to-zero corpus returns `count=0` + `diagnostics`.
+
+</details>
+
+---
+
+## `audit_brief` (preset)
+
+The stage-4 auditor preset: a token-lean, budgeted one-call session digest. A baked chain over the
+existing projections (never a second engine): ONE `query(session=…)` scan supplies the user turns
+(VERBATIM — never truncated by the budget) and the tool/file footprint (`aggregate` folds +
+existing `file` refs), `plan`/`plan_feedback` supply the decision trail, `ai_r.tokens` the token
+breakdown; a deterministic budget ladder tightens the digest until it fits `budget_chars`.
+
+<details>
+<summary>Show 2 scenarios (AB-1…AB-2)</summary>
+
+### AB-1 — one call digests a session inside the budget (section shape) `[hermetic-ok]`
+- **Function:** `audit_brief`
+- **Preconditions:** A session with ≥2 user turns, ≥1 tool call (one with a correlated `is_error` result) and ≥1 file edit. Synthetic Claude session is sufficient.
+- **Steps:** `mcp__ai-r__audit_brief(session="<uuid>")`; cross-check `user_turns` against `mcp__ai-r__query(type="user_turn", session="<uuid>")` and `tools.by_kind` against `mcp__ai-r__aggregate` over the session's `tool_call` rows.
+- **Expected:** Sections `session` / `user_turns` / `plans` / `tools` / `files` / `tokens` / `component_tokens` / `budget`; every user turn's text is VERBATIM (byte-equal to the full projection, no `…` cut); `tools.by_kind` counts match the aggregate fold and `tools.errors` names the `is_error` row (id + tool + kind, no full dumps); `files.edited` lists the edited path with its edit count; `tokens.source` is honest (`exact`/`estimate`/`null`, never fabricated); `budget.used_chars ≤ budget.budget_chars`, `dropped=[]`, `over_budget=false`; secrets in emitted texts masked by default; an unknown session id → `{"error": "not_found"}`, a negative `budget_chars` → `invalid_argument`.
+
+### AB-2 — the budget ladder tightens deterministically, user turns survive whole `[hermetic-ok]`
+- **Function:** `audit_brief`
+- **Steps:** run the same session with a shrinking `budget_chars` (e.g. full-size → mid → tiny) and compare the responses.
+- **Expected:** Detail disappears in the FIXED ladder order — `tool_error_details` first, then `file_details`, then `plan_bodies` — with `budget.dropped` listing exactly what was removed (counts/references stay: `errors_count`/`files.count` unchanged, dropped sections flagged, plan bodies reachable via `get_body`); at every budget the user turns stay byte-identical to the unbudgeted run (NEVER truncated); when the remaining digest still exceeds the budget, `budget.over_budget=true` and `budget.note` names the full projections (`query(type='user_turn', …)` / `read_session`) — an honest marker, not a silent clip; `budget_chars=0` disables the ladder entirely.
+
+</details>
+
+---
+
+## `locate` (preset)
+
+The stage-4 lookup preset: find a session across every agent by full uuid, id prefix or
+case-insensitive title substring — where it lives, whether it is readable locally, and the
+ready-to-run read/resume commands. A thin preset over the per-parser `list_sessions` inventory
+(zero new scanning code); `web=true` adds the v1 honest-scope block of locally-known web traces.
+
+<details>
+<summary>Show 2 scenarios (LOC-1…LOC-2)</summary>
+
+### LOC-1 — uuid / prefix / title lookup with ranked, ready-to-run matches `[hermetic-ok]`
+- **Function:** `locate`
+- **Preconditions:** ≥2 sessions with distinct dates whose titles share a word; one session id with a known 8-hex head. Synthetic sessions are sufficient.
+- **Steps:** `mcp__ai-r__locate(needle="<full-uuid>")`; then `locate(needle="<8-hex prefix>")`; then `locate(needle="<TITLE SUBSTRING in different case>")`; then a needle matching nothing.
+- **Expected:** Full uuid and prefix return the session with `match="id"`; the title substring matches case-insensitively with `match="title"`; multiple matches are ranked by last activity (mtime) DESC with `count` = the full total and `truncated` honest under `limit`; each match carries `path`/`agent`/`project_dir`/`date`/`size_bytes`/`message_count`, an honest `readable` (a 0-message reference-only stub is `false`), a ready-to-run `read_command` (`ai-r read <uuid> --agent <agent>`) and the F2.2 `resume_command`; the zero-match call returns `count=0` + closest-title `suggestions` + `diagnostics` — never a fabricated match; an empty needle fails loud with `invalid_argument`.
+
+### LOC-2 — `web=true` reports only locally-known web traces (honest scope) `[hermetic-ok]`
+- **Function:** `locate`
+- **Preconditions:** A fake `$SW_HOME/web-sessions` dir with an export file whose name contains the needle, and a `~/.claude.json` (under the test home) whose `projects[*].lastSessionId` starts with the needle.
+- **Steps:** `mcp__ai-r__locate(needle="<id-prefix>", web=true)`; repeat with `web=false`; repeat with no web sources present.
+- **Expected:** With `web=true` the response carries a `web` block: the hook-export file under `exports` (`source="hook_export"`, `readable=true`, path+size+mtime) and the teleport id under `stubs` (`source="teleport_stub"`, `content_local=false` — the id is known, the transcript is NOT on this machine) plus a `scope_note` naming the per-repo teleport-picker sweep as the documented follow-up; `web=false` carries no `web` key (byte-identical to before); missing dir/file are skipped honestly (`exports_dir_found`/`claude_json_found` say which), an unreadable `~/.claude.json` degrades to `claude_json_error` — never a crash, never a fabricated web session.
 
 </details>
 

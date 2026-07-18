@@ -25,6 +25,10 @@ Exposes these tools over the Model Context Protocol:
 * :func:`diff` — stitch edit rows into a per-file unified diff (reproduces
   ``session_diff``).
 * :func:`detect_current` — runtime identity (session + agent) from env/fs.
+* :func:`audit_brief` — token-lean, budgeted session digest for auditors
+  (user turns verbatim + plans + tool/file footprint + tokens).
+* :func:`locate` — find a session across all agents by uuid / id-prefix /
+  title substring (where it lives + the ready-to-run read command).
 
 Errors are returned as dicts (never raised) so the MCP client can
 surface them in a structured way.
@@ -64,9 +68,17 @@ from ai_r.find_file_edits import (  # noqa: E402
     previous_user_intent as _previous_user_intent,
     target_agents as _target_agents,
 )
+from ai_r.audit_brief import (  # noqa: E402
+    DEFAULT_BUDGET_CHARS as _AUDIT_BRIEF_BUDGET,
+    audit_brief as _audit_brief_core,
+)
 from ai_r.diagnostics import empty_result_diagnostics as _empty_diagnostics  # noqa: E402
 from ai_r.find_tool_calls import find_tool_calls as _find_tool_calls_core  # noqa: E402
 from ai_r.incidents import incidents as _incidents_core  # noqa: E402
+from ai_r.locate import (  # noqa: E402
+    DEFAULT_LIMIT as _LOCATE_LIMIT,
+    locate as _locate_core,
+)
 from ai_r.network import network as _network_core  # noqa: E402
 from ai_r.quotes import quotes as _quotes_core  # noqa: E402
 from ai_r.session_diff import session_diff as _session_diff_core  # noqa: E402
@@ -1890,6 +1902,110 @@ def quotes(
             limit=limit,
             noise=noise,
             project_dir=project_dir,
+            redact=redact,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def audit_brief(
+    session: str,
+    agent: Optional[str] = None,
+    budget_chars: int = _AUDIT_BRIEF_BUDGET,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Token-lean, budgeted session digest for auditors — the *audit_brief* preset.
+
+    One call answers "what happened in this session, verbatim where it
+    matters", inside a hard character budget.  A preset over the existing
+    core, not a second engine (project preset rule): ONE ``query`` scan over
+    the session's events supplies the user turns (VERBATIM — the auditor's
+    ground truth) and the tool/file footprint (folded by
+    ``aggregate(group_by="tool_kind")`` + the edit/write rows' existing
+    ``file`` refs); the ``plan``/``plan_feedback`` projections supply the
+    decision trail; :mod:`ai_r.tokens` (the same SSOT behind
+    ``session_stats(with_tokens)`` / ``read_session(with_tokens)``) supplies
+    the token breakdown.
+
+    Deterministic budget algorithm: build the full digest, then tighten in a
+    FIXED ladder until the serialized JSON fits ``budget_chars`` (default
+    15000; ``0`` = unlimited) — (1) drop tool-call error details, (2) drop
+    the per-file edit list, (3) drop plan bodies + feedback quote/comment
+    texts (counts/references always stay; bodies on-demand via ``get_body``).
+    **User turns are NEVER truncated**: if they alone exceed the budget the
+    response carries ``budget.over_budget: true`` + a ``note`` naming the
+    full projections — never a silently clipped ground truth.
+
+    ``agent`` is an optional hint (``None`` = the id resolves across every
+    parser, like ``read_session``).  ``redact=true`` (default) masks secrets
+    in the emitted title / user texts / plan bodies / feedback pairs.  The
+    response is section-structured (``session`` / ``user_turns`` / ``plans``
+    / ``tools`` / ``files`` / ``tokens`` / ``component_tokens`` / ``budget``);
+    the CLI mirror is ``ai-r audit-brief <uuid>`` (markdown, ``--json`` for
+    this dict).
+
+    Thin wrapper over :func:`ai_r.audit_brief.audit_brief`: a ``ValueError``
+    becomes ``{"error": "invalid_argument"}``, an unknown session id
+    ``{"error": "not_found"}``.
+    """
+    try:
+        return _audit_brief_core(
+            session,
+            agent=agent,
+            budget_chars=budget_chars,
+            redact=redact,
+        )
+    except FileNotFoundError as exc:
+        return {"error": "not_found", "message": str(exc)}
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
+
+
+@mcp.tool()
+def locate(
+    needle: str,
+    agent: Optional[str] = None,
+    limit: int = _LOCATE_LIMIT,
+    web: bool = False,
+    redact: bool = True,
+) -> dict[str, Any]:
+    """Find a session across all agents by uuid / id-prefix / title — *locate*.
+
+    One call answers "I remember a session — where does it live and how do I
+    read it?".  ``needle`` is a full uuid, an id prefix (e.g. the 8-hex
+    head), or a case-insensitive title substring.  A thin preset over the
+    existing per-parser inventory (the same ``list_sessions`` walk — zero new
+    scanning code) with a deterministic algorithm inside: prefix-match on
+    uuid/path-stem OR substring-match on title, ranked by last activity
+    (mtime) descending.  Each match carries where it lives (``path`` /
+    ``agent`` / ``project_dir`` / ``date`` / ``size_bytes``), the honest
+    local-content claim ``readable`` (``false`` for a reference-only stub
+    whose transcript is not on this machine), and the ready-to-run commands:
+    ``read_command`` (``ai-r read <uuid> --agent <agent>``) +
+    ``resume_command`` (F2.2 — text only, never executed).
+
+    ``limit`` bounds the emitted list (``0`` = no cap; ``count`` keeps the
+    full total, ``truncated`` flags the cut).  Zero matches → an honest empty
+    with closest-title ``suggestions`` + ``diagnostics`` — never a fabricated
+    match.
+
+    ``web=true`` (v1, honest scope) adds web sessions KNOWN LOCALLY only:
+    materialized hook-export files (``$SW_HOME/web-sessions``, default
+    ``~/.session-watch/web-sessions``) and ``~/.claude.json →
+    projects[*].lastSessionId`` teleport stubs (id known, transcript NOT
+    local — ``content_local: false``).  The fuller per-repo teleport-picker
+    sweep needs a PTY and is a documented follow-up, not guessed here.
+
+    Thin wrapper over :func:`ai_r.locate.locate` (``ValueError`` →
+    ``{"error": "invalid_argument"}``).
+    """
+    try:
+        return _locate_core(
+            needle,
+            agent=agent,
+            limit=limit,
+            web=web,
             redact=redact,
         )
     except ValueError as exc:
