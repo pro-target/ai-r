@@ -44,12 +44,13 @@ Thin wrapper over the parsers. Exits with distinct codes:
 - `3` — `FileNotFoundError` (session missing)
 
 ### `ai-r-mcp` (MCP server)
-Stdio JSON-RPC. Sixteen tools in three groups:
+Stdio JSON-RPC. Eighteen tools in three groups:
 - 7 classic tools: `list_sessions`, `read_session`, `search_sessions`,
   `find_file_edits`, `find_tool_calls`, `session_stats`, `session_diff`.
 - 5 event-core verbs: `query`, `get_body`, `aggregate`, `diff`,
   `detect_current`.
-- 4 presets: `plan`, `incidents`, `network`, `quotes`.
+- 6 presets: `plan`, `incidents`, `network`, `quotes`, `audit_brief`,
+  `locate`.
 
 `list_sessions` and
 `read_session` are paginated (`limit`/`offset`, `limit=0` = uncapped)
@@ -106,8 +107,10 @@ Above the parsers, a normalized **event core** (`src/ai_r/events/`) folds
 every agent's messages into one agent-neutral `Event` stream
 (`user_turn` / `assistant_turn` / `tool_call` (+ `tool_kind`) / `thinking` /
 `plan_event`). The five event verbs (`query`, `get_body`, `aggregate`,
-`diff`, `detect_current`) and the three presets (`plan`, `incidents`,
-`network`) are thin readers over that stream — `query` is the workhorse;
+`diff`, `detect_current`) and the presets (`plan`, `incidents`,
+`network`, `quotes`, plus the stage-4 auditor presets `audit_brief` —
+`src/ai_r/audit_brief.py` — and `locate` — `src/ai_r/locate.py`) are thin
+readers over that stream — `query` is the workhorse;
 a preset wires a fixed chain of base verbs, never a second engine.
 
 The **model dimension** rides on that same taxonomy, not beside it: parsers
@@ -512,3 +515,48 @@ the budget, and on which model" therefore required hand-parsing JSONL.
   persona (1191 of 1191). That is why the persona is read from the child and the
   parent sidecar is only the fallback — the reverse would leave ~72 % of spawns
   anonymous.
+
+### ADR: `audit_brief` + `locate` — auditor presets (stage 4, token-lean reading)
+
+Auditing a session through the raw surface costs a hand-built chain
+(`read_session` + `query` + `plan` + token math) and an unbounded amount of
+output; finding a half-remembered session costs a manual walk over five
+agents' stores. Both are the exact shape the project preset rule exists for:
+a frequent chain **with an algorithm inside** (deterministic selection + a
+token budget), so each became one call rather than a documented example.
+
+- **`audit_brief` (`src/ai_r/audit_brief.py`)** — a budgeted one-call session
+  digest. The baked chain reuses only existing projections: ONE
+  `query(session=…)` scan (user turns + tool rows), `aggregate` folds for the
+  tool/file footprint, `plan`/`plan_feedback` for the decision trail,
+  `ai_r.tokens` for the token breakdown — no new event taxonomy, no second
+  classifier (the DRY rule this repo enforces). The algorithm inside is the
+  **budget ladder**: the digest is measured on its ACTUAL serialized JSON and
+  tightened in a fixed order (tool-error details → per-file list → plan
+  bodies/feedback texts) until it fits `budget_chars`. **User turns are the
+  auditor's ground truth and are never truncated** — when they alone exceed
+  the budget the response says so (`over_budget: true` + a note naming the
+  full projections) instead of silently clipping them. The session-scoped
+  file footprint reads the edit/write rows' existing `file` refs rather than
+  the `find_file_edits` core, because that core has no session facet (it
+  scans the corpus by `path` substring) — the classifier is reused, not
+  duplicated.
+- **`locate` (`src/ai_r/locate.py`)** — session lookup across every agent by
+  full uuid, id prefix, or case-insensitive title substring. A thin preset
+  over the per-parser `list_sessions` inventory (zero new scanning code):
+  deterministic match (uuid/path-stem prefix = `id`, title substring =
+  `title`), rank by last activity descending, and per match the location
+  facts plus the ready-to-run `read_command` / `resume_command` (F2.2 —
+  text only, never executed). `readable` is an honest local-content claim:
+  a reference-only stub (Desktop metadata without a transcript) is listed
+  but marked not readable. Zero matches → closest-title suggestions +
+  diagnostics, never a fabricated match.
+- **`locate --web` v1 is honest-scope by decision.** A local tool cannot
+  enumerate claude.ai's cloud store, so v1 reports only web sessions KNOWN
+  LOCALLY: materialized hook-export files (`$SW_HOME/web-sessions`) and
+  `~/.claude.json → projects[*].lastSessionId` teleport stubs — the latter
+  explicitly marked `content_local: false` (the id is known, the transcript
+  is not on this machine; absence is honest, never fabricated). The fuller
+  source — a per-repo teleport-picker sweep — requires driving the CLI under
+  a PTY and is a documented follow-up, deliberately NOT built into a read-only
+  reader now.

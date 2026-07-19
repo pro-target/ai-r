@@ -280,12 +280,62 @@ mixed/unset tiers are honestly labeled `(mixed)`/`(unknown)`, never guessed.
 `read_session(include_subagents=true)` returns those same children with exact
 `tokens`/`models`/`subagent_type`/`status`.
 
+## 16. A session digest for the auditor — `audit_brief(uuid)`
+
+"Break down a 2.4 MB session — without burning the context of whoever does the
+breaking down." One call instead of reading the whole transcript:
+
+```
+audit_brief("c022e9b5…") → a 23.6k-char digest of 2.4 MB / 264 messages (~100× smaller)
+inside: 40 user turns VERBATIM · a decision track across plans · a tool-and-file rollup
+        · exact tokens: 13.59M total, of which cache_read 12.67M (93%)
+```
+
+The value is the contract, not the compression: user turns — the ground truth of
+any audit — are **never trimmed**. Everything else shrinks down a deterministic
+ladder (tool-error details → the per-file list → plan bodies); if the budget still
+doesn't fit — an honest `over_budget: true` with a pointer to the full projections,
+not silent truncation. The token breakdown immediately surfaced the familiar
+"cache reads = 93% of the bill" pattern (cf. §4) — with no extra call. Per the
+preset rule: one hard-wired chain of existing projections (`query` + `aggregate` +
+`plan` + the token SSOT), not a second core.
+
+The flagship run above did not itself fit the default 15k-char budget — and that
+is the contract demonstrated live: the ladder compressed the details down to
+summaries, the response honestly raised `over_budget: true`, and all 40 user
+turns stayed verbatim, untouched. Not "it fit", but "it went over and said so".
+
+## 17. Where a session lives — `locate(identifier)`
+
+"I remember a piece of the title or the first 8 characters of the id — where's the
+file and what do I read it with?"
+
+```
+locate("c022e9b5") → 2 matches:
+  c022e9b5…  [claude] "Supervisor setup with hooks" · 2.4 MB · 264 msgs · readable
+     read:   ai-r read c022e9b5… --agent claude
+     resume: cd '~/Загрузки' && claude --resume c022e9b5…
+  agent-a8dcfea2…  [claude] — this same session's audit subagent, a nested transcript
+```
+
+A match is a full uuid, an 8-hex prefix, or a title substring (case-insensitive);
+results are ranked by recency, every row carries ready-made read/resume commands;
+zero matches is an honest empty result with nearest-title hints. The example proved
+its own point: the session turned up in an **unexpected directory** (`~/Загрузки`,
+a Downloads-style dir — the teleport stub of a web session), and next to it
+surfaced its audit subagent from another session's `subagents/` — by hand that's
+minutes of digging across all of `~/.claude`. `locate --web` (v1, honest scope)
+adds the web sessions known locally: materialized hook-export transcripts and
+teleport stubs from `~/.claude.json` (`content_local: false` — the id is known, the
+body isn't local); a full per-repo sweep of the pickers is a documented next step,
+not a promise.
+
 ---
 
-**Coverage:** 15 verbs — `find_tool_calls` · `incidents` · `network` ·
+**Coverage:** 17 verbs — `find_tool_calls` · `incidents` · `network` ·
 `read_session` · `plan` · `find_file_edits` · `aggregate` · `search_sessions` ·
 `list_sessions` · `session_diff` · `diff` · `query` · `get_body` ·
-`detect_current` · `session_stats`. Plus dimensions over them: `model`,
+`detect_current` · `session_stats` · `audit_brief` · `locate`. Plus dimensions over them: `model`,
 **subagent cost** (the `subagent` sidecar on `find_tool_calls` +
 `session_stats(group_by=model)`), `user_ref` (what the user attached) and thinking
 (opt-in) — facets on `query`/`aggregate`/`find_tool_calls`/`read_session`, not
