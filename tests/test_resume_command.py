@@ -12,12 +12,23 @@ Covers:
   its absence when it is not;
 * shell-quoting of interpolated values (dir with a space);
 * the MCP summary projection: ``resume_command`` is a top-level field
-  next to ``project_dir`` / ``launch_surface``.
+  next to ``project_dir`` / ``launch_surface``;
+* the ``detect_current`` verb: the detected session's ``resume_command``
+  is reported (honest ``None`` when identity is incomplete or the
+  session store has no such session);
+* the CLI ``ai-r list --json`` summary carries the same field.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
+import pytest
+
+from ai_r import cli as cli_module
 from ai_r.mcp_server import _session_summary
 from ai_r.parsers import AgentName, Session
 from ai_r.resume import resume_command
@@ -148,3 +159,143 @@ class TestSummaryProjection:
         summary = _session_summary(sess)
         assert "resume_command" in summary
         assert summary["resume_command"] is None
+
+
+# ---------------------------------------------------------------------------
+# detect_current + CLI surface (hermetic: fake AI_R_HOME store)
+# ---------------------------------------------------------------------------
+
+_RESUMABLE_UUID = "aefa0001-2222-4333-8444-555555555555"
+
+
+@pytest.fixture
+def _clean_detect_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Blank every env var + flag dir the detect cascade reads."""
+    for var in (
+        "AI_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+        "OPENCODE_SESSION_ID", "AGENT_NAME", "AI_AGENT", "CODING_AGENT",
+        "CODEX_HOME", "CLAUDECODE", "OPENCODE", "AI_SESSION_OUTPUT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AI_R_SESSION_IDENTITY_DIR", str(tmp_path / "identity"))
+
+
+@pytest.fixture
+def claude_resumable_session(tmp_sessions_dir: Path) -> str:
+    """A Claude session in the fake store with a record-level ``cwd``.
+
+    The uuid is UUID-shaped so the ``detect_current`` cascade accepts it;
+    the ``cwd`` gives a deterministic ``project_dir`` → a deterministic
+    ``cd`` prefix in the expected resume command.
+    """
+    jsonl = (
+        tmp_sessions_dir / ".claude" / "projects" / "proj-r"
+        / f"{_RESUMABLE_UUID}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+            "timestamp": "2026-07-01T10:00:00Z",
+            "sessionId": _RESUMABLE_UUID,
+            "cwd": "/tmp/work-x",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+            "timestamp": "2026-07-01T10:00:05Z",
+            "sessionId": _RESUMABLE_UUID,
+        },
+    ]
+    with jsonl.open("w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return _RESUMABLE_UUID
+
+
+class TestDetectCurrent:
+    def test_detected_session_carries_resume_command(
+        self,
+        _clean_detect_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+        claude_resumable_session: str,
+    ) -> None:
+        from ai_r.events import detect_current
+
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", claude_resumable_session)
+        r = detect_current()
+        assert r["session_id"] == claude_resumable_session
+        # Expected literal from the spec (docs/methods.md, Resume command):
+        # cd <project_dir> && claude --resume <uuid>.
+        assert r["resume_command"] == (
+            f"cd /tmp/work-x && claude --resume {claude_resumable_session}"
+        )
+
+    def test_none_when_no_session_detected(
+        self, _clean_detect_env: None
+    ) -> None:
+        from ai_r.events import detect_current
+
+        r = detect_current()
+        assert "resume_command" in r
+        assert r["resume_command"] is None
+
+    def test_none_when_session_unresolvable(
+        self, _clean_detect_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ai_r.events import detect_current
+
+        # A detected id with no transcript in the store → honest None,
+        # no crash, nothing fabricated.
+        monkeypatch.setenv(
+            "CLAUDE_CODE_SESSION_ID",
+            "dead0001-2222-4333-8444-555555555555",
+        )
+        assert detect_current()["resume_command"] is None
+
+
+class TestCliList:
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            rc = cli_module.main(argv)
+        return rc, stdout.getvalue()
+
+    def test_list_json_carries_resume_command(
+        self, claude_resumable_session: str
+    ) -> None:
+        rc, out = self._run(["list", "--agent", "claude", "--json"])
+        assert rc == 0
+        payload = json.loads(out)
+        rows = {row["uuid"]: row for row in payload}
+        assert rows[claude_resumable_session]["resume_command"] == (
+            f"cd /tmp/work-x && claude --resume {claude_resumable_session}"
+        )
+
+    def test_list_json_null_is_projected_not_omitted(
+        self, tmp_sessions_dir: Path
+    ) -> None:
+        # A subagent (sidechain) session is never resumable → null in JSON.
+        jsonl = (
+            tmp_sessions_dir / ".claude" / "projects" / "proj-r"
+            / "sidechain-1.jsonl"
+        )
+        jsonl.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "user",
+            "message": {"role": "user", "content": "sub task"},
+            "timestamp": "2026-07-01T10:00:00Z",
+            "sessionId": "sidechain-1",
+            "isSidechain": True,
+        }
+        jsonl.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        rc, out = self._run(["list", "--agent", "claude", "--json"])
+        assert rc == 0
+        payload = json.loads(out)
+        rows = {row["uuid"]: row for row in payload}
+        assert "resume_command" in rows["sidechain-1"]
+        assert rows["sidechain-1"]["resume_command"] is None
