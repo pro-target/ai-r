@@ -44,7 +44,10 @@ full projections — never a silently clipped ground truth.
 Honesty rules (house-wide): absence is honest (``tokens.source`` ``null``
 without a signal, empty ``plans`` for agents with no plan signal), matching
 runs on RAW text while emitted text is redacted by default (F2.1), and the
-budget is measured on the ACTUAL serialized JSON — not a guess.
+budget is measured on the ACTUAL serialized JSON — the WHOLE emitted payload,
+``budget``/``redactions`` blocks included (they are attached before the
+ladder runs, and ``used_chars`` is folded to a fixed point so it equals the
+final serialized length) — not a guess.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from ai_r.events import (
     plan_feedback as _plan_feedback,
     query as _query,
 )
+from ai_r.locate import locate as _locate
 from ai_r.parsers import PARSERS, Session, iso, target_agents
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.resume import resume_command
@@ -82,6 +86,9 @@ _FEEDBACK_CHARS_CAP = 500
 _ERROR_RECORDS_CAP = 10
 _FILE_RECORDS_CAP = 20
 
+# Ambiguous id-prefix resolution: how many candidates the error names.
+_PREFIX_CANDIDATES_CAP = 5
+
 _TRUNCATION_MARKER = "…[truncated]"
 
 
@@ -104,13 +111,19 @@ def _cap(text: Optional[str], cap: int) -> Optional[str]:
 
 
 def _resolve_session(
-    session: str, agent: Optional[str]
+    session: str, agent: Optional[str], redact: bool = True
 ) -> Tuple[Session, Any]:
     """Resolve ``session`` to its :class:`Session` + owning parser.
 
     Same agent-optional semantics as ``read_session``: the id is looked up
-    across every parser (scoped when ``agent`` is given).  A miss raises
-    :class:`FileNotFoundError` — the MCP wrapper maps it to ``not_found``.
+    across every parser (scoped when ``agent`` is given).  A non-exact id
+    then falls back to the SAME id-prefix matching :func:`ai_r.locate.locate`
+    runs (uuid / path-stem prefix, e.g. the 8-hex head) — reused wholesale,
+    not a duplicate matcher: a unique prefix match resolves to its full uuid;
+    an ambiguous one raises :class:`ValueError` naming the candidates
+    (capped at :data:`_PREFIX_CANDIDATES_CAP`); zero matches raise
+    :class:`FileNotFoundError` carrying locate's closest-title suggestions.
+    The MCP wrapper maps those to ``invalid_argument`` / ``not_found``.
     """
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
@@ -119,8 +132,30 @@ def _resolve_session(
                 return parser.read_session(session), parser
         except (ValueError, OSError):
             continue
+    found = _locate(session, agent=agent, limit=0, redact=redact)
+    id_matches = [
+        m for m in found.get("matches") or () if m.get("match") == "id"
+    ]
+    if len(id_matches) == 1 and id_matches[0].get("uuid") != session:
+        resolved = id_matches[0]
+        return _resolve_session(resolved["uuid"], resolved["agent"], redact)
+    if len(id_matches) > 1:
+        listed = ", ".join(
+            f"{m.get('uuid')} ({m.get('title') or 'untitled'})"
+            for m in id_matches[:_PREFIX_CANDIDATES_CAP]
+        )
+        raise ValueError(
+            f"session prefix {session!r} is ambiguous — "
+            f"{len(id_matches)} matches: {listed}"
+        )
     scope = agent or "any supported agent"
-    raise FileNotFoundError(f"session {session!r} not found under {scope}")
+    message = f"session {session!r} not found under {scope}"
+    suggestions = found.get("suggestions") or []
+    if suggestions:
+        message += "; closest titles: " + ", ".join(
+            repr(s) for s in suggestions
+        )
+    raise FileNotFoundError(message)
 
 
 # --- budget-ladder droppers (fixed order; each returns True when it removed
@@ -192,12 +227,16 @@ def audit_brief(
     deterministic budget ladder tightens the digest until it fits.
 
     Args:
-        session: The session uuid (required).
+        session: The session uuid, or a unique id prefix (e.g. the 8-hex
+            head) — resolved through the SAME id-prefix matching ``locate``
+            uses; the digest's ``session.uuid`` echoes the full resolved id.
         agent: Optional agent hint (``claude``/``codex``/…); ``None`` = the
             id is resolved across every parser (same as ``read_session``).
         budget_chars: Hard budget on the serialized digest, in characters
             (default :data:`DEFAULT_BUDGET_CHARS`; ``0`` = unlimited, the
-            ladder never runs).  User turns are NEVER truncated by it.
+            ladder never runs).  Measured on the WHOLE emitted payload —
+            ``budget``/``redactions`` blocks included; ``used_chars`` equals
+            the final serialized length.  User turns are NEVER truncated.
         redact: ``True`` (default) masks secrets in the emitted title / user
             texts / plan bodies / feedback pairs and adds a ``redactions``
             type→count dict when anything was masked; ``False`` returns raw.
@@ -225,8 +264,10 @@ def audit_brief(
 
     Raises:
         ValueError: invalid arguments (empty ``session``, unknown ``agent``,
-            negative/non-int ``budget_chars``, non-bool ``redact``).
-        FileNotFoundError: the session id is not found under any parser.
+            negative/non-int ``budget_chars``, non-bool ``redact``) or an
+            AMBIGUOUS id prefix (the message names the candidates).
+        FileNotFoundError: the session id/prefix is not found under any
+            parser (the message carries closest-title suggestions).
     """
     if not isinstance(session, str) or not session.strip():
         raise ValueError(f"session must be a non-empty uuid string, got {session!r}")
@@ -241,7 +282,7 @@ def audit_brief(
     if not isinstance(redact, bool):
         raise ValueError(f"redact must be a bool, got {redact!r}")
 
-    sess_obj, parser = _resolve_session(session.strip(), agent)
+    sess_obj, parser = _resolve_session(session.strip(), agent, redact)
     agent_label = sess_obj.agent.value.lower()
     uuid = sess_obj.uuid
 
@@ -379,34 +420,49 @@ def audit_brief(
     }
 
     # --- Step 2: the deterministic budget ladder ---------------------------
+    # The budget/redactions blocks are part of the emitted payload, so they
+    # are part of the measurement: attach them FIRST, then tighten until the
+    # ACTUAL serialized JSON — the whole response, nothing excluded — fits.
     dropped: List[str] = []
-    over_budget = False
-    note: Optional[str] = None
+    budget_block: dict[str, Any] = {
+        "budget_chars": budget_chars,
+        "used_chars": 0,
+        "dropped": dropped,  # the live list — appends count immediately
+        "over_budget": False,
+    }
+    response["budget"] = budget_block
+    if redactions:
+        response["redactions"] = redactions
+
+    def _remeasure() -> int:
+        """Measure the FULL payload, folding ``used_chars`` to a fixed point.
+
+        ``used_chars`` sits inside the JSON it measures, so its own digit
+        count is part of the length; the iteration is monotone (digit count
+        never shrinks as the value grows) and stabilizes in a step or two.
+        """
+        for _ in range(8):
+            used = _measure(response)
+            if budget_block["used_chars"] == used:
+                return used
+            budget_block["used_chars"] = used
+        return _measure(response)
+
     if budget_chars:
         for label, dropper in _LADDER:
-            if _measure(response) <= budget_chars:
+            if _remeasure() <= budget_chars:
                 break
             if dropper(response):
                 dropped.append(label)
-        if _measure(response) > budget_chars:
-            over_budget = True
-            note = (
+        if _remeasure() > budget_chars:
+            budget_block["over_budget"] = True
+            budget_block["note"] = (
                 "the remaining digest (user turns verbatim + summary counts) "
                 "exceeds budget_chars; user turns are the auditor's ground "
                 "truth and are NEVER truncated — emitted whole. Full "
                 f"projections: query(type='user_turn', session='{uuid}') / "
                 f"read_session('{uuid}')."
             )
-
-    budget_block: dict[str, Any] = {
-        "budget_chars": budget_chars,
-        "used_chars": _measure(response),
-        "dropped": dropped,
-        "over_budget": over_budget,
-    }
-    if note:
-        budget_block["note"] = note
-    response["budget"] = budget_block
-    if redactions:
-        response["redactions"] = redactions
+    # Final honest fold: used_chars == the serialized length of THIS payload.
+    _remeasure()
     return response

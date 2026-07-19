@@ -170,6 +170,30 @@ def test_budget_ladder_order_and_user_turns_never_truncated(
     assert rich_claude_session in tiny["budget"]["note"]
 
 
+def test_budget_honest_on_final_serialized_json(
+    rich_claude_session: str,
+) -> None:
+    """The pinned property: final serialized length <= budget OR over_budget.
+
+    Regression for the pre-insertion measurement bug: the ladder used to
+    measure the response BEFORE the ``budget``/``redactions`` blocks were
+    attached, so a near-limit digest could exceed ``budget_chars`` while
+    claiming ``over_budget: false``.
+    """
+    full = audit_brief(rich_claude_session, budget_chars=0)
+    base = len(json.dumps(full, ensure_ascii=False, default=str))
+    # Probe every regime: comfortably under, the exact edge, just over (the
+    # old bug zone), mid-ladder, hopeless-tiny.
+    for budget in (base + 50, base, base - 1, base - 30, 900, 300):
+        brief = audit_brief(rich_claude_session, budget_chars=budget)
+        payload = json.dumps(brief, ensure_ascii=False, default=str)
+        assert (
+            len(payload) <= budget or brief["budget"]["over_budget"] is True
+        ), f"budget={budget}: {len(payload)} chars with over_budget=false"
+        # used_chars IS the final payload length — never a pre-insertion guess.
+        assert brief["budget"]["used_chars"] == len(payload)
+
+
 def test_mid_budget_drops_only_what_it_must(rich_claude_session: str) -> None:
     full = audit_brief(rich_claude_session, budget_chars=0)
     # A budget just below the full size forces the FIRST rung only.
@@ -197,6 +221,63 @@ def test_invalid_arguments_fail_loud(rich_claude_session: str) -> None:
 def test_unknown_session_not_found(tmp_sessions_dir: Path) -> None:
     with pytest.raises(FileNotFoundError):
         audit_brief("no-such-session-uuid")
+
+
+@pytest.fixture
+def hex_sessions(tmp_sessions_dir: Path) -> tuple[str, str]:
+    """Two Claude sessions sharing a 6-hex id head (prefix resolution)."""
+    ids = (
+        "c0ffee01-aaaa-4aaa-8aaa-000000000001",
+        "c0ffee02-bbbb-4bbb-8bbb-000000000002",
+    )
+    for i, session_id in enumerate(ids):
+        _write_jsonl(
+            tmp_sessions_dir / ".claude" / "projects" / "proj-hex"
+            / f"{session_id}.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": f"hex turn {i}"},
+                    "timestamp": f"2026-06-15T10:0{i}:00Z",
+                    "sessionId": session_id,
+                }
+            ],
+        )
+    return ids
+
+
+def test_prefix_unique_resolves_and_echoes_full_uuid(
+    hex_sessions: tuple[str, str],
+) -> None:
+    brief = audit_brief("c0ffee01")  # the 8-hex head — locate's id matching
+    assert brief["session"]["uuid"] == hex_sessions[0]  # full id echoed
+    assert [t["text"] for t in brief["user_turns"]] == ["hex turn 0"]
+
+
+def test_prefix_ambiguous_fails_loud_with_candidates(
+    hex_sessions: tuple[str, str],
+) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        audit_brief("c0ffee")
+    message = str(excinfo.value)
+    assert "ambiguous" in message
+    for session_id in hex_sessions:
+        assert session_id in message
+
+
+def test_prefix_none_not_found(hex_sessions: tuple[str, str]) -> None:
+    with pytest.raises(FileNotFoundError):
+        audit_brief("deadbeef")
+
+
+def test_mcp_prefix_error_contract(hex_sessions: tuple[str, str]) -> None:
+    from ai_r.mcp_server import audit_brief as mcp_audit_brief
+
+    ambiguous = mcp_audit_brief("c0ffee")
+    assert ambiguous["error"] == "invalid_argument"
+    assert "ambiguous" in ambiguous["message"]
+    missing = mcp_audit_brief("deadbeef")
+    assert missing["error"] == "not_found"
 
 
 def test_mcp_wrapper_error_contract(tmp_sessions_dir: Path) -> None:

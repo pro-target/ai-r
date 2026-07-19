@@ -1937,9 +1937,14 @@ def audit_brief(
     response carries ``budget.over_budget: true`` + a ``note`` naming the
     full projections — never a silently clipped ground truth.
 
-    ``agent`` is an optional hint (``None`` = the id resolves across every
-    parser, like ``read_session``).  ``redact=true`` (default) masks secrets
-    in the emitted title / user texts / plan bodies / feedback pairs.  The
+    ``session`` accepts the full uuid or a unique id prefix (e.g. the 8-hex
+    head), resolved through the SAME id-prefix matching ``locate`` uses —
+    the digest's ``session.uuid`` echoes the full resolved id; an ambiguous
+    prefix is ``invalid_argument`` naming the candidates (capped), zero
+    matches is ``not_found`` with closest-title suggestions.  ``agent`` is
+    an optional hint (``None`` = the id resolves across every parser, like
+    ``read_session``).  ``redact=true`` (default) masks secrets in the
+    emitted title / user texts / plan bodies / feedback pairs.  The
     response is section-structured (``session`` / ``user_turns`` / ``plans``
     / ``tools`` / ``files`` / ``tokens`` / ``component_tokens`` / ``budget``);
     the CLI mirror is ``ai-r audit-brief <uuid>`` (markdown, ``--json`` for

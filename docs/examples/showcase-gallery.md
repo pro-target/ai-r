@@ -300,6 +300,11 @@ not silent truncation. The token breakdown immediately surfaced the familiar
 preset rule: one hard-wired chain of existing projections (`query` + `aggregate` +
 `plan` + the token SSOT), not a second core.
 
+The flagship run above did not itself fit the default 15k-char budget — and that
+is the contract demonstrated live: the ladder compressed the details down to
+summaries, the response honestly raised `over_budget: true`, and all 40 user
+turns stayed verbatim, untouched. Not "it fit", but "it went over and said so".
+
 ## 17. Where a session lives — `locate(identifier)`
 
 "I remember a piece of the title or the first 8 characters of the id — where's the

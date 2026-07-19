@@ -22,7 +22,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "inside a hard character budget."
         ),
     )
-    ab_p.add_argument("uuid", help="Session uuid (any supported agent).")
+    ab_p.add_argument(
+        "uuid",
+        help=(
+            "Session uuid or a unique id prefix, e.g. the 8-hex head "
+            "(any supported agent; ambiguous prefix fails loud listing "
+            "the candidates)."
+        ),
+    )
     ab_p.add_argument(
         "--agent",
         choices=_AGENT_CHOICES,
