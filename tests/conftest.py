@@ -71,6 +71,14 @@ def _isolate_ai_r_home(
     # OpenCode honours a separate env var.  Wipe it to avoid leaking the
     # real DB into parser-discovery tests.
     monkeypatch.delenv("OPENCODE_DB", raising=False)
+    # Neutralize the ``claude agents --json`` pid registry so no test spawns
+    # the real CLI or reads live host processes: an empty snapshot means
+    # liveness resolves to None everywhere.  Tests that exercise the registry
+    # (``test_liveness``) override this seam explicitly, which wins.
+    from ai_r import liveness as _liveness
+
+    monkeypatch.setattr(_liveness, "_read_claude_agents_stdout", lambda: "")
+    monkeypatch.setattr(_liveness, "_agents_cache", None, raising=False)
     yield
 
 
