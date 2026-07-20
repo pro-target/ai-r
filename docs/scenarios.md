@@ -39,7 +39,7 @@ Each scenario resolves to one of:
 
 ## Acceptance summary
 
-109 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
+110 LLM-executed end-to-end scenarios validating the whole public surface on a real vault. Kept in English as language-neutral, executable test specs.
 
 | Function | # scenarios | Headline pass criteria |
 |---|---|---|
