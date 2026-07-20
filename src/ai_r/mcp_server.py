@@ -2979,14 +2979,18 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
             deprecated ``--agent`` flag); the cascade scans all agents.
 
     Returns:
-        ``{"session_id", "agent", "model", "candidates": [...], "verified",
-        "self"}`` where ``session_id`` / ``agent`` describe the
-        highest-priority candidate, ``model`` is the current session's
-        model — the LAST assistant ``model`` recorded in its transcript
-        (``null`` when identity is incomplete or the format records no
-        model signal — never guessed) — and ``candidates`` is the full
-        cascade for disambiguation.  Returns ``{"error": ...,
-        "message": ...}`` on an unknown ``agent`` hint.
+        ``{"session_id", "agent", "model", "resume_command",
+        "candidates": [...], "verified", "self"}`` where ``session_id`` /
+        ``agent`` describe the highest-priority candidate, ``model`` is
+        the current session's model — the LAST assistant ``model``
+        recorded in its transcript (``null`` when identity is incomplete
+        or the format records no model signal — never guessed) —
+        ``resume_command`` is the ready-to-run shell one-liner that
+        reopens the detected session in its agent's CLI (F2.2, text
+        only, never executed; ``null`` when no real command exists) —
+        and ``candidates`` is the full cascade for disambiguation.
+        Returns ``{"error": ..., "message": ...}`` on an unknown
+        ``agent`` hint.
     """
     try:
         return _detect_current_core(agent=agent)

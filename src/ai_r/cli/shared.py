@@ -21,6 +21,7 @@ from ai_r.parsers import (
     target_agents as _target_agents,
 )
 from ai_r.redact import redact_text as _redact_text, redact_value as _redact_value
+from ai_r.resume import resume_command as _resume_command
 
 
 _AGENT_CHOICES = tuple(a.value.lower() for a in _PARSERS.keys())
@@ -283,6 +284,9 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
         "title": session.title,
         "date": _iso(session.date),
         "message_count": session.message_count,
+        # F2.2: ready-to-run CLI resume one-liner, None where no real
+        # command exists (SSOT ai_r.resume; mirrors the MCP summary).
+        "resume_command": _resume_command(session),
     }
 
 

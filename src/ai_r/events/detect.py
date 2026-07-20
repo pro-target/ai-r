@@ -32,7 +32,8 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
 
     Returns:
         ``{"session_id": str|None, "agent": str|None, "model": str|None,
-        "candidates": [...], "verified": bool, "self": bool}`` where:
+        "resume_command": str|None, "candidates": [...], "verified": bool,
+        "self": bool}`` where:
 
         * ``session_id`` / ``agent`` describe the FIRST (highest-priority)
           candidate — the same one the CLI's default ``list`` mode returns.
@@ -42,6 +43,11 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
           transcript read of the detected session).  ``None`` when no
           session/agent was detected, the transcript is unreadable, or
           the format records no model — absence is honest.
+        * ``resume_command`` is the ready-to-run shell one-liner that
+          reopens the detected session in its agent's CLI (F2.2, SSOT
+          :mod:`ai_r.resume`) — ``None`` when identity is incomplete,
+          the session is not in the store, or no real command exists;
+          text only, never executed.
         * ``candidates`` is the full cascade (each ``{id, agent, source,
           verified, self, fingerprint}``), so a caller can disambiguate.
         * ``verified`` / ``self`` mirror the first candidate's flags.
@@ -87,6 +93,7 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
         "session_id": session_id,
         "agent": agent_str,
         "model": _current_session_model(session_id, agent_str),
+        "resume_command": _current_session_resume(session_id, agent_str),
         "candidates": candidate_dicts,
         "verified": first.verified if first is not None else False,
         "self": first.is_self if first is not None else False,
@@ -118,4 +125,31 @@ def _current_session_model(
         if getattr(msg, "role", None) == "assistant" \
                 and isinstance(model, str) and model:
             return model
+    return None
+
+
+def _current_session_resume(
+    session_id: Optional[str], agent: Optional[str]
+) -> Optional[str]:
+    """The detected session's ``resume_command`` (F2.2), or ``None``.
+
+    Reuses the single SSOT :func:`ai_r.resume.resume_command` on the
+    session summary the agent's parser already builds — no second
+    command-construction mechanism.  Honest ``None`` when identity is
+    incomplete, the session is not in the store, or no real resume
+    command exists for the agent (never guessed).
+    """
+    if not session_id or not agent:
+        return None
+    from ai_r.parsers import PARSERS, coerce_agent
+    from ai_r.resume import resume_command
+
+    try:
+        parser = PARSERS[coerce_agent(agent)]
+        sessions = parser.list_sessions()
+    except (FileNotFoundError, ValueError, OSError, KeyError):
+        return None
+    for session in sessions:
+        if session.uuid == session_id:
+            return resume_command(session)
     return None
