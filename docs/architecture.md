@@ -274,6 +274,20 @@ records adding an optional shared transport as the fix.
   eviction is bounded by **both** entry count (`AI_R_HAYSTACK_CACHE_MAX`) and
   total characters (`AI_R_HAYSTACK_CACHE_CHARS_MAX`) so a long-lived shared
   server cannot grow unbounded RSS. A single oversize session stays servable.
+- **Concurrency — sync tools must not block the loop (amendment).** A shared
+  server only pays off if it serves N agents *at once*, but the tool functions
+  are synchronous corpus scans and FastMCP runs a sync tool **inline on the
+  event loop** (`func_metadata.py`: `return fn(**args)`). So a single in-flight
+  read/search froze the loop and starved every other connection until uvicorn's
+  keep-alive dropped it (`not connected` under N parallel readers) — the shared
+  cache was already thread-safe (`_haystack_cache_lock`), but the tools never
+  actually ran concurrently. Fix: `_StrictArgsFastMCP.call_tool` offloads a sync
+  tool's dispatch to a worker thread (`anyio.to_thread.run_sync`), so concurrent
+  calls run in parallel; and `timeout_keep_alive` is raised to
+  `AI_R_MCP_KEEPALIVE_SEC` (default 120 s, above the max expected tool duration)
+  so a briefly-idle connection is not dropped. The offload is gated on
+  `not tool.is_async`; **stdio serves one request at a time, so the extra hop is
+  a behavioral no-op there** (back-compat preserved).
 - **Back-compat / fail-closed.** `stdio` stays the default — existing sessions
   are unaffected until they opt in, with no mid-session break. An unrecognized
   `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
