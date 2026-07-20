@@ -54,6 +54,7 @@ _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import anyio  # noqa: E402  (transitive via mcp; used for sync-tool thread offload)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from ai_r import __version__  # noqa: E402
@@ -303,7 +304,39 @@ class _StrictArgsFastMCP(FastMCP):
                         f"{name} accepts: {', '.join(allowed) or '(none)'}."
                     ),
                 }
+        # Concurrency (F6/http): our tool functions are SYNCHRONOUS and can
+        # spend hundreds of ms scanning the corpus.  FastMCP runs a sync tool
+        # INLINE on the event loop (func_metadata.py: ``return fn(**args)``),
+        # so under the shared streamable-http server a single in-flight
+        # read/search would freeze the loop and starve every other connection
+        # until uvicorn's keep-alive dropped it ("not connected" under N
+        # parallel readers).  Offload the blocking dispatch to a worker thread
+        # so concurrent tool calls actually run in parallel — the body-search
+        # haystack cache is already thread-safe (``_haystack_cache_lock``) for
+        # exactly this.  stdio serves one request at a time, so the extra hop
+        # is a behavioral no-op there (back-compat preserved).  Async tools and
+        # the unknown-tool fall-through keep the base path unchanged.
+        if tool is not None and not tool.is_async:
+            return await anyio.to_thread.run_sync(
+                _call_tool_blocking, self, name, arguments
+            )
         return await super().call_tool(name, arguments)
+
+
+def _call_tool_blocking(
+    server: FastMCP, name: str, arguments: dict[str, Any]
+) -> Any:
+    """Run FastMCP's (synchronous) tool dispatch to completion off the loop.
+
+    Executed inside an :func:`anyio.to_thread.run_sync` worker thread by
+    :meth:`_StrictArgsFastMCP.call_tool` for sync tools.  The base
+    ``FastMCP.call_tool`` is a coroutine, so it is driven on a private event
+    loop via :func:`anyio.run`; our sync tools perform no real awaiting, so it
+    completes without yielding.  ``FastMCP.call_tool`` (not ``super()``) is
+    called explicitly to run the *base* dispatch — the unknown-argument guard
+    already ran in the override above, so there is no re-entry into it.
+    """
+    return anyio.run(FastMCP.call_tool, server, name, arguments)
 
 
 mcp = _StrictArgsFastMCP(

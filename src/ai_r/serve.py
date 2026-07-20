@@ -15,6 +15,18 @@ opt-in via ``AI_R_MCP_TRANSPORT=http`` and binds localhost-only (a non-loopback
 ``AI_R_MCP_HOST`` is refused fail-closed unless ``AI_R_MCP_ALLOW_REMOTE=1``), so
 nothing is exposed off-box and existing stdio sessions keep working unchanged.
 
+Concurrency
+-----------
+The shared server only pays off if it serves N agents *at once*.  Our MCP tool
+functions are synchronous and corpus-scanning, and FastMCP runs a sync tool
+inline on the event loop — so one slow read/search would freeze every other
+connection.  Two guards make the http transport genuinely concurrent: the sync
+tool dispatch is offloaded to a worker thread (see
+``ai_r.mcp_server._StrictArgsFastMCP.call_tool``; the body-search cache is
+thread-safe for exactly this), and ``timeout_keep_alive`` is raised well above
+the max expected tool duration (``AI_R_MCP_KEEPALIVE_SEC``) so a briefly-idle
+keep-alive connection is not dropped as "not connected".
+
 This module keeps the *decisions* as pure, unit-testable predicates
 (``resolve_transport`` / ``should_exit_idle`` / ``systemd_listen_sockets``) and
 isolates the imperative uvicorn wiring in ``run_http``.
@@ -33,6 +45,13 @@ VALID_TRANSPORTS = ("stdio", "http")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8756
 DEFAULT_IDLE_SEC = 900.0
+# uvicorn drops an idle keep-alive connection after this many seconds. The
+# default (5 s) is shorter than a cold full-corpus read/search, so a client
+# whose connection briefly idles between requests while another request runs
+# could be dropped ("not connected").  Sync tools now run off the event loop
+# (mcp_server: thread offload), but keep a generous floor well above the
+# expected max tool duration as defense-in-depth.  Env-tunable, AI_R_* convention.
+DEFAULT_KEEPALIVE_SEC = 120.0
 
 # Optional shared bearer token for the http transport.  When set, every
 # request must carry ``Authorization: Bearer <token>`` — the second line of
@@ -338,6 +357,11 @@ def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragm
 
     ``uvicorn`` is imported lazily here so stdio users never need it installed
     (honest optional dependency — the ``ai-r[http]`` extra).
+
+    ``timeout_keep_alive`` is set from ``AI_R_MCP_KEEPALIVE_SEC`` (default
+    :data:`DEFAULT_KEEPALIVE_SEC`) — above the max expected tool duration — so
+    an idle keep-alive connection is not dropped mid-workload while another,
+    now off-loop, request runs.
     """
     import asyncio
 
@@ -361,8 +385,18 @@ def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragm
         inner = _bearer_auth_asgi(inner, token)
     app = _activity_asgi(inner, state)
 
+    keepalive_sec = float(
+        env.get("AI_R_MCP_KEEPALIVE_SEC") or DEFAULT_KEEPALIVE_SEC
+    )
+
     sockets = systemd_listen_sockets(env)
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        timeout_keep_alive=int(keepalive_sec),
+    )
     server = uvicorn.Server(config)
 
     async def _idle_watch() -> None:
