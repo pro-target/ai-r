@@ -126,11 +126,13 @@ verbs — a `model` facet on `query`, `group_by="model"` on `aggregate`, a
 `detect_current`. No new event type, preset or classifier; absence is
 honest (`null`/`[]`, the `"(unknown)"` aggregate bucket), never guessed.
 
-Three cross-cutting modules sit beside the core:
+Several cross-cutting modules sit beside the core:
 
 | Module | Responsibility |
 |---|---|
 | `redact.py` | Secret redaction on every emitting surface (title, message content, intent, qa) as `[REDACTED_<TYPE>]`, with a `redactions` type→count report. On by default. |
+| `activity.py` | A3 session **recency**: the pure `session_activity` classifier (`now` injected, never read) → `age_sec` + `activity` (`fresh`/`stale` vs `AI_R_STALL_SEC`). An honest statement about the last written record only — deliberately NOT a process-liveness claim (F1.1). |
+| `liveness.py` | Session **process-liveness** (see ADR below): fuses the `claude agents --json` pid registry (TTL-cached, sampled once per `list_sessions`) with `/proc` probes into `session_liveness` (`fresh`/`paused`/`zombie`/`dead`, honest `null` without a pid signal). The OS-derived complement to `activity.py`'s recency — Claude only, best-effort, never fabricated. |
 | `user_refs.py` | User-attachment classification (see ADR below): the `USER_REF_KIND` dictionary + the extractors that fold a `user_turn`'s structured/text references into `{kind, target, origin}` for the `user_ref` facet + `user_ref_kinds` aggregate. Marks the pointer only — never fetches or sanitizes the referenced content. |
 | `tokens.py` | Token accounting: `session_tokens` (exact where the agent records usage, a labeled estimate otherwise, honest `source=None` without signal) + `component_tokens` breakdown over the event taxonomy. `rollup_component_tokens` is the SSOT fold for a parent + its spawned children — it drops the parent's double-counted `task` bucket when children are present and reports `total: None` (never a fabricated `0`) when nothing is measurable; both rollup callers (`read_session(include_subagents)` and the CLI) share it. |
 | `semantic.py` | Optional relevance re-rank (see ADR below): re-ranks the BM25 top-50 with a local ONNX embedding model. Strictly opt-in, fail-soft to BM25. |
@@ -574,3 +576,41 @@ token budget), so each became one call rather than a documented example.
   source — a per-repo teleport-picker sweep — requires driving the CLI under
   a PTY and is a documented follow-up, deliberately NOT built into a read-only
   reader now.
+### ADR: process-liveness as an OS-signal complement to recency, not a rewrite of it
+
+`activity` (A3 recency) is deliberately silent about the *process*: a session
+file cannot show whether its producer still runs, so F1.1 forbids ai-r from
+turning "nothing written for a while" into "crashed". That honesty left a real
+gap for a supervising poller — a *stale* session is either paused-but-alive or
+dead, and the transcript cannot tell them apart. The consumer was told to
+"correlate `activity == stale` with an OS pid check" themselves; a recurring
+operational lesson ("stale ≠ dead") showed that inference kept getting
+re-derived by hand instead of being answered once, at the source.
+
+- **What changed.** A new `liveness` field on `list_sessions` summaries and
+  `detect_current` answers exactly that, from a *verifiable* OS signal rather
+  than the agent's own say-so (a self-declared status could lie; `/proc`
+  cannot). It fuses two signals: the `claude agents --json` pid registry (a
+  first-party map of running Claude sessions → pid) and `/proc` probes on that
+  pid — process present (`/proc/<pid>/comm` readable) and holding open fds
+  (`/proc/<pid>/fd` non-empty; the kernel closes every fd when a process goes
+  defunct, so an empty fd table is the zombie signature). The verdict:
+  `fresh`/`paused` (alive, recency fresh/stale), `zombie` (present, I/O dead),
+  `dead` (registry named a pid `/proc` no longer shows), `null` (no pid signal).
+- **Why a complement, not a replacement.** `activity` stays the pure recency
+  classifier (F1.1 unchanged, `activity.py` untouched); `liveness` layers the
+  process verdict on top and *reuses* the recency label to split `fresh` vs.
+  `paused`. Building liveness by mutating `activity` would have re-fabricated
+  the very claim F1.1 forbids. The pure core `session_liveness(activity,
+  pid_alive, io_alive)` stays hermetically testable; only the resolver touches
+  `/proc`/the registry (DRY: pid presence reuses `session._pid_comm_starts_with`
+  with the empty prefix rather than a second `/proc` reader).
+- **Why honest `null`, and why only Claude.** Only Claude exposes a pid
+  registry, so every non-Claude session reports `null` — no signal, never a
+  guess. Absence *from* the registry is also `null`, never `dead`: the registry
+  is not assumed exhaustive, so `dead` is emitted only when a concrete pid
+  turned out gone. Everything is best-effort — a missing `claude` CLI, a
+  timeout, a non-zero exit or unparseable output all collapse to `null`, never
+  an error — and the registry is sampled once per `list_sessions` call
+  (TTL-cached ~2.5 s), not once per session, so a listing spawns the subprocess
+  at most once. SSOT `ai_r.liveness.session_liveness` + `resolve_session_liveness`.

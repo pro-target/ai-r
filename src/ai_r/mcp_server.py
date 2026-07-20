@@ -94,7 +94,7 @@ from ai_r.tokens import (  # noqa: E402
     rollup_component_tokens,
     session_tokens,
 )
-from ai_r.parsers import ParserModule, Session  # noqa: E402
+from ai_r.parsers import AgentName, ParserModule, Session  # noqa: E402
 from ai_r.parsers._common import project_dir_matches  # noqa: E402
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
@@ -102,6 +102,10 @@ from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
 from ai_r.outcome import session_outcome as _session_outcome  # noqa: E402
 from ai_r.resume import resume_command  # noqa: E402
 from ai_r.activity import session_activity, stall_seconds  # noqa: E402
+from ai_r.liveness import (  # noqa: E402
+    claude_agents_pid_index,
+    resolve_session_liveness,
+)
 from ai_r.serve import resolve_transport, run_http  # noqa: E402
 from ai_r.redact import (  # noqa: E402
     merge_redaction_counts as _merge_redactions,
@@ -352,6 +356,7 @@ def _session_summary(
     session: Session,
     now: Optional[datetime] = None,
     stale_sec: Optional[float] = None,
+    pid_index: Optional[Mapping[str, int]] = None,
 ) -> dict[str, Any]:
     """Project a :class:`Session` to a JSON-safe summary dict.
 
@@ -381,6 +386,19 @@ def _session_summary(
     ``stale_sec`` defaults to :func:`ai_r.activity.stall_seconds` when a
     ``now`` is given but no explicit threshold.  Without ``now`` the summary
     is byte-identical to the historical shape (no recency fields).
+
+    When ``pid_index`` is supplied (``list_sessions`` samples the
+    ``claude agents --json`` registry once per call and passes it in), a
+    ``liveness`` field is attached — the honest *process* verdict layered on
+    top of ``activity`` (SSOT :mod:`ai_r.liveness`):
+
+    * ``fresh`` / ``paused`` — pid present and holding I/O, recency fresh /
+      stale; ``zombie`` — pid present but its fd table is empty; ``dead`` —
+      the registry named a pid ``/proc`` no longer shows; ``None`` — no pid
+      signal (non-Claude session, or a session absent from the registry).
+
+    ``liveness`` complements ``activity`` (it does not replace the F1.1
+    recency contract).  Without ``pid_index`` the field is omitted entirely.
     """
     date_iso = _iso(session.date)
     result: dict[str, Any] = {
@@ -405,6 +423,12 @@ def _session_summary(
         result["last_activity"] = date_iso
         result["age_sec"] = recency["age_sec"]
         result["activity"] = recency["activity"]
+    if pid_index is not None:
+        # Process-liveness layered on top of A3 recency; ``None`` value when
+        # there is no pid signal for this session (honest absence).
+        result["liveness"] = resolve_session_liveness(
+            session.uuid, pid_index, result.get("activity")
+        )
     if session.extra:
         result["extra"] = session.extra
     return result
@@ -1047,6 +1071,14 @@ def list_sessions(
     # :mod:`ai_r.activity` and never reads the clock itself).
     now = datetime.now(timezone.utc)
     stale_sec = stall_seconds()
+    # Sample the Claude pid registry ONCE per call (TTL-cached, best-effort) so
+    # every session's ``liveness`` is resolved from a single snapshot rather
+    # than one ``claude agents`` spawn per session.  Only Claude exposes a pid
+    # registry, so skip the subprocess entirely when Claude is not targeted —
+    # non-Claude sessions have no pid signal and get no ``liveness`` field.
+    pid_index = (
+        claude_agents_pid_index() if AgentName.CLAUDE in targets else None
+    )
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         agent_sessions = parser.list_sessions()
@@ -1060,7 +1092,11 @@ def list_sessions(
                 session.project_dir, project_dir
             ):
                 continue
-            summaries.append(_session_summary(session, now=now, stale_sec=stale_sec))
+            summaries.append(
+                _session_summary(
+                    session, now=now, stale_sec=stale_sec, pid_index=pid_index
+                )
+            )
 
     # Global newest-first sort: parsers sort per-agent, but across agents we
     # merge into one timeline so offset/limit pages show the freshest sessions.

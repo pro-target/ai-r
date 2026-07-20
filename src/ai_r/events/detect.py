@@ -48,6 +48,12 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
           :mod:`ai_r.resume`) — ``None`` when identity is incomplete,
           the session is not in the store, or no real command exists;
           text only, never executed.
+        * ``liveness`` is the detected session's *process* verdict, layered on
+          top of A3 recency (SSOT :mod:`ai_r.liveness`): ``fresh`` / ``paused``
+          / ``zombie`` / ``dead``, or ``None`` when there is no pid signal.
+          Only Claude exposes a pid registry (``claude agents --json``), so
+          this is ``None`` for every other agent and whenever identity is
+          incomplete — honest absence, never guessed.
         * ``candidates`` is the full cascade (each ``{id, agent, source,
           verified, self, fingerprint}``), so a caller can disambiguate.
         * ``verified`` / ``self`` mirror the first candidate's flags.
@@ -94,6 +100,7 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
         "agent": agent_str,
         "model": _current_session_model(session_id, agent_str),
         "resume_command": _current_session_resume(session_id, agent_str),
+        "liveness": _current_session_liveness(session_id, agent_str),
         "candidates": candidate_dicts,
         "verified": first.verified if first is not None else False,
         "self": first.is_self if first is not None else False,
@@ -152,4 +159,55 @@ def _current_session_resume(
     for session in sessions:
         if session.uuid == session_id:
             return resume_command(session)
+    return None
+
+
+def _current_session_liveness(
+    session_id: Optional[str], agent: Optional[str]
+) -> Optional[str]:
+    """Process-liveness of the detected current session (SSOT :mod:`ai_r.liveness`).
+
+    Only Claude exposes a pid registry (``claude agents --json``), so this is
+    ``None`` for every other agent and whenever identity is incomplete.  The
+    pid snapshot is consulted first: a session absent from the live registry
+    has no pid signal, so we short-circuit to ``None`` without paying for the
+    recency scan.  Otherwise the session's A3 recency splits ``fresh`` vs.
+    ``paused`` — honest ``None`` when the signal is missing, never guessed.
+    """
+    if not session_id or agent != "claude":
+        return None
+    from ai_r.liveness import claude_agents_pid_index, resolve_session_liveness
+
+    pid_index = claude_agents_pid_index()
+    if session_id not in pid_index:
+        return None
+    activity = _current_session_activity(session_id, agent)
+    return resolve_session_liveness(session_id, pid_index, activity)
+
+
+def _current_session_activity(
+    session_id: str, agent: str
+) -> Optional[str]:
+    """The A3 recency label (``fresh`` / ``stale``) of the detected session.
+
+    Reads the session's last-activity date from its parser and classifies it
+    against the current clock (SSOT :mod:`ai_r.activity`).  ``None`` when the
+    session cannot be located or read — absence is honest.
+    """
+    from datetime import datetime, timezone
+
+    from ai_r.activity import session_activity, stall_seconds
+    from ai_r.parsers import PARSERS, coerce_agent
+
+    try:
+        parser = PARSERS[coerce_agent(agent)]
+        sessions = parser.list_sessions()
+    except (ValueError, OSError, KeyError):
+        return None
+    for session in sessions:
+        if session.uuid == session_id:
+            now = datetime.now(timezone.utc)
+            return session_activity(session.date, now, stall_seconds())[
+                "activity"
+            ]
     return None
