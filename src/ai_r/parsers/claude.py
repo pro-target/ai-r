@@ -84,6 +84,7 @@ import dataclasses
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -661,8 +662,62 @@ def _scan_file(
 # ---------------------------------------------------------------------------
 
 
+# Desktop-index cache: ``_load_desktop_index`` used to re-``rglob`` +
+# re-``json.loads`` every metadata file on every call (and it is called once
+# per list/read/find pass).  This cache keeps the last built index per root
+# and revalidates it with a stat-only signature of the ``*.json`` files:
+# ``(path, mtime_ns, size)`` per file.  Desktop rewrites metadata IN PLACE —
+# the file's mtime/size change while the directory's mtime does not — so the
+# per-file signature (never a directory mtime) is the correct validator; any
+# rewrite, addition or removal forces a rebuild and a HIT is byte-identical
+# to a MISS.  An unstattable file (OSError) yields ``None`` → uncacheable
+# round, fail open to a fresh scan.  Keyed by the root path (the default
+# root plus any explicit ``desktop_dir`` overrides), no eviction needed.
+_desktop_index_cache: "dict[str, tuple[tuple, dict[str, Tuple[dict, Path]]]]" = {}
+_desktop_index_cache_lock = threading.Lock()
+
+
+def _desktop_index_signature(root: Path) -> Optional[tuple]:
+    """Stat-only change signature of the Desktop root's ``*.json`` files."""
+    entries: list[tuple] = []
+    try:
+        for json_path in sorted(root.rglob("*.json")):
+            if not json_path.is_file():
+                continue
+            st = json_path.stat()
+            entries.append((str(json_path), st.st_mtime_ns, st.st_size))
+    except OSError:
+        return None
+    return tuple(entries)
+
+
 def _load_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
     """Map session uuid -> ``(metadata, json_path)`` from the Desktop root.
+
+    Cached per root, revalidated by the stat signature of the metadata
+    files (see :data:`_desktop_index_cache`); the scan itself lives in
+    :func:`_scan_desktop_index`.  Callers must treat the returned index as
+    immutable — it is shared across calls.  A missing root yields an empty
+    index — never an error.
+    """
+    if not root.is_dir():
+        return {}
+    key = str(root)
+    signature = _desktop_index_signature(root)
+    if signature is not None:
+        with _desktop_index_cache_lock:
+            cached = _desktop_index_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+    index = _scan_desktop_index(root)
+    if signature is not None:
+        with _desktop_index_cache_lock:
+            _desktop_index_cache[key] = (signature, index)
+    return index
+
+
+def _scan_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
+    """Build the Desktop metadata index by reading every ``*.json`` file.
 
     Scans ``<root>/**/*.json`` (observed layout is
     ``<device-uuid>/<workspace-uuid>/local_<id>.json`` but the depth is not
@@ -670,10 +725,7 @@ def _load_desktop_index(root: Path) -> dict[str, Tuple[dict, Path]]:
     id to be indexed; anything else is silently skipped.  The key is
     ``cliSessionId`` when present (== the stem of the backing CLI JSONL,
     which makes deduplication a plain dict lookup), else ``sessionId``.
-    A missing root yields an empty index — never an error.
     """
-    if not root.is_dir():
-        return {}
     index: dict[str, Tuple[dict, Path]] = {}
     for json_path in sorted(root.rglob("*.json")):
         if not json_path.is_file():
