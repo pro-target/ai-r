@@ -185,7 +185,9 @@ _SCOPE_QUESTION_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
         r"|главн\w* цель\w*|достигнут\w* ли",
     ),
     _marker("scope-status-ru", r"каков статус|какой статус|что по итогу"),
-    _marker("scope-summary-ru", r"\bитог\b|что в итоге"),
+    # Narrow on purpose: a bare "итог" is a common connector; only the
+    # explicit question forms prompt a scope-check answer.
+    _marker("scope-summary-ru", r"что в итоге|какой итог|итог\?"),
     # -- English --
     _marker(
         "scope-closed-en",
@@ -204,7 +206,13 @@ _ADMISSION_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     # -- Russian --
     _marker("not-closed-ru", r"не закрыт|не закрыла|не закрыло"),
     _marker("not-achieved-ru", r"не достиг|не выполнен|не успел|не получилось"),
-    _marker("partial-ru", r"частично|только \d+ из|0 из \d+|0 полностью"),
+    # Narrow on purpose: bare "частично" is benign progress; require a
+    # scope-qualifier (mirrors the English `partially (done|closed)` form).
+    _marker(
+        "partial-ru",
+        r"частично (закрыт|выполнен|сделан|готов)"
+        r"|только \d+ из|0 из \d+|0 полностью",
+    ),
     # -- English --
     _marker(
         "not-closed-en",
