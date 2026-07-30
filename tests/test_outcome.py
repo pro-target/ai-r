@@ -332,6 +332,45 @@ def test_admission_without_scope_question_still_success() -> None:
     assert out["status"] == "success"
 
 
+def test_benign_partial_does_not_trigger_tail_exchange() -> None:
+    """Anti-regression (precision): scope-question + assistant mentioning
+    bare "частично" in benign context (no scope-qualifier) → NOT a
+    tail-exchange. Calibrated against critic finding on c989ce6 where bare
+    "частично" + bare "итог" could false-positive a real success into mixed.
+    The classifier must stay honest — never guess a retreat from a benign
+    progress update.
+    """
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("итог?"),  # bare "итог?" — narrow scope-summary form
+        _assistant("частично в работе над следующим шагом, но X готово."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    # "итог?" matches scope-summary-ru (narrowed form); "частично в работе"
+    # does NOT match partial-ru (requires "частично (закрыт|выполнен|...)" or
+    # numeric qualifier). No admission → no tail-exchange → stays success.
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
+def test_admission_before_scope_question_no_exchange() -> None:
+    """Anti-regression: assistant admission BEFORE the user scope-question
+    (i.e. mid-dialog admission, then user asks for status) → NOT a
+    tail-exchange. The pair requires the scope-question to come first
+    (the user prompting the admission)."""
+    msgs = [
+        _user("сделай X"),
+        _assistant("Главная цель не достигнута, продолжаю работу"),
+        _user("ок"),
+        _user("итог?"),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
 def test_tail_exchange_english() -> None:
     """English variant: 'is it done?' + 'only 1/15 closed' → mixed."""
     msgs = [
