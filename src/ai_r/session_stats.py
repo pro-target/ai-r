@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional
 
 from ai_r.events.aggregate import aggregate as _aggregate
 from ai_r.find_file_edits import find_file_edits
-from ai_r.parsers import PARSERS, Session, iso, target_agents
+from ai_r.parsers import PARSERS, Session, cached_list_sessions, iso, target_agents
 from ai_r.tokens import session_tokens as _session_tokens
 
 __all__ = [
@@ -77,7 +77,7 @@ def children_of(
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         try:
-            sessions = parser.list_sessions()
+            sessions = cached_list_sessions(agent_name, parser)
         except (FileNotFoundError, ValueError, OSError):
             continue
         for session in sessions:

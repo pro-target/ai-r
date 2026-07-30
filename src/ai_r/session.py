@@ -418,12 +418,13 @@ def _aireader_list_candidate() -> Optional[SessionCandidate]:
         return None
     try:
         from ai_r.cli import _PARSERS  # type: ignore
+        from ai_r.parsers import cached_list_sessions
 
         parser = _PARSERS[agent]
     except Exception:
         return None
     try:
-        for session in parser.list_sessions():
+        for session in cached_list_sessions(agent, parser):
             sid = session.uuid
             if sid and _is_valid_session_id(sid):
                 return SessionCandidate(

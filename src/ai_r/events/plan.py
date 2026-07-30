@@ -23,7 +23,7 @@ from typing import (
     Tuple,
 )
 
-from ai_r.parsers import PARSERS, coerce_agent, target_agents
+from ai_r.parsers import PARSERS, cached_list_sessions, coerce_agent, target_agents
 from ai_r.redact import merge_redaction_counts, redact_value
 
 from ai_r.events._common import _coerce_tool_input, _plan_ref_value
@@ -205,7 +205,7 @@ def _session_plan_context(
     """
     for agent_name in target_agents(agent_hint):
         parser = PARSERS[agent_name]
-        for sess in parser.list_sessions():
+        for sess in cached_list_sessions(agent_name, parser):
             if sess.uuid != session_id:
                 continue
             try:
@@ -518,7 +518,7 @@ def _resolve_plan_signal(event_id: str) -> Optional[_PlanSignal]:
         return None
     for agent_name in target_agents(owning.agent):
         parser = PARSERS[agent_name]
-        for sess in parser.list_sessions():
+        for sess in cached_list_sessions(agent_name, parser):
             if sess.uuid != session_id:
                 continue
             try:

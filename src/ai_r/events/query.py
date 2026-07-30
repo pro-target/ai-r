@@ -14,7 +14,7 @@ import warnings
 from typing import Any, List, Optional, Sequence
 
 from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
-from ai_r.parsers import PARSERS, Message, target_agents
+from ai_r.parsers import PARSERS, Message, cached_list_sessions, target_agents
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.semantic import semantic_order as _semantic_order
@@ -170,7 +170,7 @@ def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
             return msgs_cache[session_id]
         for agent_name in target_agents(agent or None):
             parser = PARSERS[agent_name]
-            for sess in parser.list_sessions():
+            for sess in cached_list_sessions(agent_name, parser):
                 if sess.uuid != session_id:
                     continue
                 messages: list[Message] = []

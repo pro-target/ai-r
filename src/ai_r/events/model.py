@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import to_utc_aware
-from ai_r.parsers import PARSERS, Message, iso, target_agents
+from ai_r.parsers import PARSERS, Message, cached_list_sessions, iso, target_agents
 from ai_r.parsers._common import project_dir_matches
 from ai_r.parsers._noise import noise_allows, validate_noise
 from ai_r.user_refs import dedup_user_refs, extract_user_refs_from_text
@@ -958,7 +958,7 @@ def iter_events(
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
-        sessions = parser.list_sessions()
+        sessions = cached_list_sessions(agent_name, parser)
         if scanned_sessions_out is not None:
             scanned_sessions_out[agent_lc] = sessions
         # ``parent`` subtree closure is per-agent (parent_uuid never crosses

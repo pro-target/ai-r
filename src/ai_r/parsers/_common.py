@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -466,3 +468,95 @@ def fold_orphan_thinking(messages: List[Message]) -> List[Message]:
         else:
             out.append(msg)
     return out
+
+# --- Per-agent ``list_sessions`` scan cache -------------------------------
+#
+# Core read paths (``iter_events`` -> ``get_body``, ``children_of``,
+# ``find_tool_calls``) used to call ``parser.list_sessions()`` directly, so
+# every call re-walked the whole corpus: cProfile on ``audit_dossier``
+# attributed ~90% of a 1081s run to repeated walks (63 walks across ~1549
+# files; ``get_body`` alone drove 37).  This cache serves a repeat scan from
+# the last result when nothing under the parser's source roots changed.
+#
+# The signature is sampled BEFORE the scan: a write racing the scan then
+# leaves a pre-change signature next to post-change data, so the next call
+# re-validates and rescans -- never the reverse.  The lock guards only the
+# cheap dict check/store; the signature walk and the (slow) corpus scan run
+# outside it, and a concurrent double-scan of the same agent is harmless
+# (last writer wins; both are fresh).  Callers must treat the returned list
+# as immutable -- it is shared across calls.  Mirrors
+# ``ai_r.mcp_server._cached_agent_sessions``; that MCP-layer cache is the
+# same idea and the two may converge later (single source of truth).
+#
+# No LRU/eviction: the key space is the agent registry (<= 6 entries), and a
+# signature probe is stat-only (milliseconds on a ~1500-session corpus).
+_sessions_scan_cache: "dict[str, tuple[tuple, list]]" = {}
+_sessions_scan_cache_lock = threading.Lock()
+
+
+def sessions_scan_signature(roots):
+    """Stat-only change signature for the file trees under ``roots``.
+
+    Returns a hashable tuple of per-file ``(path, mtime_ns, size)`` entries
+    plus a ``(root, kind)`` presence marker per root.  ``None`` when any stat
+    fails -- the caller treats this round as uncacheable rather than risk
+    serving pinned-stale content.  Identical discipline to
+    ``ai_r.mcp_server._sessions_scan_signature``.
+
+    Known limitation: a FILE root (e.g. OpenCode's SQLite ``opencode.db``)
+    is statted directly, so its ``-wal``/``-shm`` companions are NOT in the
+    signature.  In SQLite WAL mode a commit appends to ``opencode.db-wal``
+    and the main DB's mtime/size move only at checkpoint, so a long-lived
+    process may serve a stale OpenCode list until then.  Pre-existing in
+    the MCP-layer cache; not deepened here (file-back agents --
+    Claude/Codex/Pi/Antigravity -- are unaffected: any append grows size
+    or bumps mtime).
+    """
+    entries: list = []
+    try:
+        for root in sorted(roots):
+            if os.path.isfile(root):
+                st = os.stat(root)
+                entries.append((root, st.st_mtime_ns, st.st_size))
+                continue
+            if not os.path.isdir(root):
+                entries.append((root, "missing"))
+                continue
+            entries.append((root, "dir"))
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                for name in sorted(filenames):
+                    path = os.path.join(dirpath, name)
+                    st = os.stat(path)
+                    entries.append((path, st.st_mtime_ns, st.st_size))
+    except OSError:
+        return None
+    return tuple(entries)
+
+
+def cached_list_sessions(agent_name, parser):
+    """Return ``parser.list_sessions()``, reusing the last scan when unchanged.
+
+    ``agent_name`` is the :class:`~ai_r.parsers.models.AgentName` keyed by its
+    ``.value``; ``parser`` is the per-agent module exposing ``list_sessions``
+    and ``source_roots``.  An unstattable/empty root set is treated as
+    uncacheable (fail-open to a fresh scan); any exception from
+    ``parser.list_sessions`` propagates to the caller (nothing stale is
+    cached on failure).
+    """
+    key = agent_name.value
+    try:
+        roots = list(parser.source_roots())
+    except (OSError, ValueError):
+        roots = []
+    signature = sessions_scan_signature(roots) if roots else None
+    if signature is not None:
+        with _sessions_scan_cache_lock:
+            cached = _sessions_scan_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+    sessions = parser.list_sessions()
+    if signature is not None:
+        with _sessions_scan_cache_lock:
+            _sessions_scan_cache[key] = (signature, sessions)
+    return sessions

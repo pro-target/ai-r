@@ -27,6 +27,7 @@ from ai_r.find_file_edits import (
 )
 from ai_r.parsers import (
     PARSERS,
+    cached_list_sessions,
     iso,
     target_agents,
 )
@@ -376,7 +377,7 @@ def find_tool_calls(
 
     for agent_name in targets:
         parser = PARSERS[agent_name]
-        agent_sessions = parser.list_sessions()
+        agent_sessions = cached_list_sessions(agent_name, parser)
         scanned_sessions[agent_name.value.lower()] = agent_sessions
         for sess in agent_sessions:
             if wanted_sessions is not None and sess.uuid not in wanted_sessions:

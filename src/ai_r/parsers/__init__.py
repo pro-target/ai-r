@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Protocol, Union
 
 from . import antigravity, claude, codex, opencode, pi
 from .models import AgentName, Message, Session
+from ._common import cached_list_sessions
 
 
 class ParserModule(Protocol):
@@ -84,6 +85,7 @@ __all__ = [
     "coerce_agent",
     "target_agents",
     "iso",
+    "cached_list_sessions",
 ]
 
 
