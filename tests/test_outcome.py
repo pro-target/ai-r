@@ -256,6 +256,97 @@ def test_outcome_contains_no_raw_session_text() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tail-exchange: user scope-question + agent admission of non-achievement
+# downgrades an otherwise-positive outcome to "mixed" (SP-1, calibrated on
+# real history ses_04deb587 where a late "ок" coexisted with a final exchange
+# in which the agent admitted the primary goal was not closed).
+# ---------------------------------------------------------------------------
+
+
+def test_tail_exchange_downgrades_success_to_mixed() -> None:
+    """Positive marker earlier + late user scope-question + agent admission
+    of non-achievement → mixed (NOT success). Calibrated on ses_04deb587:
+    "ок" at :41, then :137 "Закрыты главные цели?" → agent admitted "1/15
+    pilot only, 0 fully closed". Without this signal the classifier reported
+    success, masking the unfinished priority.
+    """
+    msgs = [
+        _user("Оркестратор, отправь аудитора закрыть хвосты цепочки"),
+        _assistant("начинаю"),
+        _user("ок, продолжай"),  # positive marker "ок" — would be success alone
+        _assistant("работаю"),
+        _user("Закрыты главные цели из сессий за 2 недели по цепочке?"),
+        _assistant(
+            "Главная цель НЕ достигнута. Из 15 chain-сессий аудирована "
+            "полностью только одна, 0 полностью закрыто."
+        ),
+    ]
+    out = session_outcome(msgs, AgentName.OPENCODE)
+    assert out["status"] == "mixed"
+    assert out["user_verdict"] == "positive"  # marker still detected
+    assert any("tail-exchange" in s for s in out["signals"])
+
+
+def test_positive_ack_without_scope_question_stays_success() -> None:
+    """Anti-regression: positive "ок" + later benign "что ещё?" + assistant
+    listing more work (no admission of non-achievement) → still success.
+    Ack-then-continue is not a tail-exchange retreat.
+    """
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("что ещё осталось?"),
+        _assistant("вот список: A, B, C"),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
+def test_scope_question_without_admission_stays_success() -> None:
+    """Anti-regression: user scope-question + assistant reporting success
+    (no admission) → still success. Scope-question alone is not a retreat."""
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("Закрыты ли цели?"),
+        _assistant("Да, всё закрыто, готово."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+
+
+def test_admission_without_scope_question_still_success() -> None:
+    """Anti-regression: agent self-reports partial progress mid-dialog
+    WITHOUT a preceding user scope-question → not a tail-exchange.
+    (Mid-dialog progress is normal; only a user-prompted admission signals
+    that the user is checking on the originally-promised scope.)"""
+    msgs = [
+        _user("сделай X, Y, Z"),
+        _assistant("сделал X, но Y и Z частично — продолжаю"),
+        _user("отлично, спасибо"),  # positive marker
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+
+
+def test_tail_exchange_english() -> None:
+    """English variant: 'is it done?' + 'only 1/15 closed' → mixed."""
+    msgs = [
+        _user("close the chain tails"),
+        _assistant("starting"),
+        _user("ok"),  # positive
+        _user("Are the main goals closed?"),
+        _assistant("Main goal NOT reached. Only 1 of 15 sessions audited, 0 fully closed."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "mixed"
+    assert any("tail-exchange" in s for s in out["signals"])
+
+
+# ---------------------------------------------------------------------------
 # MCP layer: read_session carries the outcome block
 # ---------------------------------------------------------------------------
 
