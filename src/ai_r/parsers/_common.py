@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
+import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Any, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from .models import Message
+from .models import Message, Session
 
 
 # --- JSONL reading caps -------------------------------------------------
@@ -466,3 +469,243 @@ def fold_orphan_thinking(messages: List[Message]) -> List[Message]:
         else:
             out.append(msg)
     return out
+
+
+# --- Per-process read caches (corpus inventory + parsed messages) -----------
+#
+# Every hot core call (``iter_events`` → ``get_body`` / ``query`` / the plan
+# projections / ``audit_brief``) used to re-run the parser's full corpus scan
+# (``list_sessions`` reads + parses EVERY session file) and a full message
+# parse (``read_messages``) on every invocation — the dominant cost measured
+# on a real corpus (4.5 s scan + 0.2 s parse per call; ~20 s per MCP
+# ``get_body`` on a loaded server).  Two caches remove the REPEAT cost while
+# keeping a HIT byte-identical to a MISS:
+#
+# * the INVENTORY cache keeps the last ``list_sessions`` result per agent,
+#   revalidated by a stat-only signature of the parser's ``source_roots()``;
+# * the MESSAGE cache (below) is a bounded LRU of ``read_messages`` results.
+#
+# The shared http server (``AI_R_MCP_TRANSPORT=http``) is long-lived and
+# dispatches sync tools on up to 40 worker threads, so both caches are
+# thread-safe: one lock guards the cheap dict touch, the scan/parse itself
+# runs outside it, and a concurrent double-parse of the same content is
+# harmless (last writer wins, both fresh) — the same locking discipline the
+# ``mcp_server`` haystack cache uses.  The inventory cache moved here from
+# ``ai_r.mcp_server`` (its only original caller) so the core hot paths and
+# the MCP ``list_sessions`` wrapper share ONE entry per agent.
+
+_agent_sessions_cache: "dict[str, tuple[tuple, List[Session]]]" = {}
+_agent_sessions_cache_lock = threading.Lock()
+
+
+def _sessions_scan_signature(roots: Sequence[str]) -> Optional[tuple]:
+    """Stat-only change signature for the file trees under ``roots``.
+
+    Returns a hashable tuple of per-file ``(path, mtime_ns, size)`` entries
+    plus a ``(root, kind)`` presence marker per root (so a root appearing,
+    vanishing, or flipping dir/file changes the signature even when no file
+    entry does).  A file root (the OpenCode SQLite DB) is statted directly.
+    ``None`` when any stat fails — the caller must treat this round as
+    uncacheable rather than risk serving pinned-stale content.
+    """
+    entries: list[tuple] = []
+    try:
+        for root in sorted(roots):
+            if os.path.isfile(root):
+                st = os.stat(root)
+                entries.append((root, st.st_mtime_ns, st.st_size))
+                continue
+            if not os.path.isdir(root):
+                entries.append((root, "missing"))
+                continue
+            entries.append((root, "dir"))
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                for name in sorted(filenames):
+                    path = os.path.join(dirpath, name)
+                    st = os.stat(path)
+                    entries.append((path, st.st_mtime_ns, st.st_size))
+    except OSError:
+        return None
+    return tuple(entries)
+
+
+def _cached_agent_sessions(agent_key: str, parser: Any) -> List[Session]:
+    """Return ``parser.list_sessions()``, reusing the last scan when unchanged.
+
+    Invalidation is STAT-SIGNATURE based (per-file ``mtime_ns`` + ``size``,
+    never directory mtimes — appending to a live session file changes the
+    file but not its parent directory, which would freeze ``date`` /
+    ``message_count`` for exactly the actively-running sessions).  Any
+    change — new/removed file, mtime bump, or a same-mtime size change —
+    produces a different signature and forces a fresh scan, so a HIT is
+    byte-identical to a MISS.  The walk stats every file but reads none.
+
+    The signature is sampled BEFORE the scan: a write racing the scan then
+    leaves a pre-change signature next to post-change data, so the next
+    call re-validates and rescans — never the reverse.  The lock guards
+    only the cheap dict check/store; the signature walk and the (slow)
+    corpus scan run outside it.  Callers must treat the returned list as
+    immutable — the SAME list is shared across calls.
+
+    ``parser`` is duck-typed (``source_roots()`` + ``list_sessions()``): the
+    ``ParserModule`` protocol lives in :mod:`ai_r.parsers` and cannot be
+    imported here without a package-load cycle.
+    """
+    try:
+        roots = list(parser.source_roots())
+    except (OSError, ValueError):
+        roots = []
+    signature = _sessions_scan_signature(roots) if roots else None
+    if signature is not None:
+        with _agent_sessions_cache_lock:
+            cached = _agent_sessions_cache.get(agent_key)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+    sessions = parser.list_sessions()
+    if signature is not None:
+        with _agent_sessions_cache_lock:
+            _agent_sessions_cache[agent_key] = (signature, sessions)
+    return sessions
+
+
+# --- Parsed-message LRU cache ------------------------------------------------
+#
+# ``read_messages`` is a FULL parse of the session transcript (plus, for
+# some parsers, its own path-resolution walk).  Repeated reads of an
+# unchanged session — exactly what ``get_body``/``query``/the plan
+# projections/``audit_brief`` do within one call batch — reuse the cached
+# parse, keyed by the session file's STAT IDENTITY
+# ``(agent, uuid, path, mtime_ns, size)``.  A live session being appended
+# to changes ``mtime_ns``/``size`` → the key changes → fresh parse, so a HIT
+# is byte-identical to a MISS (the same invariant the ``mcp_server``
+# haystack cache uses; for OpenCode the shared SQLite DB bumps mtime on any
+# write, invalidating every OpenCode entry at once — correct, since any
+# session may have grown).
+#
+# Memory is bounded two ways, because the long-lived shared http server
+# already carries a large resident footprint:
+#
+# * entry count (``AI_R_MSG_CACHE_MAX``, default 8) — a parsed transcript
+#   costs several times its source size as Python objects, so the default
+#   deliberately covers the audit batch pattern (one session + its
+#   neighbours), not the whole corpus;
+# * summed SOURCE bytes (``AI_R_MSG_CACHE_BYTES_MAX``, default 64 MiB) — an
+#   honest proxy for parsed-object size, which is not observable without a
+#   deep walk.  The newest entry is never evicted (haystack semantics), so
+#   a single over-cap session is served fresh-cached instead of thrashing.
+#
+# Fail-open, never fail-stale: a uuid the (fresh-validated) inventory
+# cannot resolve, or a source path that cannot be statted, bypasses the
+# cache and reads directly.
+
+_MSG_CACHE_MAX_DEFAULT = 8
+
+
+def _resolve_msg_cache_max(env: Optional[Mapping[str, str]] = None) -> int:
+    env = os.environ if env is None else env
+    raw = env.get("AI_R_MSG_CACHE_MAX")
+    if raw:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _MSG_CACHE_MAX_DEFAULT
+        if value > 0:
+            return value
+    return _MSG_CACHE_MAX_DEFAULT
+
+
+_MSG_CACHE_BYTES_MAX_DEFAULT = 64 * 1024 * 1024
+
+
+def _resolve_msg_cache_bytes_max(
+    env: Optional[Mapping[str, str]] = None,
+) -> int:
+    env = os.environ if env is None else env
+    raw = env.get("AI_R_MSG_CACHE_BYTES_MAX")
+    if raw:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _MSG_CACHE_BYTES_MAX_DEFAULT
+        if value > 0:
+            return value
+    return _MSG_CACHE_BYTES_MAX_DEFAULT
+
+
+_MSG_CACHE_MAX = _resolve_msg_cache_max()
+_MSG_CACHE_BYTES_MAX = _resolve_msg_cache_bytes_max()
+
+# Keyed by ``(agent_key, uuid, path, mtime_ns, size)``; the value carries
+# the parsed messages plus the entry's SOURCE-byte weight for the byte cap.
+_msg_cache: "OrderedDict[tuple, Tuple[List[Message], int]]" = OrderedDict()
+_msg_cache_bytes = 0
+_msg_cache_lock = threading.Lock()
+
+
+def _evict_msg_cache_locked() -> None:
+    """Bound the message cache by entries AND summed source bytes.
+
+    Caller must hold :data:`_msg_cache_lock`.  Oldest-first (LRU) eviction;
+    the single newest entry always survives so an over-byte-cap session is
+    cached rather than evicted-and-reparsed on every call.
+    """
+    global _msg_cache_bytes
+    while _msg_cache and (
+        len(_msg_cache) > _MSG_CACHE_MAX
+        or _msg_cache_bytes > _MSG_CACHE_BYTES_MAX
+    ):
+        if len(_msg_cache) == 1:
+            break
+        _, (_, size) = _msg_cache.popitem(last=False)
+        _msg_cache_bytes -= size
+
+
+def cached_read_messages(
+    agent_key: str, parser: Any, uuid: str
+) -> List[Message]:
+    """Return ``parser.read_messages(uuid)``, reusing a fresh cached parse.
+
+    The session's ``Session`` entry is resolved from the (stat-validated)
+    inventory cache, so the path/mtime/size key reflects the file as it is
+    NOW: any change to the transcript produces a different key and a fresh
+    parse.  Callers must treat the returned list (and its messages) as
+    immutable — the SAME objects are shared across calls.
+
+    Raises whatever ``parser.read_messages`` raises (a failed read is never
+    cached); an unread failure simply propagates, mirroring the uncached
+    behaviour.
+    """
+    path = ""
+    for sess in _cached_agent_sessions(agent_key, parser):
+        if sess.uuid == uuid:
+            path = str(getattr(sess, "path", "") or "")
+            break
+    if not path:
+        # Not in the inventory (a Desktop-only ghost, or a parser whose
+        # roots the walk could not sign): read directly, never guess a key.
+        return parser.read_messages(uuid)
+    try:
+        st = os.stat(path)
+    except OSError:
+        # Unstattable source: fail open to a direct read (never pin stale).
+        return parser.read_messages(uuid)
+    key = (agent_key, uuid, path, st.st_mtime_ns, st.st_size)
+    with _msg_cache_lock:
+        cached = _msg_cache.get(key)
+        if cached is not None:
+            _msg_cache.move_to_end(key)
+            return cached[0]
+    messages = parser.read_messages(uuid)
+    global _msg_cache_bytes
+    with _msg_cache_lock:
+        racing = _msg_cache.get(key)
+        if racing is not None:
+            # A concurrent thread stored the same fresh content: keep ONE
+            # object identity per key — serve theirs, drop ours.
+            _msg_cache.move_to_end(key)
+            return racing[0]
+        _msg_cache[key] = (messages, st.st_size)
+        _msg_cache_bytes += st.st_size
+        _evict_msg_cache_locked()
+    return messages

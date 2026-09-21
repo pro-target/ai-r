@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Core read caches — one corpus scan + one transcript parse per unchanged
+  session (per process).** Every hot call (`iter_events` → `get_body` /
+  `query` / the plan projections / `audit_brief`) used to re-run the
+  parser's full corpus scan and a full message parse on every invocation
+  (measured: 4.5 s + 0.2 s per call on a real corpus; `audit_brief` walked
+  the session five times, 29.7 s CPU on a 2.5 MB transcript; parallel MCP
+  batches serialized under the GIL and outlived client timeouts). Two
+  caches now live in `parsers/_common.py`: the stat-signature inventory
+  cache (moved from `mcp_server`, now shared by the core hot paths and the
+  MCP `list_sessions` wrapper) and a bounded LRU `read_messages` cache
+  keyed by `(agent, uuid, path, mtime_ns, size)` — a HIT is byte-identical
+  to a MISS, unstattable sources fail open, memory is capped by
+  `AI_R_MSG_CACHE_MAX` (default 8) and `AI_R_MSG_CACHE_BYTES_MAX`
+  (default 64 MiB). `audit_brief` is additionally single-scan now: one
+  `query` materialization feeds every projection (plan/plan_feedback reuse
+  its rows via an internal `_events` seam; output byte-identical, guarded
+  by an equivalence test). No public verb/parameter changed; the CLI
+  benefits identically within one run. ADR in `docs/architecture.md`.
+
 ### Added
 
 - **Subagent cost — what each spawned agent actually burned, and on which

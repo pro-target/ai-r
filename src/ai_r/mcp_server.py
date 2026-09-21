@@ -95,7 +95,10 @@ from ai_r.tokens import (  # noqa: E402
     session_tokens,
 )
 from ai_r.parsers import AgentName, ParserModule, Session  # noqa: E402
-from ai_r.parsers._common import project_dir_matches  # noqa: E402
+from ai_r.parsers._common import (  # noqa: E402
+    _cached_agent_sessions,
+    project_dir_matches,
+)
 from ai_r.parsers._noise import NOISE_MODES, noise_allows  # noqa: E402
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize  # noqa: E402
 from ai_r.semantic import semantic_order as _semantic_order  # noqa: E402
@@ -943,91 +946,13 @@ def _haystack_store(
 
 
 # --- Per-agent list_sessions scan cache ------------------------------------
-# ``list_sessions`` used to re-run every parser's full corpus scan (read +
-# parse every session file) on every call.  This cache keeps the last scan
-# result per agent and revalidates it with a cheap stat-only signature of
-# the parser's ``source_roots()``.
-#
-# Invalidation strategy: STAT-SIGNATURE (per-file ``mtime_ns`` + ``size``),
-# NOT directory mtimes.  Appending to a live session JSONL (or rewriting a
-# Desktop ``local_*.json`` in place) changes the file but never its parent
-# directory's mtime, so a directory-level validator would freeze
-# ``date``/``message_count``/``activity`` for exactly the sessions watched
-# most closely — the actively-running ones (the honest-liveness contract).
-# Any change — new/removed file, mtime bump, or a same-mtime size change —
-# produces a different signature and forces a fresh scan, so a HIT is
-# byte-identical to a MISS.  The walk stats every file but reads none:
-# milliseconds on a ~1500-session corpus versus the full parse it replaces.
-# An unstattable root/file (OSError) yields ``None`` → treated as
-# uncacheable, so we fail open to a fresh scan and never pin stale content.
-# No LRU/eviction needed: the key space is the agent registry (≤ 6 entries).
-_agent_sessions_cache: "dict[str, tuple[tuple, List[Session]]]" = {}
-_agent_sessions_cache_lock = threading.Lock()
-
-
-def _sessions_scan_signature(roots: Sequence[str]) -> Optional[tuple]:
-    """Stat-only change signature for the file trees under ``roots``.
-
-    Returns a hashable tuple of per-file ``(path, mtime_ns, size)`` entries
-    plus a ``(root, kind)`` presence marker per root (so a root appearing,
-    vanishing, or flipping dir/file changes the signature even when no file
-    entry does).  A file root (the OpenCode SQLite DB) is statted directly.
-    ``None`` when any stat fails — the caller must treat this round as
-    uncacheable rather than risk serving pinned-stale content.
-    """
-    entries: list[tuple] = []
-    try:
-        for root in sorted(roots):
-            if os.path.isfile(root):
-                st = os.stat(root)
-                entries.append((root, st.st_mtime_ns, st.st_size))
-                continue
-            if not os.path.isdir(root):
-                entries.append((root, "missing"))
-                continue
-            entries.append((root, "dir"))
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames.sort()
-                for name in sorted(filenames):
-                    path = os.path.join(dirpath, name)
-                    st = os.stat(path)
-                    entries.append((path, st.st_mtime_ns, st.st_size))
-    except OSError:
-        return None
-    return tuple(entries)
-
-
-def _cached_agent_sessions(
-    agent_name: AgentName, parser: ParserModule
-) -> List[Session]:
-    """Return ``parser.list_sessions()``, reusing the last scan when unchanged.
-
-    The signature is sampled BEFORE the scan: a write racing the scan then
-    leaves a pre-change signature next to post-change data, so the next call
-    re-validates and rescans — never the reverse (a post-scan signature could
-    absorb a change the scan missed and pin it stale).  Mirrors
-    :func:`_get_cached_haystack`'s locking discipline: the lock guards only
-    the cheap dict check/store; the signature walk and the (slow) corpus
-    scan run outside it, and a concurrent double-scan of the same agent is
-    harmless (last writer wins; both are fresh).  Callers must treat the
-    returned list as immutable — it is shared across calls.
-    """
-    key = agent_name.value
-    try:
-        roots = list(parser.source_roots())
-    except (OSError, ValueError):
-        roots = []
-    signature = _sessions_scan_signature(roots) if roots else None
-    if signature is not None:
-        with _agent_sessions_cache_lock:
-            cached = _agent_sessions_cache.get(key)
-            if cached is not None and cached[0] == signature:
-                return cached[1]
-    sessions = parser.list_sessions()
-    if signature is not None:
-        with _agent_sessions_cache_lock:
-            _agent_sessions_cache[key] = (signature, sessions)
-    return sessions
+# The stat-signature inventory cache lives in ``ai_r.parsers._common``
+# (``_cached_agent_sessions``): it moved there so the CORE hot paths
+# (``iter_events`` → ``get_body`` / ``query`` / the plan projections /
+# ``audit_brief``) share the same entry as the MCP ``list_sessions``
+# wrapper below.  Semantics unchanged — see the cache's docstring in
+# ``parsers/_common.py`` (stat-signature freshness, fail-open on unstattable
+# roots, lock guards only the cheap dict touch).
 
 
 @mcp.tool()
@@ -1169,7 +1094,7 @@ def list_sessions(
     )
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        agent_sessions = _cached_agent_sessions(agent_name, parser)
+        agent_sessions = _cached_agent_sessions(agent_name.value, parser)
         scanned_sessions[agent_name.value.lower()] = agent_sessions
         for session in agent_sessions:
             if kind is not None and session.kind != kind:

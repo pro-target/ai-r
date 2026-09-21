@@ -340,6 +340,17 @@ a **shared streamable-http transport** (requires `mcp>=1.9.0`).
   - `AI_R_HAYSTACK_CACHE_MAX` — search cache ceiling by entry count.
   - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — by total size (an RSS safeguard for a
     long-lived server).
+  - `AI_R_MSG_CACHE_MAX` / `AI_R_MSG_CACHE_BYTES_MAX` — the core read cache
+    (one corpus scan + one transcript parse per unchanged session, shared by
+    `query` / `get_body` / `audit_brief` / the plan projections): ceiling by
+    entry count (default `8`) and by summed source bytes (default 64 MiB).
+
+**Heavy sessions (over ~1 MB): prefer the CLI, or single MCP calls.** A
+multi-megabyte transcript is full-parse work; a cold MCP call on one — worse,
+a parallel batch of them — can outlast the client's request timeout. For
+those sessions use the CLI (`ai-r audit-brief <uuid>`, `ai-r read <uuid>`)
+or sequential single MCP calls; the read caches make warm repeats cheap, but
+the first touch of an unchanged session still costs one honest scan.
 
 Both extras are fully optional: without them stdio mode and the BM25 order work
 as before.

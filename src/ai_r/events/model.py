@@ -24,7 +24,11 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ai_r.find_file_edits import to_utc_aware
 from ai_r.parsers import PARSERS, Message, iso, target_agents
-from ai_r.parsers._common import project_dir_matches
+from ai_r.parsers._common import (
+    _cached_agent_sessions,
+    cached_read_messages,
+    project_dir_matches,
+)
 from ai_r.parsers._noise import noise_allows, validate_noise
 from ai_r.user_refs import dedup_user_refs, extract_user_refs_from_text
 
@@ -958,7 +962,10 @@ def iter_events(
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         agent_lc = agent_name.value.lower()
-        sessions = parser.list_sessions()
+        # Stat-signature inventory cache: an unchanged corpus is not
+        # re-scanned on every call (the dominant repeat cost — see
+        # ``parsers/_common.py``).
+        sessions = _cached_agent_sessions(agent_name.value, parser)
         if scanned_sessions_out is not None:
             scanned_sessions_out[agent_lc] = sessions
         # ``parent`` subtree closure is per-agent (parent_uuid never crosses
@@ -978,7 +985,9 @@ def iter_events(
             ):
                 continue
             try:
-                messages = parser.read_messages(sess.uuid)
+                messages = cached_read_messages(
+                    agent_name.value, parser, sess.uuid
+                )
             except (FileNotFoundError, ValueError, OSError):
                 continue
             session_ts = to_utc_aware(sess.date)
