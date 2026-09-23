@@ -60,7 +60,7 @@ __all__ = [
 # ``parsers/models.py`` → ``Message.tool_result.is_error``).  Kept in sync
 # with ``find_tool_calls``'s ``is_error_reliable``.
 ERROR_FLAG_RELIABLE_AGENTS: frozenset[AgentName] = frozenset(
-    {AgentName.CLAUDE, AgentName.OPENCODE}
+    {AgentName.CLAUDE, AgentName.OPENCODE, AgentName.ZCODE}
 )
 
 # How many closing *human* user turns the verdict dictionary scans.  The

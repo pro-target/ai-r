@@ -1248,7 +1248,7 @@ def read_session(
           ``{status: success|failure|mixed|unknown, signals, user_verdict,
           markers, tool_results, tool_errors, error_rate,
           error_rate_reliable}``.  ``status`` combines the tool-call
-          error rate (real flag only for Claude/OpenCode —
+          error rate (real flag only for Claude/OpenCode/ZCode —
           ``None`` elsewhere, never guessed) with a calibrated bilingual
           success/failure dictionary over the tail user turns;
           ``"unknown"`` when neither signal exists (SSOT
@@ -1608,7 +1608,7 @@ def find_tool_calls(
     selects output truncation — ``"head"``/``"tail"``/``"smart"``;
     ``None`` is adaptive (``"smart"`` on errors, ``"head"`` otherwise).
     Each record also carries ``is_error_reliable`` (``True`` only for
-    Claude/OpenCode) plus the wrapper-aware classification: ``tool_kind``
+    Claude/OpenCode/ZCode) plus the wrapper-aware classification: ``tool_kind``
     (``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
     ``web``/``other``) and ``tool_resolved`` — the real name under a
     Skill/Task/MCP wrapper (subagent type, skill name, or

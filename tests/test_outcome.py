@@ -140,6 +140,12 @@ def test_low_error_rate_is_not_a_failure_signal() -> None:
 def test_unreliable_agent_error_fields_are_none() -> None:
     """Codex has no per-result error flag → None fields, words still decide."""
     assert AgentName.CODEX not in ERROR_FLAG_RELIABLE_AGENTS
+
+
+def test_zcode_error_flag_is_reliable() -> None:
+    """ZCode parts carry ``state.status == "error"`` (zcode.py parser maps it
+    to ``tool_result.is_error``) — error-rate signal must be authoritative."""
+    assert AgentName.ZCODE in ERROR_FLAG_RELIABLE_AGENTS
     msgs = [
         Message(
             role="tool",
