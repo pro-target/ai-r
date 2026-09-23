@@ -406,12 +406,13 @@ pytest --cov=src/ai_r
 
 claude code session reader · claude code session parser · codex session parser ·
 opencode session reader · antigravity brain parser · pi agent session reader ·
+zcode session reader · zcode cli session parser ·
 rag over agent sessions · bm25 retriever · retrieval layer for ai agents ·
 grounding · mcp server · structured context ·
 cross-agent attribution · ai coding agent audit · ai agent session history ·
 mcp session tools · read-only session reader · agent session replay ·
 resume agent session · agent handoff · plan extraction · tool-call audit ·
-file edit attribution · multi-agent coding · claude codex opencode antigravity pi
+file edit attribution · multi-agent coding · claude codex opencode antigravity pi zcode
 
 </details>
 

@@ -15,6 +15,7 @@ _DETECT_VARS = (
     "CODEX_HOME",
     "CLAUDECODE",
     "OPENCODE",
+    "ZCODE_APP_VERSION",
 )
 
 

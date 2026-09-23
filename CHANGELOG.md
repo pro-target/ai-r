@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zcode` agent — ZCode CLI session support.** New parser
+  `ai_r/parsers/zcode.py` reads the ZCode harness's SQLite store
+  (`~/.zcode/cli/db/db.sqlite`, the canonical registry: every session
+  incl. main interactive ones, with titles, `parent_id` subagent links,
+  project `directory`, per-model-call `tokens`) and falls back to the
+  rollout model-io JSONL under `~/.zcode/cli/rollout/` for sessions the
+  DB does not know (parent link from
+  `agents/sess_*/agent_*/metadata.json`). Registered in the canonical
+  `PARSERS` registry, so every verb (`list`/`read`/`search`/
+  `find-file-edits`/`find-tool-calls`/`file-frequency`/`stats`/
+  `audit-brief`/`locate`/`export`) and the MCP server pick it up via
+  `--agent zcode`. `detect-agent` recognises `ZCODE_APP_VERSION`;
+  `detect-session` knows the `sess_(subagent_agent_)?<uuid>` id shape.
+  The event layer detects ZCode plans (Claude-shaped `ExitPlanMode` +
+  `.zcode/plans/plan-*.md` writes, approval responses included). Exact
+  per-call token usage via `read_token_usage` (recorded totals, never
+  re-summed cache).
 - **Subagent cost — what each spawned agent actually burned, and on which
   model.** A spawn was already classified (`tool_kind=task`); what was missing
   was its price. `find_tool_calls` now emits `tool_use_id` and, on a spawn, a

@@ -59,6 +59,11 @@ from ai_r.events._common import (
 #             group is the final plan.
 # * antigravity — ``implementation_plan.md`` in the session's brain dir (a
 #             file, not a message tool_use — emitted once per session).
+# * zcode   — the Claude-shaped pair: ``ExitPlanMode`` tool_use (input
+#             carries the full plan under ``plan``) and ``Write`` of a
+#             ``.zcode/plans/plan-*.md`` file (matched by the same
+#             ``plans/*.md`` tail).  ZCode's approval result text reuses
+#             Claude's "User has approved …" prefix.
 # * opencode / pi — no plan signal → nothing emitted.
 
 _HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -141,9 +146,12 @@ def _plan_signal_from_tool(
     """Detect a plan signal in one assistant ``tool_use`` entry.
 
     Covers the Claude (``ExitPlanMode`` / ``Write plans/*.md``) and Codex
-    (``update_plan``) message-level signals.  Antigravity's file-based
-    signal is handled separately in :func:`_antigravity_plan_signal`.
-    Returns ``None`` when the tool is not a plan signal.
+    (``update_plan``) message-level signals.  ZCode reuses Claude's
+    interactive-plan shape (``ExitPlanMode`` with a ``plan`` payload plus
+    plan-file Writes under ``.zcode/plans/``), so it shares that branch.
+    Antigravity's file-based signal is handled separately in
+    :func:`_antigravity_plan_signal`.  Returns ``None`` when the tool is
+    not a plan signal.
     """
     name = tool.get("name", "")
     if not isinstance(name, str) or not name:
@@ -152,7 +160,7 @@ def _plan_signal_from_tool(
     raw_tuid = tool.get("tool_use_id")
     tool_use_id = raw_tuid if isinstance(raw_tuid, str) and raw_tuid else None
 
-    if agent == "claude":
+    if agent in ("claude", "zcode"):
         if name == "ExitPlanMode":
             body = ""
             if isinstance(payload, dict):
@@ -162,7 +170,7 @@ def _plan_signal_from_tool(
             title = _title_from_markdown_body(body) or "Plan"
             return _PlanSignal(
                 title=title,
-                agent_signal="claude:ExitPlanMode",
+                agent_signal=f"{agent}:ExitPlanMode",
                 body=body or None,
                 message_index=message_index,
                 tool_use_id=tool_use_id,
@@ -178,7 +186,7 @@ def _plan_signal_from_tool(
                 title = _title_from_markdown_body(body) or fpath.rsplit("/", 1)[-1]
                 return _PlanSignal(
                     title=title,
-                    agent_signal="claude:Write(plans/*.md)",
+                    agent_signal=f"{agent}:Write(plans/*.md)",
                     path=fpath,
                     body=body or None,
                     message_index=message_index,
@@ -295,8 +303,8 @@ def _plan_signals_for_session(
     from dataclasses import replace
 
     signals: List[_PlanSignal] = []
-    if agent in ("claude", "codex"):
-        last_slug: Optional[str] = None  # nearest preceding Claude plan slug
+    if agent in ("claude", "codex", "zcode"):
+        last_slug: Optional[str] = None  # nearest preceding plan-file slug
         for idx, msg in enumerate(messages):
             if getattr(msg, "role", None) != "assistant":
                 continue
@@ -308,7 +316,7 @@ def _plan_signals_for_session(
                 )
                 if sig is None:
                     continue
-                if agent == "claude":
+                if agent in ("claude", "zcode"):
                     slug = _claude_plan_slug(sig.path)
                     if slug is not None:
                         # A plan-file Write: it defines the current slug and
@@ -486,9 +494,10 @@ def _plan_responses_for_session(
     """Return the ordered user responses to plan revisions in one session.
 
     Only agents with an interactive plan-approval flow produce responses —
-    today that is Claude.  Every other agent returns an empty list (honest
-    absence, never fabricated).  Order is message order; the list index is
-    the stable ``pf<N>`` ordinal that ``get_body`` resolves.
+    today that is Claude and ZCode (whose approval result reuses Claude's
+    "User has approved …" prefix).  Every other agent returns an empty
+    list (honest absence, never fabricated).  Order is message order; the
+    list index is the stable ``pf<N>`` ordinal that ``get_body`` resolves.
 
     The correlated call ids come from the plan-signal SSOT
     (:func:`_plan_signals_for_session`), so BOTH Claude plan signals are
@@ -497,7 +506,7 @@ def _plan_responses_for_session(
     result uses the same permission-denial format).  A successful Write's
     "File created…" result matches no recognised format and is filtered.
     """
-    if agent != "claude":
+    if agent not in ("claude", "zcode"):
         return []
     plan_call_ids = {
         sig.tool_use_id

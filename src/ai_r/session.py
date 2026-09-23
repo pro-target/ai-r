@@ -40,6 +40,7 @@ _AGENT_FLAG_NAMES: "tuple[AgentName, ...]" = (
     AgentName.OPENCODE,
     AgentName.ANTIGRAVITY,
     AgentName.PI,
+    AgentName.ZCODE,
 )
 
 
@@ -47,6 +48,10 @@ _AGENT_SESSION_REGEX: "dict[AgentName, str]" = {
     AgentName.OPENCODE: r"^ses_[A-Za-z0-9]{6,}$",
     AgentName.CLAUDE: r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     AgentName.CODEX: r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    AgentName.ZCODE: (
+        r"^sess_(subagent_agent_)?"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ),
 }
 
 

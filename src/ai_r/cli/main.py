@@ -41,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-r",
         description=(
-            "Inspect Claude, Codex, OpenCode, Antigravity and Pi sessions."
+            "Inspect Claude, Codex, OpenCode, Antigravity, Pi and ZCode "
+            "sessions."
         ),
     )
     parser.add_argument(

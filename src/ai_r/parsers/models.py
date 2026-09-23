@@ -26,6 +26,7 @@ class AgentName(str, Enum):
     OPENCODE = "OPENCODE"
     ANTIGRAVITY = "ANTIGRAVITY"
     PI = "PI"
+    ZCODE = "ZCODE"
 
 
 @dataclass(frozen=True)

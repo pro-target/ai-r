@@ -53,6 +53,7 @@ _LEGACY_AGENT_TO_AI_R = {
     "ANTIGRAVITY_CLI": "antigravity",
     "ANTIGRAVITY_IDE": "antigravity",
     "GEMINI": "antigravity",
+    "ZCODE": "zcode",
     # ROO has no equivalent in ai-r; intentionally absent.
 }
 

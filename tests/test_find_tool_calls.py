@@ -341,7 +341,7 @@ def test_find_tool_calls_no_sessions_returns_empty(
     # why nothing matched.
     assert diagnostics["hints"]
     assert {e["agent"] for e in diagnostics["scanned"]} == {
-        "claude", "codex", "opencode", "antigravity", "pi",
+        "claude", "codex", "opencode", "antigravity", "pi", "zcode",
     }
 
 

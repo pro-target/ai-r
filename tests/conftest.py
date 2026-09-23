@@ -36,6 +36,7 @@ _HOST_FIXTURES = frozenset(
         "real_antigravity_root",
         "real_claude_home",
         "frozen_claude_home",
+        "real_zcode_db",
     }
 )
 
@@ -109,6 +110,9 @@ def tmp_sessions_dir(tmp_path: Path) -> Path:
     (home / ".gemini" / "antigravity" / "brain").mkdir(parents=True)
     (home / ".gemini" / "antigravity-cli" / "brain").mkdir(parents=True)
     (home / ".pi" / "agent" / "sessions").mkdir(parents=True)
+    (home / ".zcode" / "cli" / "db").mkdir(parents=True)
+    (home / ".zcode" / "cli" / "rollout").mkdir(parents=True)
+    (home / ".zcode" / "cli" / "agents").mkdir(parents=True)
     return home
 
 
@@ -698,6 +702,288 @@ def fake_opencode_db(tmp_sessions_dir: Path) -> Path:
     conn.commit()
     conn.close()
     return db_path
+
+
+@pytest.fixture
+def fake_zcode_db(tmp_sessions_dir: Path) -> Path:
+    """A minimal ZCode SQLite store under the fake home (mirrors the real
+    ``~/.zcode/cli/db/db.sqlite`` layout).
+
+    ``sess_test-zc-1`` is a main interactive session with a user message,
+    an assistant message (reasoning + text + a completed tool call) and an
+    errored tool call; ``sess_test-zc-2-sub`` is its subagent child with
+    one part-less assistant message (graceful-degradation case).
+    """
+    db_path = tmp_sessions_dir / ".zcode" / "cli" / "db" / "db.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE session (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT,
+            title        TEXT,
+            directory    TEXT,
+            task_type    TEXT NOT NULL DEFAULT 'interactive',
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL
+        );
+        CREATE TABLE message (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL,
+            sequence     INTEGER
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL,
+            sequence     INTEGER
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("sess_test-zc-1", None, "Add zcode support",
+         "/home/user/proj", "interactive",
+         1_790_000_000_000, 1_790_000_500_000),
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("sess_test-zc-2-sub", "sess_test-zc-1", "Child zcode session",
+         "/home/user/proj", "subagent_child",
+         1_790_000_600_000, 1_790_000_900_000),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-0", "sess_test-zc-1", 1_790_000_100_000, 1_790_000_100_000,
+         json.dumps({"role": "user", "time": {"created": 1_790_000_100_000}}),
+         0),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-1", "sess_test-zc-1", 1_790_000_200_000, 1_790_000_200_000,
+         json.dumps({
+             "role": "assistant",
+             "time": {"created": 1_790_000_200_000,
+                      "completed": 1_790_000_250_000},
+             "modelId": "GLM-5.3",
+             "providerId": "account:test-provider",
+             "tokens": {"total": 120, "input": 100, "output": 20,
+                        "reasoning": 0, "cache": {"read": 40, "write": 0}},
+         }),
+         1),
+    )
+    # Errored tool call: no output, ``state.error`` is the result.
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-2", "sess_test-zc-1", 1_790_000_300_000, 1_790_000_300_000,
+         json.dumps({
+             "role": "assistant",
+             "time": {"created": 1_790_000_300_000},
+             "modelId": "GLM-5.3",
+             "tokens": {"total": 60, "input": 50, "output": 10,
+                        "reasoning": 0, "cache": {"read": 0, "write": 0}},
+         }),
+         2),
+    )
+    # sess_test-zc-2-sub: one assistant message with NO parts.
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-3", "sess_test-zc-2-sub", 1_790_000_700_000, 1_790_000_700_000,
+         json.dumps({"role": "assistant", "time": {"created": 1_790_000_700_000}}),
+         0),
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("zc-p-0", "zc-m-0", "sess_test-zc-1",
+             1_790_000_100_000, 1_790_000_100_000,
+             json.dumps({"type": "text", "text": "Add zcode support"}), 0),
+            ("zc-p-1", "zc-m-1", "sess_test-zc-1",
+             1_790_000_200_000, 1_790_000_200_000,
+             json.dumps({"type": "reasoning",
+                         "text": "Parse the db first."}), 0),
+            ("zc-p-2", "zc-m-1", "sess_test-zc-1",
+             1_790_000_200_000, 1_790_000_200_000,
+             json.dumps({"type": "text", "text": "Reading the store."}), 1),
+            ("zc-p-3", "zc-m-1", "sess_test-zc-1",
+             1_790_000_200_000, 1_790_000_200_000,
+             json.dumps({"type": "tool", "tool": "Read",
+                         "callID": "call_zc_1",
+                         "state": {"status": "completed",
+                                   "input": {"file_path": "/tmp/x/db.py"},
+                                   "output": "10 lines"}}), 2),
+            ("zc-p-4", "zc-m-2", "sess_test-zc-1",
+             1_790_000_300_000, 1_790_000_300_000,
+             json.dumps({"type": "tool", "tool": "Edit",
+                         "callID": "call_zc_2",
+                         "state": {"status": "error",
+                                   "input": {"file_path": "/tmp/x/db.py"},
+                                   "error": "old_string not found"}}), 0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def fake_zcode_rollout(tmp_sessions_dir: Path) -> Path:
+    """A rollout model-io JSONL for a subagent the fake DB does not know.
+
+    Generated from the observed wire format (sanitized: no secrets, no
+    real paths): three model-call records — full snapshot, delta, then a
+    compacting full snapshot — plus the ``agents/sess_*/agent_*/metadata.json``
+    parent link the rollout filename alone cannot provide.
+    """
+    sid = "sess_subagent_agent_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    parent = "sess_11111111-2222-3333-4444-555555555555"
+    rollout = (
+        tmp_sessions_dir / ".zcode" / "cli" / "rollout" / f"model-io-{sid}.jsonl"
+    )
+    records = [
+        {
+            "type": "model_io",
+            "querySource": "subagent",
+            "sessionId": sid,
+            "turnId": "turn_zc_t1",
+            "requestId": "req_zc_1",
+            "attempt": 0,
+            "startedAt": "2026-09-23T04:24:07.343Z",
+            "completedAt": "2026-09-23T04:24:08.577Z",
+            "durationMs": 1234,
+            "model": {"modelId": "GLM-5.3",
+                      "providerId": "account:test-provider"},
+            "request": {
+                "body": {"model": "GLM-5.3", "max_tokens": 32000,
+                         "system": [{"type": "text",
+                                     "text": "You are ZCode."}],
+                         "stream": True},
+                "messages": [
+                    {"role": "system", "content": "You are ZCode."},
+                    {"role": "user",
+                     "content": "Scan the fixture tree for jsonl files"},
+                ],
+                "messagesKind": "full",
+                "messageCount": 2,
+                "messageOffset": 0,
+            },
+            "response": {
+                "finishReason": "tool-calls",
+                "modelId": "GLM-5.3",
+                "text": "Listing the tree.",
+                "reasoningText": "A glob is the cheapest first step.",
+                "toolCalls": [{"id": "call_zc_r1", "name": "Bash",
+                               "input": {"command": "find /tmp/x -name '*.jsonl'"}}],
+                "usage": {"inputTokens": 100, "outputTokens": 20,
+                          "totalTokens": 120, "cacheReadTokens": 40,
+                          "cacheWriteTokens": 0},
+            },
+        },
+        {
+            "type": "model_io",
+            "querySource": "subagent",
+            "sessionId": sid,
+            "turnId": "turn_zc_t2",
+            "requestId": "req_zc_2",
+            "attempt": 0,
+            "startedAt": "2026-09-23T04:25:01.000Z",
+            "completedAt": "2026-09-23T04:25:02.500Z",
+            "durationMs": 1500,
+            "model": {"modelId": "GLM-5.3",
+                      "providerId": "account:test-provider"},
+            "request": {
+                "body": {"model": "GLM-5.3", "max_tokens": 32000,
+                         "stream": True},
+                "messages": [
+                    {"role": "tool", "content": "2 files",
+                     "toolCallId": "call_zc_r1", "toolName": "Bash",
+                     "isError": False},
+                ],
+                "messagesKind": "delta",
+                "messageCount": 4,
+                "messageOffset": 3,
+            },
+            "response": {
+                "finishReason": "end-turn",
+                "modelId": "GLM-5.3",
+                "text": "Found two jsonl fixtures.",
+                "reasoningText": "",
+                "toolCalls": [],
+                "usage": {"inputTokens": 200, "outputTokens": 30,
+                          "totalTokens": 230, "cacheReadTokens": 150,
+                          "cacheWriteTokens": 0},
+            },
+        },
+        {
+            "type": "model_io",
+            "querySource": "subagent",
+            "sessionId": sid,
+            "turnId": "turn_zc_t3",
+            "requestId": "req_zc_3",
+            "attempt": 0,
+            "startedAt": "2026-09-23T04:26:00.000Z",
+            "completedAt": "2026-09-23T04:26:01.000Z",
+            "durationMs": 1000,
+            "model": {"modelId": "GLM-5.3",
+                      "providerId": "account:test-provider"},
+            "request": {
+                "body": {"model": "GLM-5.3", "max_tokens": 32000,
+                         "stream": True},
+                "messages": [
+                    {"role": "system", "content": "You are ZCode."},
+                    {"role": "user",
+                     "content": "Scan the fixture tree for jsonl files"},
+                    {"role": "assistant",
+                     "content": [
+                         {"type": "reasoning", "text": "A glob is the cheapest first step."},
+                         {"type": "text", "text": "Listing the tree."},
+                     ],
+                     "toolCalls": [{"id": "call_zc_r1", "name": "Bash",
+                                    "input": {"command": "find /tmp/x -name '*.jsonl'"}}],
+                     "modelId": "GLM-5.3"},
+                    {"role": "tool", "content": "2 files",
+                     "toolCallId": "call_zc_r1", "toolName": "Bash",
+                     "isError": False},
+                ],
+                "messagesKind": "full",
+                "messageCount": 4,
+                "messageOffset": 0,
+            },
+            "response": {
+                "finishReason": "end-turn",
+                "modelId": "GLM-5.3",
+                "text": "Done: two fixtures.",
+                "reasoningText": "Nothing left to check.",
+                "toolCalls": [],
+                "usage": {"inputTokens": 300, "outputTokens": 40,
+                          "totalTokens": 340, "cacheReadTokens": 200,
+                          "cacheWriteTokens": 0},
+            },
+        },
+    ]
+    _write_jsonl(rollout, records)
+
+    meta_dir = (
+        tmp_sessions_dir / ".zcode" / "cli" / "agents" / parent
+        / "agent_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    )
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "metadata.json").write_text(
+        json.dumps({
+            "childSessionId": sid,
+            "parentSessionId": parent,
+            "status": "completed",
+            "cwd": "/home/user/proj",
+        }),
+        encoding="utf-8",
+    )
+    return rollout
 
 
 @pytest.fixture
@@ -1754,6 +2040,7 @@ _REAL_CLAUDE_DESKTOP_DIR = Path(
 ).expanduser()
 _REAL_CODEX_DIR = Path("~/.codex/sessions").expanduser()
 _REAL_OPENCODE_DB = Path("~/.local/share/opencode/opencode.db")
+_REAL_ZCODE_DB = Path("~/.zcode/cli/db/db.sqlite").expanduser()
 _REAL_PI_DIR = Path("~/.pi/agent/sessions").expanduser()
 _REAL_ANTIGRAVITY_DIRS: List[Path] = [
     Path("~/.gemini/antigravity/brain").expanduser(),
@@ -1851,6 +2138,13 @@ def real_opencode_db() -> Path:
     if not _REAL_OPENCODE_DB.is_file():
         pytest.skip("no real OpenCode DB on this host")
     return _REAL_OPENCODE_DB
+
+
+@pytest.fixture(scope="session")
+def real_zcode_db() -> Path:
+    if not _REAL_ZCODE_DB.is_file():
+        pytest.skip("no real ZCode DB on this host")
+    return _REAL_ZCODE_DB
 
 
 @pytest.fixture(scope="session")
