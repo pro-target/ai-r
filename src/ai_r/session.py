@@ -10,6 +10,7 @@ import os
 import re
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -271,6 +272,9 @@ class SessionCandidate:
         * ``"ts_file:<agent>"`` (per-session file in the identity dir)
         * ``"flag/<agent>"`` (legacy ``current`` pointer, deprecated)
         * ``"ai-r-list"`` (heuristic last-resort)
+        * ``"<agent>-recent"`` (store freshness heuristic — the session(s)
+          that agent's store shows being written right now; today
+          ``"zcode-recent"`` / ``"pi-recent"``)
 
     verified:
         ``True`` when the id passed charset + agent-shape validation
@@ -444,6 +448,88 @@ def _aireader_list_candidate() -> Optional[SessionCandidate]:
     return None
 
 
+# Agents whose sessions the runtime environment cannot address: they
+# export no session-id env var (see ``_AGENT_BY_ENV``) and the sh layer's
+# flag-file registry does not know them, so cascade steps 1-4 emit nothing
+# for their callers.  For these — and only these — the session store's own
+# write-recency is a legitimate last-resort signal.
+_STORE_FALLBACK_AGENTS: "tuple[AgentName, ...]" = (AgentName.ZCODE, AgentName.PI)
+
+# Bounded emission for the store-recency fallback: enough to surface a
+# parent + its subagent child + one parallel session, never a flood.
+_STORE_RECENT_MAX = 3
+
+
+def _store_recent_candidates(agent: AgentName) -> "list[SessionCandidate]":
+    """Step 6: store-recency fallback — ``agent`` sessions updated RIGHT NOW.
+
+    For the agents in :data:`_STORE_FALLBACK_AGENTS` (today zcode and pi)
+    the runtime environment carries no session-id signal at all: they
+    export no session-id env var (zcode's ``ZCODE_APP_VERSION`` & friends
+    are agent markers only — no sid reaches spawned processes; pi has
+    nothing either), and the sh layer's per-session flag-file writer does
+    not know them.  The shared MCP HTTP daemon compounds it: one process
+    serves every session, so its env never carries ANY caller's markers.
+    The one signal the agent's own store records is *which sessions were
+    just written to* — the last honest fact left.  Scans the agent's
+    session store via its parser (already date-sorted descending) and
+    emits every session whose ``date`` falls inside the A3 fresh window
+    (:func:`ai_r.activity.stall_seconds`, default 600s), newest first,
+    capped at :data:`_STORE_RECENT_MAX`, with ``verified=False``
+    (heuristic provenance) and source ``"<agent>-recent"``.
+
+    Subagent children are NOT excluded — a subagent tool call IS the
+    current session from its own perspective, and during a turn the
+    newest-updated session is the one producing the very call.  Ids come
+    from the store itself, so per-agent shape validation
+    (:data:`_AGENT_SESSION_REGEX`) is not re-applied — only charset
+    sanity, like the generic ``ai-r-list`` heuristic.
+
+    KNOWN LIMITATION (accepted): candidates carry ``verified=false``;
+    with N>=2 simultaneously ACTIVE sessions the newest-first ordering
+    can, between turns, point at a neighbouring session instead of the
+    caller's own — exact disambiguation requires the per-session flag
+    file written by the sh-layer hub hook (``~/.agents/.session-identity/
+    <agent>/<sid>``, which cascade step 3 already prefers over this
+    fallback).
+    """
+    try:
+        from ai_r.activity import stall_seconds
+        from ai_r.parsers import PARSERS
+
+        parser = PARSERS[agent]
+    except Exception:
+        return []
+    try:
+        sessions = parser.list_sessions()  # already sorted date desc
+    except Exception:
+        return []
+    now = datetime.now(timezone.utc)
+    window = stall_seconds()
+    source = f"{agent.value.lower()}-recent"
+    out: "list[SessionCandidate]" = []
+    for session in sessions:
+        if session.date is None or not session.uuid:
+            continue
+        if (now - session.date).total_seconds() > window:
+            break  # date-desc sort: everything after is older still
+        if not _is_valid_session_id(session.uuid):
+            continue
+        out.append(
+            SessionCandidate(
+                session_id=session.uuid,
+                agent=agent,
+                source=source,
+                verified=False,
+                is_self=False,
+                fingerprint=None,
+            )
+        )
+        if len(out) >= _STORE_RECENT_MAX:
+            break
+    return out
+
+
 def detect_session_candidates() -> list[SessionCandidate]:
     """Return ALL candidate session_ids, parallel-safe.
 
@@ -457,6 +543,13 @@ def detect_session_candidates() -> list[SessionCandidate]:
     4. ``current`` pointer (deprecated) — emits a :class:`DeprecationWarning`
        the first time at least one ``current`` candidate is appended.
     5. ``ai-r list`` heuristic — at most one candidate, ``verified=False``.
+    6. Store-recency fallback — sessions of an agent with no env/flag
+       channel (zcode, pi) updated within the A3 fresh window (newest
+       first, capped), ``verified=False``, source ``"<agent>-recent"``;
+       only when steps 1-5 yielded nothing AND the detected agent is one
+       of ``_STORE_FALLBACK_AGENTS`` or unknown (they have no session-id
+       env var, and the shared MCP HTTP daemon sees no caller env at all
+       — the store's own write-recency is the only signal left).
 
     The result may be empty when nothing matches.  All candidates are
     deduplicated by ``(agent, session_id)``; env-var candidates shadow
@@ -490,6 +583,23 @@ def detect_session_candidates() -> list[SessionCandidate]:
         heuristic = _aireader_list_candidate()
         if heuristic is not None:
             out.append(heuristic)
+
+    # Store-recency fallback — the agent-specific last resort for agents
+    # with no env/flag channel (see ``_STORE_FALLBACK_AGENTS``: today
+    # zcode and pi).  Such a caller reaches this point with nothing, and
+    # the shared MCP HTTP daemon reaches it too because its env never
+    # carries any caller's markers.  A declared OTHER agent with no flag
+    # keeps its honest "no guess" behaviour; an unknown caller (the
+    # daemon) takes the first fallback agent whose store shows fresh
+    # sessions — deterministic priority order, documented limitation.
+    if not out and (env_agent is None or env_agent in _STORE_FALLBACK_AGENTS):
+        fallback_order = (
+            _STORE_FALLBACK_AGENTS if env_agent is None else (env_agent,)
+        )
+        for fb_agent in fallback_order:
+            out.extend(_store_recent_candidates(fb_agent))
+            if out:
+                break
 
     return out
 

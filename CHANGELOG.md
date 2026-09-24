@@ -29,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Store-recency fallback in session detection — `detect_current` no longer
+  returns `null` for zcode (and pi).** `ai-r detect-session` (CLI) and
+  `detect_current` (MCP) previously found nothing for zcode: zcode exports no
+  session-id env var (only agent markers like `ZCODE_APP_VERSION`), the
+  sh-layer flag-file registry does not know it, and the shared MCP HTTP daemon
+  (one process for every session) never sees ANY caller's env, so every
+  cascade step came up empty. New cascade step 6 (source `<agent>-recent`,
+  `verified=false`): when steps 1–5 yield nothing and the detected agent is
+  one of the no-env/flag-channel agents (today zcode and pi —
+  `_STORE_FALLBACK_AGENTS`) or unknown (the daemon), the agent's own session
+  store is scanned for sessions updated inside the A3 fresh window (default
+  600 s), newest first, capped at 3 (`_STORE_RECENT_MAX`); an unknown caller
+  takes the first fallback agent with a fresh store (deterministic priority:
+  zcode before pi). Known limitation (accepted): fallback candidates carry
+  `verified=false`; with N≥2 simultaneously active sessions the newest-first
+  ordering can, between turns, point at a neighbouring session instead of the
+  caller's own — exact disambiguation requires the per-session flag file
+  (see the hub hook writing `~/.agents/.session-identity/<agent>/<sid>`,
+  which cascade step 3 already prefers over this fallback). Subagent children
+  are deliberately not excluded — a subagent tool call IS its session's own
+  current session. Documented in `docs/methods.md` +
+  `docs/methods.ru.md` ("Runtime session detection").
 - **`zcode` agent — ZCode CLI session support.** New parser
   `ai_r/parsers/zcode.py` reads the ZCode harness's SQLite store
   (`~/.zcode/cli/db/db.sqlite`, the canonical registry: every session
