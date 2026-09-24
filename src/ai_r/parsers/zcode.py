@@ -35,8 +35,15 @@ SQLite schema (relevant columns; mirrors OpenCode's layout closely)::
 * ``reasoning``  — ``{"type":"reasoning","text":"..."}``
 * ``tool``       — combined call+result: ``{"type":"tool","tool":"<name>",
   "callID":"...","state":{"status":"completed|error|running",
-  "input":{...}, "output":"...", "error":"..."}}``
+  "input":{...}, "output":"...", "error":"..."}}``.  An
+  ``AskUserQuestion`` part follows Claude's shape — questions in
+  ``state.input.questions``, the user's choice serialized in the
+  ``state.output`` result string — and is additionally surfaced as
+  :attr:`Message.qa` on the same (assistant) message.
 * ``step-start`` / ``step-finish`` / ``timeline`` — boundaries, skipped.
+  ``file`` / ``patch`` parts are NOT observed in the store (as of
+  2026-09) — there is no user-attachment signal to map, so they stay
+  skipped rather than guessed.
 
 Multi-part messages share one ``time_created`` millisecond; ``sequence``
 is the per-message part ordinal and the load-bearing tie-breaker.
@@ -63,6 +70,9 @@ from ._common import (
     _is_valid_uuid,
     _normalise_title,
     _parse_iso_timestamp,
+    _qa_entry,
+    _qa_options_from_question,
+    _qa_pairs_from_result_text,
     fold_orphan_thinking,
     iter_jsonl_records,
 )
@@ -252,8 +262,18 @@ _SELECT_MESSAGES_WITH_PARTS = (
 )
 
 
-def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
-    """Map one ``session`` row to a :class:`Session`."""
+def _row_to_session(
+    row: sqlite3.Row, db_path: str, subagent_meta: Optional[dict] = None
+) -> Session:
+    """Map one ``session`` row to a :class:`Session`.
+
+    ``subagent_meta`` (from :func:`_subagent_meta_map`, keyed by session
+    id) enriches a child row's ``extra`` with the spawn facts the agents
+    directory records — ``subagent_type`` (``profileId``) and
+    ``spawn_tool_use_id`` (``parentToolUseId``) — so MCP
+    ``include_subagents`` / ``subagent_cost_facts`` can join the child to
+    its spawning call.  Absent keys stay absent (never fabricated).
+    """
     sid = row["id"]
     title_raw = row["title"]
     directory = row["directory"]
@@ -269,6 +289,16 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         directory if isinstance(directory, str) and directory.strip() else None
     )
     parent = parent_id if isinstance(parent_id, str) and parent_id else None
+    extra: dict = {
+        "time_created": row["time_created"],
+        "time_updated": row["time_updated"],
+    }
+    meta = subagent_meta.get(sid) if (parent and subagent_meta) else None
+    if isinstance(meta, dict):
+        for key in ("subagent_type", "spawn_tool_use_id"):
+            val = meta.get(key)
+            if isinstance(val, str) and val:
+                extra[key] = val
     return Session(
         uuid=sid if isinstance(sid, str) else "",
         agent=AgentName.ZCODE,
@@ -280,10 +310,7 @@ def _row_to_session(row: sqlite3.Row, db_path: str) -> Session:
         kind="subagent" if parent else "agent",
         project_dir=directory,
         launch_surface=None,
-        extra={
-            "time_created": row["time_created"],
-            "time_updated": row["time_updated"],
-        },
+        extra=extra,
     )
 
 
@@ -359,18 +386,55 @@ def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _qa_from_ask_part(state: dict) -> List[dict]:
+    """Build ``qa`` entries from one ``AskUserQuestion`` tool part's state.
+
+    ZCode records an interactive question exactly like Claude: the offered
+    questions live in ``state.input.questions`` (the shared structured
+    shape) and the user's choice ONLY in the ``state.output`` result string
+    (``User has answered your questions: "q"="a", ...``) — there is no
+    separate answers structure (OpenCode's ``state.metadata.answers``) and
+    no following user-role record.  Each parsed answer pair is enriched
+    with the options offered for that question; a question whose answer
+    did not parse (dismissed / truncated output) is not invented.
+    """
+    inp = state.get("input")
+    questions = inp.get("questions") if isinstance(inp, dict) else None
+    if not isinstance(questions, list):
+        return []
+    output = state.get("output")
+    pairs = _qa_pairs_from_result_text(
+        output if isinstance(output, str) else ""
+    )
+    if not pairs:
+        return []
+    opts_by_q: dict = {}
+    for q in questions:
+        if isinstance(q, dict):
+            qtext = q.get("question")
+            if isinstance(qtext, str):
+                opts_by_q[qtext.strip()] = _qa_options_from_question(q)
+    return [
+        _qa_entry(q_text, opts_by_q.get(q_text, ()), answer)
+        for q_text, answer in pairs
+    ]
+
+
 def _build_message(
     message_data: Optional[dict],
-    parts: List[dict],
+    parts: List[Tuple[dict, Optional[int]]],
     timestamp: Optional[datetime] = None,
 ) -> Optional[Message]:
-    """Assemble a :class:`Message` from metadata + ordered part dicts.
+    """Assemble a :class:`Message` from metadata + ordered part rows.
 
-    Mirrors the OpenCode part vocabulary (the stores share a layout):
-    ``text`` → text, ``reasoning`` → thinking, ``tool`` → a ``tool_use``
-    entry plus a ``tool_result`` entry (``is_error`` from
-    ``state.status == "error"``; the ``state.error`` string is surfaced
-    as the result content when the errored call produced no output).
+    ``parts`` carries ``(part_data, part_time_created_ms)`` pairs.  Mirrors
+    the OpenCode part vocabulary (the stores share a layout): ``text`` →
+    text, ``reasoning`` → thinking, ``tool`` → a ``tool_use`` entry plus a
+    ``tool_result`` entry (``is_error`` from ``state.status == "error"``;
+    the ``state.error`` string is surfaced as the result content when the
+    errored call produced no output).  Each ``tool_use`` entry carries the
+    originating part's own ``time_created`` as ``timestamp`` (``None`` when
+    the row lacked a part time) — the per-call instant, not the message's.
     ``step-*`` / ``timeline`` boundary parts are skipped.
     """
     role = _role_from_message_data(message_data)
@@ -381,8 +445,12 @@ def _build_message(
     thinking_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
+    qa: List[dict] = []
 
-    for part in parts:
+    for part, ptime in parts:
+        ts_for_entry: Optional[datetime] = (
+            _epoch_ms_to_datetime(ptime) if isinstance(ptime, int) else None
+        )
         ptype = part.get("type", "")
         if ptype in ("text", "reasoning"):
             t = part.get("text", "")
@@ -396,7 +464,11 @@ def _build_message(
             state = state_raw if isinstance(state_raw, dict) else {}
             inp = state.get("input")
             call_id = part.get("callID") or part.get("callId")
-            tu_entry: dict = {"name": name, "input": _stringify(inp)}
+            tu_entry: dict = {
+                "name": name,
+                "input": _stringify(inp),
+                "timestamp": ts_for_entry,
+            }
             if isinstance(call_id, str) and call_id:
                 tu_entry["tool_use_id"] = call_id
             tool_use.append(tu_entry)
@@ -415,7 +487,16 @@ def _build_message(
                 if isinstance(call_id, str) and call_id:
                     tr_entry["tool_use_id"] = call_id
                 tool_result.append(tr_entry)
+            # ZCode's ``AskUserQuestion`` is its interactive-question
+            # surface (Claude's tool, combined call+result in ONE part):
+            # questions in ``state.input``, the chosen answers serialized
+            # into the ``state.output`` result string → pair them into
+            # ``qa`` on this same assistant message.
+            if name == "AskUserQuestion":
+                qa.extend(_qa_from_ask_part(state))
         # step-start / step-finish / timeline / unknown → skip
+        # (``file``/``patch`` parts are NOT observed in the ZCode store
+        # as of 2026-09 — no user-ref signal exists to map; honest skip.)
 
     tokens = (
         _normalize_tokens(message_data.get("tokens"))
@@ -429,6 +510,7 @@ def _build_message(
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
         timestamp=timestamp,
+        qa=tuple(qa),
         thinking="\n".join(thinking_chunks),
         tokens=tokens,
         model=(
@@ -453,7 +535,7 @@ def _extract_messages_from_db(
     messages: List[Message] = []
     current_mid: Optional[str] = None
     current_data: Optional[dict] = None
-    current_parts: List[dict] = []
+    current_parts: List[Tuple[dict, Optional[int]]] = []
     current_mtime: Optional[int] = None
 
     def flush() -> None:
@@ -484,7 +566,7 @@ def _extract_messages_from_db(
             current_mtime = row["mtime"]
         part = _json_or_none(row["pdata"])
         if part is not None:
-            current_parts.append(part)
+            current_parts.append((part, row["ptime"]))
     flush()
     return messages
 
@@ -497,13 +579,20 @@ _ROLLOUT_GLOB = "model-io-sess_*.jsonl"
 _SUBAGENT_ID_RE_SUFFIX = "subagent_agent_"
 
 
-def _subagent_parent_map() -> dict:
-    """Map ``childSessionId`` → ``parentSessionId`` from agents metadata.
+def _subagent_meta_map() -> dict:
+    """Map ``childSessionId`` → spawn metadata from the agents directory.
 
     ``~/.zcode/cli/agents/sess_<parent>/agent_<child>/metadata.json`` is
     the only place a rollout-only subagent's parent link lives (the
-    rollout filename carries just the child uuid).  Best-effort: unreadable
-    or malformed files contribute nothing.
+    rollout filename carries just the child uuid), and — for every
+    subagent, DB-registered or rollout-only — the only place the spawn
+    facts live: ``parentSessionId``, ``parentToolUseId`` (the id of the
+    ``Agent`` tool call that spawned the child; the join key
+    ``extra.spawn_tool_use_id`` consumers correlate on) and ``profileId``
+    (the persona the child ran as, e.g. ``general-purpose`` / ``Explore``;
+    surfaced as ``extra.subagent_type``).  No ``model`` pin exists in the
+    metadata — never fabricated.  Best-effort: unreadable or malformed
+    files contribute nothing.
     """
     mapping: dict = {}
     root = _agents_dir()
@@ -521,8 +610,16 @@ def _subagent_parent_map() -> dict:
             continue
         child = meta.get("childSessionId")
         parent = meta.get("parentSessionId")
-        if isinstance(child, str) and isinstance(parent, str) and child:
-            mapping[child] = parent
+        if not (isinstance(child, str) and child and isinstance(parent, str)):
+            continue
+        entry: dict = {"parent": parent}
+        profile = meta.get("profileId")
+        if isinstance(profile, str) and profile:
+            entry["subagent_type"] = profile
+        spawn_id = meta.get("parentToolUseId")
+        if isinstance(spawn_id, str) and spawn_id:
+            entry["spawn_tool_use_id"] = spawn_id
+        mapping[child] = entry
     return mapping
 
 
@@ -564,11 +661,14 @@ def _rollout_message_text(msg: dict) -> str:
 
 
 def _scan_rollout_file(
-    path: Path, parent_map: dict
+    path: Path, subagent_meta: dict
 ) -> Optional[Tuple[str, Session]]:
     """Parse one rollout file into ``(sessionId, Session)``.
 
-    Returns ``None`` when the file holds no usable record.
+    ``subagent_meta`` (from :func:`_subagent_meta_map`) supplies the
+    parent link plus the spawn facts (``subagent_type`` /
+    ``spawn_tool_use_id``).  Returns ``None`` when the file holds no
+    usable record.
     """
     records: List[dict] = []
     session_id: Optional[str] = None
@@ -609,7 +709,9 @@ def _scan_rollout_file(
 
     # Parent link: agents metadata first (authoritative), else the
     # subagent naming convention alone (parent uuid stays unknown).
-    parent = parent_map.get(session_id)
+    meta = subagent_meta.get(session_id)
+    meta = meta if isinstance(meta, dict) else {}
+    parent = meta.get("parent")
     is_subagent = parent is not None or _SUBAGENT_ID_RE_SUFFIX in session_id
 
     title_text = _rollout_first_user_text(records)
@@ -623,6 +725,12 @@ def _scan_rollout_file(
         except OSError:
             return None
 
+    extra: dict = {"source": "rollout", "querySource": query_source}
+    for key in ("subagent_type", "spawn_tool_use_id"):
+        val = meta.get(key)
+        if isinstance(val, str) and val:
+            extra[key] = val
+
     return session_id, Session(
         uuid=session_id,
         agent=AgentName.ZCODE,
@@ -634,9 +742,13 @@ def _scan_rollout_file(
         parent_uuid=parent,
         kind="subagent" if is_subagent else "agent",
         project_dir=None,
-        launch_surface=None,
+        # The rollout record's own ``querySource`` (observed values:
+        # ``"main_turn"`` / ``"subagent"``), passed through verbatim —
+        # the Codex-originator precedent, no invented taxonomy.  DB
+        # sessions carry no equivalent signal → ``None`` there.
+        launch_surface=query_source,
         models=tuple(models),
-        extra={"source": "rollout", "querySource": query_source},
+        extra=extra,
     )
 
 
@@ -645,12 +757,12 @@ def _rollout_sessions(known_uuids: set) -> List[Session]:
     root = _rollout_dir()
     if not root.is_dir():
         return []
-    parent_map = _subagent_parent_map()
+    subagent_meta = _subagent_meta_map()
     sessions: List[Session] = []
     for path in sorted(root.glob(_ROLLOUT_GLOB)):
         if not path.is_file():
             continue
-        scanned = _scan_rollout_file(path, parent_map)
+        scanned = _scan_rollout_file(path, subagent_meta)
         if scanned is None:
             continue
         sid, session = scanned
@@ -883,6 +995,7 @@ def list_sessions(
             list_cursor = conn.cursor()
             count_cursor = conn.cursor()
             rows = list_cursor.execute(_SELECT_ALL_SESSIONS).fetchall()
+            subagent_meta = _subagent_meta_map()
             for row in rows:
                 sid = row["id"]
                 if not isinstance(sid, str) or sid in seen:
@@ -891,7 +1004,7 @@ def list_sessions(
                 count = count_cursor.execute(
                     _SELECT_MESSAGE_COUNT, (sid,)
                 ).fetchone()[0]
-                session = _row_to_session(row, db_path)
+                session = _row_to_session(row, db_path, subagent_meta)
                 sessions.append(
                     dataclasses.replace(
                         session,
@@ -930,7 +1043,7 @@ def _read_session_by_uuid(
             count = cursor.execute(
                 _SELECT_MESSAGE_COUNT, (uuid,)
             ).fetchone()[0]
-            session = _row_to_session(row, db_path)
+            session = _row_to_session(row, db_path, _subagent_meta_map())
             return dataclasses.replace(
                 session,
                 message_count=int(count or 0),
@@ -943,7 +1056,7 @@ def _read_session_by_uuid(
 
     rollout_path = _find_rollout_file(uuid)
     if rollout_path is not None:
-        scanned = _scan_rollout_file(rollout_path, _subagent_parent_map())
+        scanned = _scan_rollout_file(rollout_path, _subagent_meta_map())
         if scanned is not None and scanned[0] == uuid:
             return scanned[1]
 

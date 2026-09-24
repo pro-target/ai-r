@@ -775,7 +775,7 @@ def _extract_messages(
     """Best-effort message extraction for a session, with pagination.
 
     Single dispatcher covering ALL supported agents
-    (claude/codex/opencode/pi/antigravity): resolves the owning parser
+    (claude/codex/opencode/pi/antigravity/zcode): resolves the owning parser
     from :data:`_PARSERS`, calls its public ``read_messages(session.uuid)``,
     projects each :class:`~ai_r.parsers.models.Message` to a
     ``{role, content}`` dict, then applies ``[offset:offset+limit]``.
@@ -974,7 +974,7 @@ def list_sessions(
     Each summary carries ``kind`` (``"agent"`` for a top-level session,
     ``"subagent"`` for a spawned subagent/sidechain) and ``parent_uuid``
     (the parent session's uuid for subagents, else ``None``).  Subagent
-    detection covers Claude, OpenCode, Codex and Pi; Antigravity's format
+    detection covers Claude, OpenCode, Codex, Pi and ZCode; Antigravity's format
     has no parent signal, so it always reports ``kind="agent"``.
 
     Each summary also carries the F1.4 origin fields, ``None`` when the

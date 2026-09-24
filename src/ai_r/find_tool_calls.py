@@ -192,8 +192,8 @@ def find_tool_calls(
         tool_name_pattern: Substring match against ``tool_use[*].name``,
             case-insensitive.  Mutually exclusive with ``tool_name``.
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``. ``None`` =
-            all agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``. ``None``
+            = all agents.
         session: Optional session scope — a single session uuid string
             or a list of uuid strings (same semantics/validation as the
             ``query`` facet, SSOT

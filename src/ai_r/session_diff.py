@@ -224,7 +224,8 @@ def session_diff(
     Args:
         session_uuid: The session to reconstruct.
         agent: Which agent owns the session — one of ``"claude"``,
-            ``"codex"``, ``"opencode"``, ``"antigravity"``, ``"pi"``.
+            ``"codex"``, ``"opencode"``, ``"antigravity"``, ``"pi"``,
+            ``"zcode"``.
         path: Optional substring filter on the edited file path
             (case-sensitive). ``None`` = every edited file in the session.
         redact: When ``True`` (default) secrets in the emitted output
