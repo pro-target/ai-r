@@ -159,6 +159,93 @@ def test_part_sequence_orders_same_ms_parts(fake_zcode_db: Path) -> None:
     assert first.thinking and first.text
 
 
+def test_ask_user_question_surfaces_qa(fake_zcode_db: Path) -> None:
+    """An AskUserQuestion part pairs into ``Message.qa`` (UX parity)."""
+    messages = zcode.read_messages(
+        "sess_test-zc-3-qa", override=str(fake_zcode_db)
+    )
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg.role == "assistant"
+    # The combined call+result part still surfaces both halves.
+    assert msg.tool_use[0]["name"] == "AskUserQuestion"
+    assert msg.tool_result[0]["is_error"] is False
+    assert '"Deploy now?"="yes"' in msg.tool_result[0]["content"]
+    # …and the parsed question→answer pair lands on the message.
+    assert msg.qa == (
+        {"question": "Deploy now?", "options": ("yes", "no"),
+         "answer": "yes"},
+    )
+
+
+def test_subagent_enrichment_from_agents_metadata(
+    fake_zcode_db: Path,
+) -> None:
+    """profileId/parentToolUseId from metadata.json enrich the child."""
+    child = zcode.read_session(
+        "sess_test-zc-4-sub", override=str(fake_zcode_db)
+    )
+    assert child.parent_uuid == "sess_test-zc-1"
+    assert child.kind == "subagent"
+    assert child.extra["subagent_type"] == "explorer"
+    assert child.extra["spawn_tool_use_id"] == "toolu_spawn_9"
+    # Also visible through the listing (same enrichment path).
+    listed = {
+        s.uuid: s
+        for s in zcode.list_sessions(override=str(fake_zcode_db))
+    }
+    assert listed["sess_test-zc-4-sub"].extra["subagent_type"] == "explorer"
+
+
+# ---------------------------------------------------------------------------
+# Bash → get_body bridge mapping
+# ---------------------------------------------------------------------------
+
+
+def test_bash_get_body_bridge_maps_parser_level(
+    fake_zcode_db: Path,
+) -> None:
+    """A Bash call that is exactly ``ai-r get-body <id>`` surfaces as a
+    ``get_body`` tool_use with ``input={"id": …}`` + ``tool_original``."""
+    import json as _json
+
+    messages = zcode.read_messages(
+        "sess_test-zc-5-gb", override=str(fake_zcode_db)
+    )
+    by_call_id = {
+        t["tool_use_id"]: t for t in messages[0].tool_use
+    }
+    mapped = by_call_id["call_zc_gb_1"]
+    assert mapped["name"] == "get_body"
+    assert _json.loads(mapped["input"]) == {"id": "sess_x:5"}
+    assert mapped["tool_original"] == "Bash"
+    # The ordinary ``ai-r read`` call keeps its Bash identity.
+    plain = by_call_id["call_zc_gb_2"]
+    assert plain["name"] == "Bash"
+    assert "tool_original" not in plain
+
+
+def test_find_tool_calls_sees_bash_get_body_bridge(
+    fake_zcode_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bridge is machine-visible: find_tool_calls(get_body, zcode)
+    finds the record with ``input.id`` (the audit checker's join)."""
+    from ai_r.find_tool_calls import find_tool_calls
+    from ai_r.parsers import _common
+
+    _common._agent_sessions_cache.clear()
+    _common._msg_cache.clear()
+    monkeypatch.setenv("ZCODE_DB", str(fake_zcode_db))
+    try:
+        result = find_tool_calls(tool_name="get_body", agent="zcode")
+        assert result["count"] == 1
+        rec = result["records"][0]
+        assert rec["input"] == {"id": "sess_x:5"}
+    finally:
+        _common._agent_sessions_cache.clear()
+        _common._msg_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Rollout model-io JSONL fallback (DB-unknown sessions)
 # ---------------------------------------------------------------------------

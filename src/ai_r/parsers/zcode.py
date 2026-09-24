@@ -60,6 +60,7 @@ import dataclasses
 import glob
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -101,6 +102,31 @@ _TITLE_MAX_LEN = 100
 _OPEN_BACKOFFS = (0.0, 0.25, 0.5)
 
 _EPOCH_ZERO = datetime.fromtimestamp(0, tz=timezone.utc)
+
+# A ZCode ``Bash`` call whose command is EXACTLY ``ai-r get-body <id>`` —
+# the bridge auditor subagents use when no MCP client is available.  The
+# full-match anchors (no ``uv run`` prefix, no trailing flags) keep the
+# mapping surgical: plain ``ai-r read``/``list``/… calls never remap.
+_GET_BODY_BASH_RE = re.compile(r"^ai-r get-body\s+(\S+)$")
+
+
+def _bash_get_body_id(name: str, state: dict) -> Optional[str]:
+    """The event id of a Bash call that is exactly ``ai-r get-body <id>``.
+
+    Returns the captured ``<uuid>:N`` / ``<uuid>:pfN`` id, or ``None`` when
+    the part is not that exact call (any other command, other tool, or a
+    non-dict input).  Pure string mapping — the call is NOT re-executed.
+    """
+    if name != "Bash":
+        return None
+    inp = state.get("input")
+    if not isinstance(inp, dict):
+        return None
+    command = inp.get("command")
+    if not isinstance(command, str):
+        return None
+    match = _GET_BODY_BASH_RE.match(command)
+    return match.group(1) if match else None
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +495,16 @@ def _build_message(
                 "input": _stringify(inp),
                 "timestamp": ts_for_entry,
             }
+            get_body_id = _bash_get_body_id(name, state)
+            if get_body_id is not None:
+                # Bridge mapping: a Bash call that is EXACTLY
+                # ``ai-r get-body <id>`` is surfaced as a ``get_body``
+                # tool_use (input ``{"id": …}``) so machine auditors
+                # matching ``tool_name_pattern="get_body"`` see it;
+                # ``tool_original`` keeps the provenance transparent.
+                tu_entry["name"] = "get_body"
+                tu_entry["input"] = _stringify({"id": get_body_id})
+                tu_entry["tool_original"] = "Bash"
             if isinstance(call_id, str) and call_id:
                 tu_entry["tool_use_id"] = call_id
             tool_use.append(tu_entry)

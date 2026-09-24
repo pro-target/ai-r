@@ -86,6 +86,9 @@ _NON_HUMAN_MARKERS = (
     "<local-command-",
     "<task-notification>",
     "<command-name>",
+    # ZCode harness insertion (system-reminder style, mid-conversation):
+    # a TodoWrite nudge, never the user's own words.
+    "The TodoWrite tool hasn't been used recently",
 )
 
 # A "user turn" longer than this is pasted/injected content (a log, a diff,

@@ -758,6 +758,13 @@ def fake_zcode_db(tmp_sessions_dir: Path) -> Path:
          "/home/user/proj", "subagent_child",
          1_790_000_600_000, 1_790_000_900_000),
     )
+    # sess_test-zc-3-qa: an AskUserQuestion exchange (UX-parity qa shape).
+    conn.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("sess_test-zc-3-qa", None, "Interactive choices",
+         "/home/user/proj", "interactive",
+         1_790_001_000_000, 1_790_001_200_000),
+    )
     conn.execute(
         "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
         ("zc-m-0", "sess_test-zc-1", 1_790_000_100_000, 1_790_000_100_000,
@@ -798,6 +805,15 @@ def fake_zcode_db(tmp_sessions_dir: Path) -> Path:
          json.dumps({"role": "assistant", "time": {"created": 1_790_000_700_000}}),
          0),
     )
+    # sess_test-zc-3-qa: one assistant message carrying the question tool
+    # part (combined call+result, Claude's AskUserQuestion shape).
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-4", "sess_test-zc-3-qa", 1_790_001_100_000, 1_790_001_100_000,
+         json.dumps({"role": "assistant", "modelId": "GLM-5.3",
+                     "time": {"created": 1_790_001_100_000}}),
+         0),
+    )
     conn.executemany(
         "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
@@ -825,10 +841,98 @@ def fake_zcode_db(tmp_sessions_dir: Path) -> Path:
                          "state": {"status": "error",
                                    "input": {"file_path": "/tmp/x/db.py"},
                                    "error": "old_string not found"}}), 0),
+            ("zc-p-5", "zc-m-4", "sess_test-zc-3-qa",
+             1_790_001_100_000, 1_790_001_100_000,
+             json.dumps({"type": "tool", "tool": "AskUserQuestion",
+                         "callID": "call_zc_ask_1",
+                         "state": {"status": "completed",
+                                   "input": {"questions": [{
+                                       "question": "Deploy now?",
+                                       "options": [{"label": "yes"},
+                                                   {"label": "no"}]}]},
+                                   "output": 'User has answered your '
+                                             'questions: "Deploy now?"'
+                                             '="yes"'}}), 0),
         ],
     )
     conn.commit()
     conn.close()
+
+    # Enrichment fixture: the agents-directory metadata.json that supplies
+    # the spawn facts for a DB-registered child (profileId →
+    # extra.subagent_type, parentToolUseId → extra.spawn_tool_use_id).
+    sess_row = (
+        "sess_test-zc-4-sub", "sess_test-zc-1", "Enriched child",
+        "/home/user/proj", "subagent_child",
+        1_790_001_300_000, 1_790_001_500_000,
+    )
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)", sess_row
+    )
+    conn2.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-5", "sess_test-zc-4-sub", 1_790_001_400_000,
+         1_790_001_400_000,
+         json.dumps({"role": "assistant",
+                     "time": {"created": 1_790_001_400_000}}),
+         0),
+    )
+    # sess_test-zc-5-gb: the Bash→get_body bridge mapping fixture — one
+    # Bash call that is exactly ``ai-r get-body <id>`` (maps) and one
+    # ordinary ``ai-r read`` call (must NOT map).
+    conn2.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("sess_test-zc-5-gb", None, "Body fetch bridge",
+         "/home/user/proj", "interactive",
+         1_790_001_600_000, 1_790_001_800_000),
+    )
+    conn2.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("zc-m-6", "sess_test-zc-5-gb", 1_790_001_700_000,
+         1_790_001_700_000,
+         json.dumps({"role": "assistant", "modelId": "GLM-5.3",
+                     "time": {"created": 1_790_001_700_000}}),
+         0),
+    )
+    conn2.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("zc-p-6", "zc-m-6", "sess_test-zc-5-gb",
+             1_790_001_700_000, 1_790_001_700_000,
+             json.dumps({"type": "tool", "tool": "Bash",
+                         "callID": "call_zc_gb_1",
+                         "state": {"status": "completed",
+                                   "input": {"command":
+                                             "ai-r get-body sess_x:5"},
+                                   "output": "(no body)"}}), 0),
+            ("zc-p-7", "zc-m-6", "sess_test-zc-5-gb",
+             1_790_001_700_000, 1_790_001_700_000,
+             json.dumps({"type": "tool", "tool": "Bash",
+                         "callID": "call_zc_gb_2",
+                         "state": {"status": "completed",
+                                   "input": {"command":
+                                             "ai-r read sess_x"},
+                                   "output": "ok"}}), 1),
+        ],
+    )
+    conn2.commit()
+    conn2.close()
+    meta_dir = (
+        tmp_sessions_dir / ".zcode" / "cli" / "agents" / "sess_test-zc-1"
+        / "agent_zc-4"
+    )
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "metadata.json").write_text(
+        json.dumps({
+            "childSessionId": "sess_test-zc-4-sub",
+            "parentSessionId": "sess_test-zc-1",
+            "parentToolUseId": "toolu_spawn_9",
+            "profileId": "explorer",
+            "status": "completed",
+        }),
+        encoding="utf-8",
+    )
     return db_path
 
 
