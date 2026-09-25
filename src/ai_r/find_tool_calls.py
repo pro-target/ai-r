@@ -193,8 +193,8 @@ def find_tool_calls(
         tool_name_pattern: Substring match against ``tool_use[*].name``,
             case-insensitive.  Mutually exclusive with ``tool_name``.
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``. ``None`` =
-            all agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``. ``None``
+            = all agents.
         session: Optional session scope — a single session uuid string
             or a list of uuid strings (same semantics/validation as the
             ``query`` facet, SSOT
@@ -276,10 +276,12 @@ def find_tool_calls(
         (the assistant text of the message hosting the call),
         ``is_error`` (bool: the correlated call outcome — ``True`` when
         the agent flagged the call as failed; authoritative for Claude
-        and OpenCode, best-effort ``False`` for Codex/Antigravity/Pi and
+        and OpenCode/ZCode, best-effort ``False`` for
+        Codex/Antigravity/Pi and
         whenever no result correlates to the call) and ``output`` (the
         correlated ``tool_result`` content, ``""`` when none) plus
-        ``is_error_reliable`` (bool: ``True`` only for Claude/OpenCode,
+        ``is_error_reliable`` (bool: ``True`` only for
+        Claude/OpenCode/ZCode,
         whose outcome flag is authoritative; ``False`` for the other
         agents where ``is_error`` is best-effort) and
         ``truncated_fields`` (list naming any of ``input``/``intent``/
@@ -547,7 +549,8 @@ def find_tool_calls(
                         "assistant": capped_asst,
                         "is_error": call_is_error,
                         "is_error_reliable": (
-                            agent_name.value.lower() in {"claude", "opencode"}
+                            agent_name.value.lower()
+                            in {"claude", "opencode", "zcode"}
                         ),
                         "output": capped_output,
                         "truncated_fields": truncated_fields,

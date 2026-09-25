@@ -1,4 +1,4 @@
-"""Session parsers for Claude, Codex, OpenCode, Antigravity, and Pi.
+"""Session parsers for Claude, Codex, OpenCode, Antigravity, Pi, and ZCode.
 
 Each parser module exports the same four-function interface:
 
@@ -38,12 +38,14 @@ Modules:
                   ``~/.gemini/antigravity/brain`` and
                   ``~/.gemini/antigravity-cli/brain``.
     pi:           ``~/.pi/agent/sessions/<encoded-cwd>/*.jsonl``.
+    zcode:        SQLite at ``~/.zcode/cli/db/db.sqlite`` plus rollout
+                  model-io JSONL under ``~/.zcode/cli/rollout/``.
 """
 
 from datetime import datetime
 from typing import Dict, List, Optional, Protocol, Union
 
-from . import antigravity, claude, codex, opencode, pi
+from . import antigravity, claude, codex, opencode, pi, zcode
 from .models import AgentName, Message, Session
 from ._common import cached_list_sessions
 
@@ -75,6 +77,7 @@ __all__ = [
     "codex",
     "opencode",
     "pi",
+    "zcode",
     "find_sessions",
     "read_session",
     # Canonical cross-agent registry + helpers (re-exported by
@@ -99,6 +102,7 @@ PARSERS: Dict[AgentName, ParserModule] = {
     AgentName.OPENCODE: opencode,
     AgentName.ANTIGRAVITY: antigravity,
     AgentName.PI: pi,
+    AgentName.ZCODE: zcode,
 }
 
 
@@ -155,8 +159,9 @@ def find_sessions(query: str, agent: Optional[str] = None) -> List[dict]:
     ``mtime`` (ISO-8601) and ``path`` so the caller can disambiguate
     between agents.  An empty or whitespace-only ``query`` returns
     ``[]``.  When ``agent`` is omitted every supported agent is
-    queried; pass a lowercase name (``"claude"``, ``"codex"``,
-    ``"opencode"``, ``"antigravity"``, ``"pi"``) to restrict the scan.
+       queried; pass a lowercase name (``"claude"``, ``"codex"``,
+       ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``) to
+       restrict the scan.
     Unknown agent names raise :class:`ValueError`.
     """
     needle = (query or "").strip()

@@ -292,8 +292,8 @@ def session_stats(
 
     Args:
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``.  ``None`` = all
-            agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``.
+            ``None`` = all agents.
         since: Optional ISO 8601 lower bound (inclusive).  Applied to the
             *session date* for the inventory and forwarded to
             :func:`find_file_edits` for the edit/intent enrichment.

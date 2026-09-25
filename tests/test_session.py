@@ -5,6 +5,9 @@ import contextlib
 import dataclasses
 import inspect
 import io
+import json
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -32,6 +35,7 @@ _DETECT_VARS = (
     "CODEX_HOME",
     "CLAUDECODE",
     "OPENCODE",
+    "ZCODE_APP_VERSION",
 )
 
 
@@ -602,3 +606,260 @@ def test_fingerprint_prefix_collision_documents_behaviour(
     assert matched == {sid_a, sid_b}
     monkeypatch.setenv("AI_SESSION_OUTPUT", f"fingerprint:{prefix}")
     assert detect_session_id() in {sid_a, sid_b}
+
+
+# ---------------------------------------------------------------------------
+# Zcode store freshness fallback (source="zcode-recent")
+# ---------------------------------------------------------------------------
+
+
+def _write_zcode_rollout(
+    fake_home: Path, sid: str, completed_at: datetime
+) -> Path:
+    """One-record zcode rollout model-io JSONL with a set ``completedAt``.
+
+    Mirrors the observed wire format (see conftest's ``fake_zcode_rollout``):
+    the parser takes the session id from the record's ``sessionId`` and the
+    last-activity date from the last parseable ``completedAt``.
+    """
+    rollout_dir = fake_home / ".zcode" / "cli" / "rollout"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    path = rollout_dir / f"model-io-{sid}.jsonl"
+    record = {
+        "type": "model_io",
+        "querySource": "main_turn",
+        "sessionId": sid,
+        "request": {
+            "messages": [{"role": "user", "content": "probe"}],
+            "messagesKind": "full",
+            "messageCount": 1,
+        },
+        "completedAt": completed_at.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "response": {"text": "ok"},
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
+def _fake_home() -> Path:
+    """The autouse ``_isolate_ai_r_home`` fixture's temp home."""
+    return Path(os.environ["AI_R_HOME"])
+
+
+def test_detect_session_zcode_recent_fresh(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    sid = "sess_aaaa1111-2222-3333-4444-555555555555"
+    _write_zcode_rollout(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    matches = [c for c in candidates if c.source == "zcode-recent"]
+    assert len(matches) == 1
+    assert matches[0].session_id == sid
+    assert matches[0].agent is AgentName.ZCODE
+    assert matches[0].verified is False
+
+
+def test_detect_session_zcode_recent_stale_excluded(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    sid = "sess_bbbb1111-2222-3333-4444-555555555555"
+    _write_zcode_rollout(
+        _fake_home(), sid, datetime.now(timezone.utc) - timedelta(hours=2)
+    )
+    candidates = detect_session_candidates()
+    assert [c for c in candidates if c.source == "zcode-recent"] == []
+
+
+def test_detect_session_zcode_fallback_fires_under_zcode_env(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zcode-subprocess path: agent IS declared (ZCODE_APP_VERSION),
+    yet no env/flag channel exists — the fallback must still fire."""
+    monkeypatch.setenv("ZCODE_APP_VERSION", "9.9.9")
+    sid = "sess_cccc1111-2222-3333-4444-555555555555"
+    _write_zcode_rollout(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    matches = [c for c in candidates if c.source == "zcode-recent"]
+    assert [c.session_id for c in matches] == [sid]
+
+
+def test_detect_session_no_zcode_guess_for_declared_other_agent(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared NON-zcode agent with no flag keeps the honest
+    "no heuristic guess" behaviour — the zcode fallback stays off."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    sid = "sess_dddd1111-2222-3333-4444-555555555555"
+    _write_zcode_rollout(_fake_home(), sid, datetime.now(timezone.utc))
+    assert detect_session_candidates() == []
+
+
+def test_detect_session_zcode_flag_file_shadows_recent(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """A real per-session flag file (the future sh-layer channel) wins:
+    its ts_file candidate surfaces and the fallback never fires."""
+    sid = "sess_eeee1111-2222-3333-4444-555555555555"
+    _write_per_session(identity_dir, "zcode", sid)
+    _write_zcode_rollout(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    assert [c.source for c in candidates] == ["ts_file:zcode"]
+    assert candidates[0].verified is True
+
+
+def test_detect_session_zcode_recent_cap_and_order(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Fresh parallel sessions each get a candidate, newest first, capped
+    at _STORE_RECENT_MAX."""
+    from ai_r.session import _STORE_RECENT_MAX
+
+    now = datetime.now(timezone.utc)
+    sids = [
+        "sess_1aaa1111-2222-3333-4444-555555555555",
+        "sess_2bbb1111-2222-3333-4444-555555555555",
+        "sess_3ccc1111-2222-3333-4444-555555555555",
+        "sess_4ddd1111-2222-3333-4444-555555555555",
+    ]
+    # Written oldest-newest so a naive glob order != recency order.
+    for i, sid in enumerate(sids):
+        _write_zcode_rollout(
+            _fake_home(), sid, now - timedelta(seconds=60 - 15 * i)
+        )
+    candidates = [c for c in detect_session_candidates()
+                  if c.source == "zcode-recent"]
+    assert len(candidates) == _STORE_RECENT_MAX
+    # Newest first: sids[3] (now-15s), sids[2] (now-30s), sids[1] (now-45s).
+    assert [c.session_id for c in candidates] == list(reversed(
+        sids[1:]
+    ))
+
+
+# ---------------------------------------------------------------------------
+# Pi store freshness fallback (source="pi-recent")
+# ---------------------------------------------------------------------------
+
+
+def _write_pi_session(fake_home: Path, sid: str, started_at: datetime) -> Path:
+    """One-record Pi session JSONL with a set header ``timestamp``.
+
+    Mirrors conftest's ``fake_pi_session`` shape: the parser takes the
+    uuid from the ``session`` header's ``id`` and the last-activity date
+    from the newest entry timestamp (the header's, for a single record).
+    """
+    sessions_dir = fake_home / ".pi" / "agent" / "sessions" / "--tmp-work--"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    path = sessions_dir / (
+        f"{started_at.strftime('%Y-%m-%dT%H-%M-%S-000Z')}_{sid}.jsonl"
+    )
+    record = {
+        "type": "session",
+        "version": 3,
+        "id": sid,
+        "timestamp": started_at.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "cwd": "/tmp/work",
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
+def test_detect_session_pi_recent_fresh(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    sid = "pi-fresh-aaaa"
+    _write_pi_session(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    matches = [c for c in candidates if c.source == "pi-recent"]
+    assert len(matches) == 1
+    assert matches[0].session_id == sid
+    assert matches[0].agent is AgentName.PI
+    assert matches[0].verified is False
+
+
+def test_detect_session_pi_recent_stale_excluded(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    sid = "pi-stale-bbbb"
+    _write_pi_session(
+        _fake_home(), sid, datetime.now(timezone.utc) - timedelta(hours=2)
+    )
+    candidates = detect_session_candidates()
+    assert [c for c in candidates if c.source == "pi-recent"] == []
+
+
+def test_detect_session_pi_fallback_fires_under_pi_env(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pi-caller path: agent IS declared (AGENT_NAME=pi), yet no
+    env/flag channel exists — the fallback must still fire."""
+    monkeypatch.setenv("AGENT_NAME", "pi")
+    sid = "pi-envvar-cccc"
+    _write_pi_session(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    matches = [c for c in candidates if c.source == "pi-recent"]
+    assert [c.session_id for c in matches] == [sid]
+
+
+def test_detect_session_no_pi_guess_for_declared_other_agent(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared NON-fallback agent with no flag keeps the honest
+    "no heuristic guess" behaviour — the pi fallback stays off."""
+    monkeypatch.setenv("AGENT_NAME", "claude")
+    sid = "pi-other-dddd"
+    _write_pi_session(_fake_home(), sid, datetime.now(timezone.utc))
+    assert detect_session_candidates() == []
+
+
+def test_detect_session_pi_flag_file_shadows_recent(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """A real per-session flag file (the sh-layer channel) wins: its
+    ts_file candidate surfaces and the fallback never fires."""
+    sid = "pi-flag-eeee"
+    _write_per_session(identity_dir, "pi", sid)
+    _write_pi_session(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    assert [c.source for c in candidates] == ["ts_file:pi"]
+    assert candidates[0].verified is True
+
+
+def test_detect_session_pi_recent_cap_and_order(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Fresh parallel pi sessions each get a candidate, newest first,
+    capped at _STORE_RECENT_MAX."""
+    from ai_r.session import _STORE_RECENT_MAX
+
+    now = datetime.now(timezone.utc)
+    sids = ["pi-cap-1aaa", "pi-cap-2bbb", "pi-cap-3ccc", "pi-cap-4ddd"]
+    for i, sid in enumerate(sids):
+        _write_pi_session(
+            _fake_home(), sid, now - timedelta(seconds=60 - 15 * i)
+        )
+    candidates = [c for c in detect_session_candidates()
+                  if c.source == "pi-recent"]
+    assert len(candidates) == _STORE_RECENT_MAX
+    assert [c.session_id for c in candidates] == list(reversed(
+        sids[1:]
+    ))
+
+
+def test_detect_session_fallback_priority_zcode_before_pi(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Unknown caller (the shared MCP daemon): when BOTH stores show
+    fresh sessions the deterministic priority order (zcode first) wins
+    and only that agent's candidates are emitted."""
+    pi_sid = "pi-prio-aaaa"
+    zc_sid = "sess_5eee1111-2222-3333-4444-555555555555"
+    _write_pi_session(_fake_home(), pi_sid, datetime.now(timezone.utc))
+    _write_zcode_rollout(_fake_home(), zc_sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    sources = {c.source for c in candidates}
+    assert sources == {"zcode-recent"}
+    assert candidates[0].session_id == zc_sid

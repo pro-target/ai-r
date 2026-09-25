@@ -206,6 +206,19 @@ Every `list_sessions` summary carries an explicit **recency** signal, for a supe
 
 The registry is sampled **once per `list_sessions` call** (TTL-cached ~2.5 s), not once per session, so a listing spawns the subprocess at most once. Everything is best-effort: a missing CLI, a timeout, a non-zero exit or unparseable output all collapse to "no signal" (`null`), never an error. `liveness` **complements** `activity` and never overrides the F1.1 recency contract; absence from the registry is reported as `null`, never `dead` (the registry is not assumed exhaustive). Classifier SSOT (pure core + `/proc`/registry seams): `src/ai_r/liveness.py::session_liveness`.
 
+## Runtime session detection (`detect_current` / `detect-session` cascade)
+
+`detect_current` (MCP) and `ai-r detect-session` (CLI) answer "which session am I in right now?" from the runtime environment — env vars + per-session flag files, never from a session-query. The cascade (each step appends candidates, never short-circuits; SSOT `src/ai_r/session.py::detect_session_candidates`):
+
+1. `AI_SESSION_ID` env override (universal);
+2. per-agent env vars — `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `OPENCODE_SESSION_ID`;
+3. per-session flag files in `~/.agents/.session-identity/<agent>/<sid>` (written by the sh-layer hub hook; `.fingerprint`/`.self` sidecars feed the `AI_SESSION_OUTPUT=fingerprint:`/`self` disambiguation modes);
+4. the deprecated `current` pointer (emits a `DeprecationWarning`);
+5. the generic `ai-r list` heuristic (`verified=false`, source `ai-r-list`) — only when NO agent was declared by env;
+6. **store-recency fallback** (source `<agent>-recent`, `verified=false`) — for agents with no env/flag channel at all (today zcode and pi: they export no session-id env var, and the sh layer's flag-file registry does not know them). Emits that agent's sessions whose store records activity inside the A3 fresh window (default 600 s), newest first, capped at 3. Fires when steps 1–5 yielded nothing and the detected agent is one of those agents — or unknown: the shared MCP HTTP daemon (one process for every session) never sees ANY caller's env, so its caller is always "unknown" and takes the first fallback agent whose store shows fresh sessions (deterministic priority: zcode before pi).
+
+**Known limitation (accepted):** fallback candidates carry `verified=false`; with N≥2 simultaneously active sessions the newest-first ordering can, between turns, point at a neighbouring session instead of the caller's own — exact disambiguation requires the per-session flag file (see the hub hook writing `~/.agents/.session-identity/<agent>/<sid>`, which step 3 already prefers over this fallback). Subagent children are deliberately not excluded from the fallback — a subagent tool call IS its session's own current session.
+
 ## Resume command (`resume_command`)
 
 Every session summary carries `resume_command` (F2.2, next to `project_dir`/`launch_surface`): the exact shell one-liner that reopens the conversation in its agent's CLI, or `null` when no real command exists — **absence is honest, never fabricated; the field is text only, ai-r never executes it**. Commands are verified against the installed CLIs' own `--help`, not invented:

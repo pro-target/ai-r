@@ -320,8 +320,8 @@ def find_file_edits(
         path: Substring matched against ``file_path`` / ``notebook_path``
             / ``path`` fields in the tool input (case-sensitive).
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``. ``None`` =
-            all agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``. ``None``
+            = all agents.
         since: Optional ISO 8601 lower bound (inclusive) on edit
             timestamp. Pass ``""`` or ``None`` to leave open.
         until: Optional ISO 8601 upper bound (inclusive) on edit

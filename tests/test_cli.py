@@ -664,6 +664,88 @@ def test_cli_read_messages_missing_session(
 
 
 # ---------------------------------------------------------------------------
+# get-body
+# ---------------------------------------------------------------------------
+
+
+def test_cli_get_body_prints_turn_text(
+    fake_zcode_db: Path, tmp_sessions_dir: Path
+) -> None:
+    """``get-body <uuid>:N`` prints the event body (the MCP resolver)."""
+    rc, out, err = _run_inproc(
+        ["get-body", "sess_test-zc-1:0"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert out.strip() == "Add zcode support"
+
+
+def test_cli_get_body_tool_call_input_json(
+    fake_zcode_db: Path, tmp_sessions_dir: Path
+) -> None:
+    """A tool_call id resolves to the full call input as JSON."""
+    # Events in sess_test-zc-1: 0=user_turn, 1=assistant_turn,
+    # 2=tool_call(Read), 3=tool_call(Edit).
+    rc, out, err = _run_inproc(
+        ["get-body", "sess_test-zc-1:2", "--json"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["tool"] == "Read"
+    assert payload["body"]["file_path"] == "/tmp/x/db.py"
+
+
+def test_cli_get_body_not_found_exits_3(
+    fake_zcode_db: Path, tmp_sessions_dir: Path
+) -> None:
+    rc, out, err = _run_inproc(
+        ["get-body", "sess_test-zc-1:99"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 3
+    assert "not_found" in err.lower()
+
+
+def test_cli_get_body_invalid_id_exits_2(tmp_sessions_dir: Path) -> None:
+    rc, out, err = _run_inproc(
+        ["get-body", "no-colon-here"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 2
+    assert "invalid event id" in err.lower()
+
+
+def test_cli_read_messages_renders_qa_pairs(
+    fake_zcode_db: Path, tmp_sessions_dir: Path
+) -> None:
+    """``read --messages`` renders the interactive question→answer pair."""
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "zcode", "sess_test-zc-3-qa", "--messages"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "[question→answer] Q: Deploy now? A: yes" in out
+
+
+def test_cli_read_subagents_block(
+    fake_zcode_db: Path, tmp_sessions_dir: Path
+) -> None:
+    """``--with-tokens --include-subagents`` lists children with persona."""
+    rc, out, err = _run_inproc(
+        [
+            "read", "--agent", "zcode", "sess_test-zc-1",
+            "--with-tokens", "--include-subagents",
+        ],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "Subagents (2 children)" in out
+    assert "sess_test-zc-4-sub" in out
+    assert "persona: explorer" in out
+
+
+# ---------------------------------------------------------------------------
 # read --with-tokens
 # ---------------------------------------------------------------------------
 
