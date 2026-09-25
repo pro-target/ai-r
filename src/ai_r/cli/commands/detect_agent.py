@@ -26,7 +26,8 @@ def _run_detect_agent(args: argparse.Namespace) -> int:
     if agent is None:
         return _exit_with_error(
             "could not detect current agent; set AGENT_NAME, AI_AGENT, "
-            "CODING_AGENT, CODEX_HOME, CLAUDECODE or OPENCODE",
+            "CODING_AGENT, CODEX_HOME, CLAUDECODE, OPENCODE or "
+            "ZCODE_APP_VERSION",
         )
     if args.quiet:
         print(agent.value.lower())

@@ -26,6 +26,11 @@ Per-agent reality (verified against the installed CLIs' own ``--help``):
   lookup is scoped to the current project's session dir, while the
   recorded session-file path is unambiguous from anywhere → the path
   form is emitted).
+* **ZCode** — always ``None``: no resume in ZCode CLI as of 2026-09.
+  The ``zcode`` binary is an Electron desktop-app launcher (``zcode
+  --help`` boots the GUI, no flag surface), and the official zcode-guide
+  plugin docs describe no session-resume verb.  Sessions reopen via the
+  app's own session picker, which is not a shell one-liner.
 * **Antigravity** — always ``None``: sessions are IDE brain directories
   with no CLI resume verb (the ``gemini`` CLI's ``--resume`` addresses
   its *own* store by index/"latest", not brain-dir ids).
@@ -92,6 +97,12 @@ def resume_command(session: Session) -> Optional[str]:
         return _with_project_dir(
             f"pi --session {shlex.quote(session.path)}", session.project_dir
         )
+
+    if session.agent is AgentName.ZCODE:
+        # No resume in ZCode CLI as of 2026-09 (Electron desktop-app
+        # launcher, no flag surface; see module docstring) — absence is
+        # honest, never a fabricated command.
+        return None
 
     # Antigravity (and any future agent without a known resume verb):
     # no CLI resume command exists — absence is honest.

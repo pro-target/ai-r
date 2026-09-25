@@ -341,7 +341,7 @@ def test_find_tool_calls_no_sessions_returns_empty(
     # why nothing matched.
     assert diagnostics["hints"]
     assert {e["agent"] for e in diagnostics["scanned"]} == {
-        "claude", "codex", "opencode", "antigravity", "pi",
+        "claude", "codex", "opencode", "antigravity", "pi", "zcode",
     }
 
 
@@ -1256,6 +1256,19 @@ def test_find_tool_calls_is_error_reliable_codex_false(
     result = find_tool_calls(tool_name="shell", agent="codex")
     assert result["count"] == 1
     assert result["records"][0]["is_error_reliable"] is False
+
+
+def test_find_tool_calls_is_error_reliable_zcode(
+    fake_zcode_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ZCode records carry ``is_error_reliable=True`` (state.status flag)."""
+    monkeypatch.setenv("ZCODE_DB", str(fake_zcode_db))
+    result = find_tool_calls(tool_name="Edit", agent="zcode")
+    assert result["count"] == 1
+    rec = result["records"][0]
+    assert rec["is_error_reliable"] is True
+    assert rec["is_error"] is True  # fixture: state.status == "error"
 
 
 # ---------------------------------------------------------------------------

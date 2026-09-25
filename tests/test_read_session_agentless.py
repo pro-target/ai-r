@@ -88,7 +88,7 @@ def test_read_session_without_agent_not_found() -> None:
     assert out["error"] == "not_found"
     assert out["agent"] is None
     assert set(out["agents_scanned"]) == {
-        "claude", "codex", "opencode", "antigravity", "pi",
+        "claude", "codex", "opencode", "antigravity", "pi", "zcode",
     }
 
 

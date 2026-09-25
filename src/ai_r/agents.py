@@ -48,6 +48,10 @@ def _detect_agent_with_source() -> Tuple[Optional[AgentName], Optional[str]]:
         return AgentName.CLAUDE, "CLAUDECODE"
     if os.environ.get("OPENCODE"):
         return AgentName.OPENCODE, "OPENCODE"
+    if os.environ.get("ZCODE_APP_VERSION"):
+        # Injected by the ZCode CLI into every process it spawns (desktop
+        # processes carry it too — same "running under ZCode" answer).
+        return AgentName.ZCODE, "ZCODE_APP_VERSION"
     return None, None
 
 
@@ -62,6 +66,7 @@ def detect_agent_strict() -> AgentName:
     if agent is None:
         raise RuntimeError(
             "could not detect current agent; set AGENT_NAME, AI_AGENT, "
-            "CODING_AGENT, CODEX_HOME, CLAUDECODE or OPENCODE"
+            "CODING_AGENT, CODEX_HOME, CLAUDECODE, OPENCODE or "
+            "ZCODE_APP_VERSION"
         )
     return agent

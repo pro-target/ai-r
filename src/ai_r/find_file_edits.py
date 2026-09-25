@@ -23,6 +23,7 @@ from typing import Any, List, Optional, Sequence
 
 from ai_r.parsers import (
     PARSERS,
+    cached_list_sessions,
     coerce_agent,
     iso,
     target_agents,
@@ -319,8 +320,8 @@ def find_file_edits(
         path: Substring matched against ``file_path`` / ``notebook_path``
             / ``path`` fields in the tool input (case-sensitive).
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``. ``None`` =
-            all agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``. ``None``
+            = all agents.
         since: Optional ISO 8601 lower bound (inclusive) on edit
             timestamp. Pass ``""`` or ``None`` to leave open.
         until: Optional ISO 8601 upper bound (inclusive) on edit
@@ -397,7 +398,7 @@ def find_file_edits(
 
     for agent_name in targets:
         parser = PARSERS[agent_name]
-        agent_sessions = parser.list_sessions()
+        agent_sessions = cached_list_sessions(agent_name, parser)
         scanned_sessions[agent_name.value.lower()] = agent_sessions
         for session in agent_sessions:
             try:

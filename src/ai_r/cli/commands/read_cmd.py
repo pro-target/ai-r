@@ -122,7 +122,37 @@ def _run_read(args: argparse.Namespace) -> int:
     if want_tokens:
         print()
         print(_format_token_table(token_block))
+        if want_subagents:
+            print()
+            print(_format_subagent_block(subagent_rollup))
     return 0
+
+
+def _format_subagent_block(rollup: Optional[dict[str, Any]]) -> str:
+    """Render the ``--include-subagents`` children after the token table.
+
+    One line per spawned child: uuid, agent, persona (``subagent_type``)
+    and the model(s) it ran on — the identity facts the cost join reads
+    from the child's own files.
+    """
+    if not isinstance(rollup, dict):
+        return "no subagent data"
+    children = rollup.get("children") or []
+    header = f"Subagents ({len(children)} children)"
+    if not children:
+        return header
+    lines = [header]
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        bits = [str(child.get("uuid", "?")), f"({child.get('agent', '?')})"]
+        if child.get("subagent_type"):
+            bits.append(f"persona: {child['subagent_type']}")
+        models = child.get("models")
+        if models:
+            bits.append(f"models: {', '.join(str(m) for m in models)}")
+        lines.append(f"  - {' · '.join(bits)}")
+    return "\n".join(lines)
 
 
 def _subagent_rollup(
@@ -138,7 +168,7 @@ def _subagent_rollup(
     re-implements the rollup.
     """
     from ai_r.parsers import PARSERS
-    from ai_r.session_stats import children_of
+    from ai_r.session_stats import children_of, subagent_cost_facts
     from ai_r.tokens import component_tokens, rollup_component_tokens
 
     children_out: List[dict[str, Any]] = []
@@ -152,11 +182,19 @@ def _subagent_rollup(
             except Exception:  # noqa: BLE001
                 child_msgs = []
         child_block = component_tokens(child_msgs, agent=child.agent)
-        children_out.append({
+        # Identity facts read from the child's OWN files (the same SSOT
+        # join the MCP include_subagents rollup uses): persona + models.
+        facts = subagent_cost_facts(child, messages=child_msgs)
+        child_out: dict[str, Any] = {
             "uuid": child.uuid,
             "agent": child.agent.value.lower(),
             "component_tokens": child_block,
-        })
+        }
+        if facts.get("subagent_type"):
+            child_out["subagent_type"] = facts["subagent_type"]
+        if facts.get("models"):
+            child_out["models"] = facts["models"]
+        children_out.append(child_out)
         child_blocks.append(child_block)
     return {
         "parent": parent_block,

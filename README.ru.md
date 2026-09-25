@@ -329,6 +329,18 @@ Claude и Antigravity — остальным `jq` не нужен).
   - `AI_R_HAYSTACK_CACHE_MAX` — потолок кэша поиска по числу записей.
   - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — по суммарному объёму (предохранитель RSS
     долгоживущего сервера).
+  - `AI_R_MSG_CACHE_MAX` / `AI_R_MSG_CACHE_BYTES_MAX` — кэш чтения в ядре
+    (один скан корпуса + один парс транскрипта на неизменённую сессию; общий
+    для `query` / `get_body` / `audit_brief` / план-проекций): потолок по
+    числу записей (по умолчанию `8`) и по сумме исходных байт (64 МиБ).
+
+**Тяжёлые сессии (больше ~1 МБ): CLI или одиночные MCP-вызовы.** Многомегабайтный
+транскрипт — это полноценный парс; холодный MCP-вызов по такой сессии — тем
+более параллельный батч — может не уложиться в клиентский таймаут запроса.
+Для таких сессий используйте CLI (`ai-r audit-brief <uuid>`, `ai-r read
+<uuid>`) или последовательные одиночные вызовы; кэши чтения делают тёплые
+повторы дешёвыми, но первое касание неизменённой сессии — честная цена одного
+скана.
 
 Оба дополнения полностью опциональны: без них stdio-режим и порядок BM25
 работают как раньше.
@@ -394,12 +406,13 @@ pytest --cov=src/ai_r
 
 claude code session reader · claude code session parser · codex session parser ·
 opencode session reader · antigravity brain parser · pi agent session reader ·
+zcode session reader · zcode cli session parser ·
 rag over agent sessions · bm25 retriever · retrieval layer for ai agents ·
 grounding · mcp server · structured context ·
 cross-agent attribution · ai coding agent audit · ai agent session history ·
 mcp session tools · read-only session reader · agent session replay ·
 resume agent session · agent handoff · plan extraction · tool-call audit ·
-file edit attribution · multi-agent coding · claude codex opencode antigravity pi
+file edit attribution · multi-agent coding · claude codex opencode antigravity pi zcode
 
 </details>
 

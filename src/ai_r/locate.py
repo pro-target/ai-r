@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai_r.parsers import PARSERS, Session, iso, target_agents
+from ai_r.parsers import PARSERS, Session, cached_list_sessions, iso, target_agents
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.resume import resume_command
 
@@ -286,7 +286,7 @@ def locate(
     for agent_name in target_agents(agent):
         parser = PARSERS[agent_name]
         try:
-            sessions = parser.list_sessions()
+            sessions = cached_list_sessions(agent_name, parser)
         except (OSError, ValueError):
             sessions = []
         scanned_sessions[agent_name.value.lower()] = sessions

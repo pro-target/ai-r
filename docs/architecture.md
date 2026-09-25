@@ -295,6 +295,53 @@ records adding an optional shared transport as the fix.
   `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
   transport.
 
+### ADR: core read caches — one scan, one parse per unchanged session
+
+Every hot core call (`iter_events` → `get_body` / `query` / the plan
+projections / `audit_brief`) used to re-run the parser's full corpus scan
+(`list_sessions`) AND a full transcript parse (`read_messages`) on every
+invocation. Measured on a real corpus (455 sessions): 4.5 s scan + 0.2 s
+parse per call; `audit_brief` alone walked the session five times (29.7 s
+CPU on a 2.5 MB transcript); a parallel MCP batch of such calls serialized
+under the GIL into ~100–120 s wall each and outlived every client timeout.
+This ADR records the fix: repeat reads are now cached per process.
+
+- **What changed.** Two caches in `parsers/_common.py`: (1) the
+  **inventory cache** — the last `list_sessions` result per agent,
+  revalidated by a stat-only signature of the parser's `source_roots()`
+  (moved from `mcp_server`, which kept a private copy used by exactly one
+  wrapper; the core hot paths and the MCP `list_sessions` now share one
+  entry per agent); (2) the **message LRU** — `read_messages` results keyed
+  by `(agent, uuid, path, mtime_ns, size)`. Alongside, `audit_brief` was
+  restructured to a **single-scan** pass: one `query` materialization feeds
+  the user/tool rows directly and hands its `plan_event` rows to
+  `plan`/`plan_feedback` via the internal `_events` seam (the budget ladder
+  and every output shape unchanged — equivalence is guarded by
+  `tests/test_audit_brief_single_scan.py`).
+- **Freshness = the stat key.** A HIT must be byte-identical to a MISS: any
+  change (new/removed file, mtime bump, same-mtime size change) alters the
+  signature/key and forces a fresh scan/parse. Per-file stats, never
+  directory mtimes — appending to a live session file must not freeze it
+  out of freshness. For OpenCode the shared SQLite DB bumps mtime on any
+  write, invalidating every OpenCode entry at once (correct: any session
+  may have grown). Fail-open, never fail-stale: unstattable roots/paths
+  bypass the cache and read directly; failures are never cached.
+- **Bounded memory, newest kept.** The message LRU is capped by entry count
+  (`AI_R_MSG_CACHE_MAX`, default 8 — a parsed transcript costs several
+  times its source size as objects, so the default covers the audit batch
+  pattern, not the corpus) and by summed source bytes
+  (`AI_R_MSG_CACHE_BYTES_MAX`, default 64 MiB); the single newest entry is
+  never evicted (haystack semantics). The inventory cache needs no
+  eviction: its key space is the agent registry (≤ 6 entries).
+- **Thread discipline.** Same as the haystack cache: one lock guards the
+  cheap dict touch; the scan/parse runs outside it; a concurrent
+  double-parse of the same content is harmless (last writer wins, both
+  fresh), and one object identity per key is served afterwards.
+- **Boundaries.** Caches are per-process — the CLI gets the same win
+  within one run (5 walks → 1) but no cross-process persistence; the cold
+  first touch remains one honest scan + parse by design (no background
+  warmer: it would violate the nothing-runs-in-the-background contract).
+
 ### ADR: `query` Phase-2/3 facets — `parent`/`group` landed, `kind` removed
 
 - **What changed.** The `query` verb's stubbed forward-compat facets (which

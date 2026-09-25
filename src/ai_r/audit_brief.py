@@ -63,6 +63,7 @@ from ai_r.events import (
 )
 from ai_r.locate import locate as _locate
 from ai_r.parsers import PARSERS, Session, iso, target_agents
+from ai_r.parsers._common import cached_read_messages
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.resume import resume_command
 from ai_r.tokens import component_tokens, session_tokens
@@ -299,6 +300,13 @@ def audit_brief(
         return text
 
     # --- Step 1: ONE query scan over the session's normalized events -------
+    # Single-scan (F2): this ONE materialization feeds EVERY projection
+    # below — the user/tool rows directly, the plan projections via the
+    # ``_events`` seam (plan/plan_feedback reuse these rows instead of
+    # each re-running iter_events), and the token breakdown via the core
+    # read cache (one parse, shared by the whole call).  The digest is
+    # byte-identical to the multi-pass chain it replaced (guarded by
+    # ``tests/test_audit_brief_single_scan.py`` + the main suite).
     events = _query(
         session=[uuid], agent=agent_label, limit=0, redact=False
     )
@@ -306,6 +314,10 @@ def audit_brief(
     tool_rows = [
         ev for ev in events if str(ev.get("type", "")).startswith("tool_call")
     ]
+    # The plan projections' ``_events`` input == the rows their internal
+    # ``query(type="plan_event", …, redact=False)`` would return (the type
+    # gate is an exact match; grouping re-sorts by file order internally).
+    plan_rows = [ev for ev in events if ev.get("type") == "plan_event"]
 
     # (a) user turns — VERBATIM, chronological (the query scan's date order).
     user_turns = [
@@ -314,7 +326,7 @@ def audit_brief(
     ]
 
     # (b) plans / decisions — the existing plan projections, slimmed.
-    plan_atoms = _plan(uuid, agent=agent_label, bodies="final")
+    plan_atoms = _plan(uuid, agent=agent_label, bodies="final", _events=plan_rows)
     tasks: List[dict[str, Any]] = []
     for atom in plan_atoms:
         entry: dict[str, Any] = {
@@ -340,7 +352,9 @@ def audit_brief(
             "ts": pair.get("ts"),
             "ref": pair.get("ref"),
         }
-        for pair in _plan_feedback(uuid, agent=agent_label)
+        for pair in _plan_feedback(
+            uuid, agent=agent_label, _events=plan_rows
+        )
     ]
 
     # (c) tool footprint — aggregate fold by tool_kind + notable errors.
@@ -379,7 +393,7 @@ def audit_brief(
 
     # (e) token breakdown — the same per-session SSOT the token surfaces use.
     try:
-        messages = parser.read_messages(uuid)
+        messages = cached_read_messages(sess_obj.agent.value, parser, uuid)
     except (FileNotFoundError, ValueError, OSError):
         messages = []
     tokens_block = session_tokens(sess_obj, messages=messages)

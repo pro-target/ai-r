@@ -97,8 +97,8 @@ def file_frequency(
             (the default) matches absolute paths.  Pass e.g. ``"src/"`` to
             scope, or ``"."`` to also catch relative paths.
         agent: Optional filter, one of ``"claude"``, ``"codex"``,
-            ``"opencode"``, ``"antigravity"``, ``"pi"``.  ``None`` = all
-            agents.
+            ``"opencode"``, ``"antigravity"``, ``"pi"``, ``"zcode"``.
+            ``None`` = all agents.
         since: Optional ISO 8601 lower bound (inclusive) on edit timestamp.
         until: Optional ISO 8601 upper bound (inclusive) on edit timestamp.
         top: How many top files to include in ``files``.  ``0`` = all.

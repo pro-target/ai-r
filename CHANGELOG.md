@@ -6,8 +6,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Core read caches — one corpus scan + one transcript parse per unchanged
+  session (per process).** Every hot call (`iter_events` → `get_body` /
+  `query` / the plan projections / `audit_brief`) used to re-run the
+  parser's full corpus scan and a full message parse on every invocation
+  (measured: 4.5 s + 0.2 s per call on a real corpus; `audit_brief` walked
+  the session five times, 29.7 s CPU on a 2.5 MB transcript; parallel MCP
+  batches serialized under the GIL and outlived client timeouts). Two
+  caches now live in `parsers/_common.py`: the stat-signature inventory
+  cache (moved from `mcp_server`, now shared by the core hot paths and the
+  MCP `list_sessions` wrapper) and a bounded LRU `read_messages` cache
+  keyed by `(agent, uuid, path, mtime_ns, size)` — a HIT is byte-identical
+  to a MISS, unstattable sources fail open, memory is capped by
+  `AI_R_MSG_CACHE_MAX` (default 8) and `AI_R_MSG_CACHE_BYTES_MAX`
+  (default 64 MiB). `audit_brief` is additionally single-scan now: one
+  `query` materialization feeds every projection (plan/plan_feedback reuse
+  its rows via an internal `_events` seam; output byte-identical, guarded
+  by an equivalence test). No public verb/parameter changed; the CLI
+  benefits identically within one run. ADR in `docs/architecture.md`.
+
 ### Added
 
+- **Store-recency fallback in session detection — `detect_current` no longer
+  returns `null` for zcode (and pi).** `ai-r detect-session` (CLI) and
+  `detect_current` (MCP) previously found nothing for zcode: zcode exports no
+  session-id env var (only agent markers like `ZCODE_APP_VERSION`), the
+  sh-layer flag-file registry does not know it, and the shared MCP HTTP daemon
+  (one process for every session) never sees ANY caller's env, so every
+  cascade step came up empty. New cascade step 6 (source `<agent>-recent`,
+  `verified=false`): when steps 1–5 yield nothing and the detected agent is
+  one of the no-env/flag-channel agents (today zcode and pi —
+  `_STORE_FALLBACK_AGENTS`) or unknown (the daemon), the agent's own session
+  store is scanned for sessions updated inside the A3 fresh window (default
+  600 s), newest first, capped at 3 (`_STORE_RECENT_MAX`); an unknown caller
+  takes the first fallback agent with a fresh store (deterministic priority:
+  zcode before pi). Known limitation (accepted): fallback candidates carry
+  `verified=false`; with N≥2 simultaneously active sessions the newest-first
+  ordering can, between turns, point at a neighbouring session instead of the
+  caller's own — exact disambiguation requires the per-session flag file
+  (see the hub hook writing `~/.agents/.session-identity/<agent>/<sid>`,
+  which cascade step 3 already prefers over this fallback). Subagent children
+  are deliberately not excluded — a subagent tool call IS its session's own
+  current session. Documented in `docs/methods.md` +
+  `docs/methods.ru.md` ("Runtime session detection").
+- **`zcode` agent — ZCode CLI session support.** New parser
+  `ai_r/parsers/zcode.py` reads the ZCode harness's SQLite store
+  (`~/.zcode/cli/db/db.sqlite`, the canonical registry: every session
+  incl. main interactive ones, with titles, `parent_id` subagent links,
+  project `directory`, per-model-call `tokens`) and falls back to the
+  rollout model-io JSONL under `~/.zcode/cli/rollout/` for sessions the
+  DB does not know (parent link from
+  `agents/sess_*/agent_*/metadata.json`). Registered in the canonical
+  `PARSERS` registry, so every verb (`list`/`read`/`search`/
+  `find-file-edits`/`find-tool-calls`/`file-frequency`/`stats`/
+  `audit-brief`/`locate`/`export`) and the MCP server pick it up via
+  `--agent zcode`. `detect-agent` recognises `ZCODE_APP_VERSION`;
+  `detect-session` knows the `sess_(subagent_agent_)?<uuid>` id shape.
+  The event layer detects ZCode plans (Claude-shaped `ExitPlanMode` +
+  `.zcode/plans/plan-*.md` writes, approval responses included). Exact
+  per-call token usage via `read_token_usage` (recorded totals, never
+  re-summed cache).
 - **Subagent cost — what each spawned agent actually burned, and on which
   model.** A spawn was already classified (`tool_kind=task`); what was missing
   was its price. `find_tool_calls` now emits `tool_use_id` and, on a spawn, a
