@@ -45,7 +45,7 @@ tokens = [
 [package.metadata]
 requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
-    { name = "mcp", specifier = ">=1.9.0" },
+    { name = "mcp", specifier = "<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=1.24" },
     { name = "onnxruntime", marker = "extra == 'semantic'", specifier = ">=1.17" },
