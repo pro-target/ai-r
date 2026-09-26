@@ -37,6 +37,7 @@ _HOST_FIXTURES = frozenset(
         "real_claude_home",
         "frozen_claude_home",
         "real_zcode_db",
+        "real_live_stores",
     }
 )
 
@@ -2166,6 +2167,89 @@ def real_claude_dir() -> Path:
     if not _REAL_CLAUDE_DIR.is_dir():
         pytest.skip("no real Claude sessions on this host")
     return _REAL_CLAUDE_DIR
+
+
+@pytest.fixture
+def real_live_stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A byte-frozen view of the REAL Claude + ZCode stores under an
+    ``AI_R_HOME`` temp home, for e2e scan-invariant checks.
+
+    Reads the *live* host stores' bytes (not fixtures) but freezes them for
+    the duration of the test so repeated scans are comparable: the multi-
+    scan invariants (wide ⊇ narrow, unfiltered count == per-agent sum) are
+    exact-equality checks that a live, growing store would flake on — the
+    harness writing its own session is the normal case, not the exception.
+
+    Freezing strategy per store:
+
+    * ``~/.claude/projects`` — hardlink tree (append-only JSONL, near-zero
+      cost on a 240 MB vault; falls back to a real copy cross-device),
+      the same trade-off :func:`frozen_claude_home` makes;
+    * ``~/.zcode/cli/{db,rollout}``` — REAL copies: both are written by the
+      very process running the tests on a ZCode-driven host, and a
+      hardlink would leak the live appends straight into the "frozen" view
+      (a new rollout record REPLACES the replayed conversation, so counts
+      genuinely move, not just grow).
+
+    The frozen home is created under ``~/.cache`` (same filesystem as the
+    stores, so hardlinks work — pytest's tmp_path is often tmpfs) and
+    removed afterwards.  Skips (never fails) when the host has neither
+    store.  Auto-tagged ``host`` via :data:`_HOST_FIXTURES`.
+    """
+    import os
+    import tempfile
+
+    claude_projects = Path("~/.claude/projects").expanduser()
+    zcode_cli = Path("~/.zcode/cli").expanduser()
+    have_claude = claude_projects.is_dir()
+    have_zcode = zcode_cli.is_dir()
+    if not (have_claude or have_zcode):
+        pytest.skip("no real Claude/ZCode stores on this host")
+
+    cache_root = Path("~/.cache").expanduser()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    frozen_home = Path(tempfile.mkdtemp(prefix="ai-r-e2e-frozen-", dir=cache_root))
+    try:
+        if have_claude:
+            dst = frozen_home / ".claude" / "projects"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copytree(claude_projects, dst, copy_function=os.link)
+            except OSError:
+                shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(claude_projects, dst)
+        if have_zcode:
+            rollout_src = zcode_cli / "rollout"
+            if rollout_src.is_dir():
+                shutil.copytree(
+                    rollout_src, frozen_home / ".zcode" / "cli" / "rollout",
+                    copy_function=shutil.copy2,  # real copy: live-written
+                )
+            db_src = zcode_cli / "db" / "db.sqlite"
+            if db_src.is_file():
+                # Snapshot via the SQLite backup API, NOT a file copy: the
+                # store is in WAL mode with a live writer, and copying
+                # db.sqlite + db.sqlite-wal non-atomically can yield a torn
+                # (or stale, wal-less) snapshot; ``backup`` gives one
+                # consistent point-in-time image.
+                db_dst = frozen_home / ".zcode" / "cli" / "db" / "db.sqlite"
+                db_dst.parent.mkdir(parents=True, exist_ok=True)
+                src_conn = sqlite3.connect(
+                    f"file:{db_src}?mode=ro", uri=True
+                )
+                dst_conn = sqlite3.connect(str(db_dst))
+                try:
+                    src_conn.backup(dst_conn)
+                finally:
+                    src_conn.close()
+                    dst_conn.close()
+        # The autouse isolation fixture already set AI_R_HOME to an empty
+        # tmp dir; point it at the frozen copy instead (this fixture runs
+        # after the autouse one, so its env wins).
+        monkeypatch.setenv("AI_R_HOME", str(frozen_home))
+        yield frozen_home
+    finally:
+        shutil.rmtree(frozen_home, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

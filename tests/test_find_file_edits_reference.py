@@ -228,7 +228,13 @@ def test_byte_budget_stops_emission_and_flags(
     monkeypatch.setattr(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
+    # Shrink BOTH budget knobs: the flat base and the per-record scale share
+    # (the effective budget is max(base, planned × share) — scaling with the
+    # caller's count contract is the point of the shared helper).
     monkeypatch.setattr("ai_r.find_file_edits._OUTPUT_BYTES_BUDGET", 300)
+    monkeypatch.setattr(
+        "ai_r.find_file_edits._WORST_CAPPED_RECORD_BYTES", 10
+    )
     result = _core(path="budget/f", agent="claude")
     assert result["output_truncated"] is True
     assert 1 <= len(result["records"]) < 3
@@ -253,6 +259,9 @@ def test_size_caps_false_returns_raw_complete_records(
         "ai_r.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
     )
     monkeypatch.setattr("ai_r.find_file_edits._OUTPUT_BYTES_BUDGET", 300)
+    monkeypatch.setattr(
+        "ai_r.find_file_edits._WORST_CAPPED_RECORD_BYTES", 10
+    )
     result = _core(
         path="rawcaps", agent="claude", size_caps=False, redact=False
     )

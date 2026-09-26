@@ -23,6 +23,7 @@ from ai_r.find_file_edits import (
     cap_field as _cap_field,
     parse_iso_bound,
     previous_user_intent,
+    scaled_output_budget,
     to_utc_aware,
 )
 from ai_r.parsers import (
@@ -57,6 +58,14 @@ _OUTPUT_CHARS_CAP = 2_000     # correlated tool_result content
 # ``truncated``: the former means "output capped by size", the latter "more
 # records matched than ``limit``").  Generous — only bites pathological output.
 _OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
+
+# Worst-case serialized size of ONE field-capped record: the sum of the
+# per-field caps below (~11 KB) plus the fixed-key envelope.  The emission
+# budget scales by this share (see :func:`scaled_output_budget`) so a wide
+# scan of ordinary field-capped records is never silently tail-cut — the
+# budget stays a guard for content the caps do NOT bound (the ``subagent``
+# sidecar is uncapped) and is clamped by the shared ceiling.
+_WORST_CAPPED_RECORD_BYTES = 12_000
 
 
 # ``_cap_field`` is the shared :func:`ai_r.find_file_edits.cap_field`
@@ -259,6 +268,12 @@ def find_tool_calls(
         ``limit`` (count-based); ``output_truncated`` is ``True`` when the
         cumulative serialized size hit the response byte budget and record
         appending stopped early (size-based) — the two are independent.
+        The byte budget SCALES with the number of planned records (an
+        explicit wide ``limit`` — or ``limit=0`` for "everything" — is a
+        caller contract the budget must not silently override for ordinary
+        field-capped records), so ``output_truncated`` trips only for
+        content the per-field caps do not bound (e.g. oversized subagent
+        sidecars) or beyond the hard ceiling.
         When ``count == 0`` the dict additionally carries ``"diagnostics"``
         (scanned agents + session counts, corpus date bounds, cause hints
         — see :mod:`ai_r.diagnostics`) so an empty listing is explainable.
@@ -604,17 +619,26 @@ def find_tool_calls(
                     merge_redaction_counts(redactions, counts)
 
     # Size-based safeguard: stop emitting records once the cumulative
-    # serialized size exceeds the response byte budget.  Distinct from the
-    # count-based ``truncated`` above — ``output_truncated`` means "output
-    # capped by size", so a caller can tell "more records exist" (raise
-    # ``limit``) from "output too big" (fields already field-capped, but the
-    # sheer record count blew the budget).
+    # serialized size exceeds the effective response byte budget.  Distinct
+    # from the count-based ``truncated`` above — ``output_truncated`` means
+    # "output capped by size", so a caller can tell "more records exist"
+    # (raise ``limit``) from "output too big" (fields already capped, but the
+    # sheer record count blew the budget).  The budget SCALES with the
+    # planned record count so it never silently overrides the caller's count
+    # contract for ordinary field-capped records (a live corpus of ~1.4k
+    # real records blew the old flat 4 MB budget and tail-cut exactly the
+    # NEWEST records, breaking the "wide since ⊇ narrow since" invariant at
+    # the emission level); it still trips for uncapped content (subagent
+    # sidecars) and is clamped by the shared ceiling.
     output_truncated = False
+    budget = scaled_output_budget(
+        len(records), _WORST_CAPPED_RECORD_BYTES, base_budget=_OUTPUT_BYTES_BUDGET
+    )
     budgeted: List[dict[str, Any]] = []
     running = 0
     for rec in records:
         running += len(json.dumps(rec, ensure_ascii=False, default=str))
-        if running > _OUTPUT_BYTES_BUDGET and budgeted:
+        if running > budget and budgeted:
             output_truncated = True
             break
         budgeted.append(rec)

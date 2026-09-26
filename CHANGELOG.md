@@ -99,6 +99,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records usage, labeled `estimate` where it does not, `null` without a signal)
   — never a blanket `exact` nor a fabricated zero.
 
+### Fixed
+
+- **Wide scans no longer silently tail-cut the NEWEST records — the output
+  byte budget scales with the caller's count contract.** `find_tool_calls`
+  and `find_file_edits` sort records by timestamp ascending and emit under
+  a response byte budget; the flat 4 MB budget meant a wide scan whose
+  matched set merely exceeded it in ordinary field-capped bytes (~3 KB per
+  real record) stopped emitting mid-list — cutting exactly the TAIL, i.e.
+  the newest records. Observed live on main: `find-tool-calls --pattern
+  mcp__ --agent claude --since 1970-01-01 --limit 50000` emitted 1322 of
+  its 1377 matches with `output_truncated=True` and a max timestamp stuck
+  at 2026-09-12, while a narrower `--since 2026-09-13` still returned the
+  09-13+ calls — breaking "wide since ⊇ narrow since" at the emission
+  level (`count` stayed honest, so the contract breach was invisible to
+  anything not checking `output_truncated`). New shared helper
+  `scaled_output_budget` (`find_file_edits`, the import-order base of the
+  two): the effective budget is `max(base, planned_records × per_record)`
+  — 8 KB per field-capped record in `find_file_edits`, 12 KB (the sum of
+  the per-field caps) in `find_tool_calls` — clamped by a hard 512 MB
+  ceiling so a `limit=0` scan over a monster corpus cannot accumulate an
+  unbounded response. The budget stays a guard: it still trips (and flags
+  `output_truncated`) for content the per-field caps do NOT bound —
+  deliberately uncapped `include_input` bodies, oversized hunks, subagent
+  cost sidecars — or beyond the ceiling. The human-readable CLI path now
+  prints a loud `(output truncated: … the newest were dropped)` suffix
+  instead of burying the size-based cut (a wide audit used to look like
+  "new sessions are missing"). Live repro after the fix: the same wide
+  scan emits 1377/1377 with `output_truncated=False` and a fresh max
+  timestamp; the narrow-window emission is a strict subset; per-agent
+  counts sum to the unfiltered count (1453). Pinned by
+  `tests/test_scan_invariants.py` (hermetic, incl. warm-cache visibility
+  of appended/new/sqlite-appended sessions and zcode timestamp parity)
+  and `tests/test_e2e_scan_invariants.py` (host: the repro trio over a
+  byte-frozen view of the real Claude+ZCode stores via the new
+  `real_live_stores` fixture).
+
 ## [0.4.2] - 2026-07-14
 
 <!-- 0.4.1 was tagged but never published: the release workflow pinned an

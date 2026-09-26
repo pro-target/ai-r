@@ -89,6 +89,57 @@ _ASSISTANT_CHARS_CAP = 4_000  # assistant message text hosting the edit
 # output.  Same value as ``find_tool_calls``.
 _OUTPUT_BYTES_BUDGET = 4_000_000  # ~4 MB of serialized records
 
+# Hard ceiling for the scaled budget: even an explicit "give me everything"
+# contract stops emitting once the serialized response passes this mark (the
+# ``output_truncated`` flag stays the honest signal).  ~128× the base budget.
+_OUTPUT_BYTES_MAX = 512_000_000
+
+# Worst-case serialized size of ONE field-capped record (capped intent +
+# capped assistant + the reference/envelope keys) — the per-record share the
+# scaled budget promises to carry.  Deliberately uncapped content (full
+# ``include_input`` bodies, oversized hunks) is NOT part of the estimate: the
+# budget stays the guard for it.
+_WORST_CAPPED_RECORD_BYTES = 8_000
+
+
+def scaled_output_budget(
+    planned_records: int,
+    per_record_bytes: int,
+    base_budget: "int | None" = None,
+) -> int:
+    """The effective emission byte budget for ``planned_records`` records.
+
+    ``base_budget`` defaults to THIS module's :data:`_OUTPUT_BYTES_BUDGET`;
+    callers that keep their own base constant (``find_tool_calls``) pass it
+    explicitly so monkeypatching THEIR module constant still works.
+
+    The base budget (~4 MB) alone silently overrides a caller's COUNT
+    contract: records are sorted by timestamp ascending and the emission
+    loop cuts the TAIL, so a wide scan whose matched set merely exceeds the
+    budget in ordinary field-capped bytes (~3 KB per real record) loses
+    exactly its NEWEST records — observed on a live corpus where
+    ``since 1970`` stopped at 2026-09-12 while ``since 2026-09-13`` still
+    returned the 09-13/14 calls (the "wide ⊇ narrow" invariant broke at the
+    emission level; ``count`` stayed honest).
+
+    The budget therefore SCALES with the number of records the caller asked
+    to receive: ``max(base, planned × per_record_bytes)``, where
+    ``per_record_bytes`` is the module's per-record worst-case estimate for
+    its field-capped envelope.  The budget remains a guard — it still trips
+    for content that is NOT bounded by the per-field caps (the deliberately
+    uncapped ``include_input`` bodies, oversized edit hunks, subagent
+    sidecars) — and it is clamped by a hard ceiling so a ``limit=0`` scan
+    over a monster corpus cannot accumulate an unbounded response in memory.
+
+    Shared by :func:`find_file_edits` and
+    :func:`ai_r.find_tool_calls.find_tool_calls` (this module is the
+    import-order base of the two).
+    """
+    if base_budget is None:
+        base_budget = _OUTPUT_BYTES_BUDGET
+    scaled = max(base_budget, planned_records * per_record_bytes)
+    return min(scaled, _OUTPUT_BYTES_MAX)
+
 
 def cap_field(value: Any, cap: int) -> tuple[Any, bool]:
     """Return ``(value, truncated)`` bounding a field to ``cap`` chars.
@@ -527,18 +578,25 @@ def find_file_edits(
                     merge_redaction_counts(redactions, counts)
 
     # Size-based safeguard (mirrors ``find_tool_calls``): stop emitting
-    # records once the cumulative serialized size exceeds the response byte
-    # budget.  Distinct from the count-based ``truncated`` above —
-    # ``output_truncated`` means "output capped by size", so a caller can
-    # tell "more records exist" (raise ``limit``) from "output too big"
-    # (fields already capped, but the sheer record count blew the budget).
+    # records once the cumulative serialized size exceeds the effective
+    # response byte budget.  Distinct from the count-based ``truncated``
+    # above — ``output_truncated`` means "output capped by size", so a
+    # caller can tell "more records exist" (raise ``limit``) from "output
+    # too big" (fields already capped, but the sheer record count blew the
+    # budget).  The budget SCALES with the number of planned records so an
+    # ordinary field-capped wide scan is never silently tail-cut (see
+    # :func:`scaled_output_budget`); it still trips for deliberately
+    # uncapped content (``include_input`` bodies, oversized hunks).
     output_truncated = False
     if size_caps:
+        budget = scaled_output_budget(
+            len(records), _WORST_CAPPED_RECORD_BYTES
+        )
         budgeted: List[dict[str, Any]] = []
         running = 0
         for rec in records:
             running += len(json.dumps(rec, ensure_ascii=False, default=str))
-            if running > _OUTPUT_BYTES_BUDGET and budgeted:
+            if running > budget and budgeted:
                 output_truncated = True
                 break
             budgeted.append(rec)
