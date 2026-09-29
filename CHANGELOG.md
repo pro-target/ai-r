@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The shared http MCP server no longer fails clients with a stale
+  `Mcp-Session-Id` (`404` / `-32600 "Session not found"`).** The SDK's
+  stateful `StreamableHTTPSessionManager` keeps its session registry in
+  process memory; a long-lived shared daemon (one process for every agent)
+  outlives its clients, and once a session id expired out of the registry
+  (idle timeout, disconnect cleanup, daemon restart) a client that reused
+  its cached id instead of re-initializing failed EVERY call while the CLI
+  kept working (reproduced in the 2026-09-29 forensics: `get_body`/`query`
+  via MCP kept answering `-32600` against a live daemon). The http
+  transport now dispatches **statelessly** by default — every request is
+  served by a fresh transport pair and unknown session-id headers are
+  ignored; ai-r's tools are stateless read-only queries, so nothing is
+  lost. `AI_R_MCP_STATELESS=0` restores the stateful registry (a malformed
+  value fails loud). Verified end-to-end on a throwaway port: a request
+  with a garbage session id is answered `200` + tool list.
+
 - **Session-detection cascade no longer returns dead sessions from stale flag
   files.** The sh-layer hub hook writes a per-session flag file
   (`~/.agents/.session-identity/<agent>/<sid>`) but nothing ever removes it,

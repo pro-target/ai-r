@@ -27,6 +27,16 @@ thread-safe for exactly this), and ``timeout_keep_alive`` is raised well above
 the max expected tool duration (``AI_R_MCP_KEEPALIVE_SEC``) so a briefly-idle
 keep-alive connection is not dropped as "not connected".
 
+Statelessness (D3)
+------------------
+The shared server dispatches **statelessly** by default
+(:func:`resolve_stateless`): every request is served by a fresh transport
+pair and unknown ``Mcp-Session-Id`` headers are ignored, so a client whose
+cached session id expired out of the SDK's in-memory registry (the daemon
+outlives its clients) keeps working instead of failing every call with
+``404 "Session not found"``.  ``AI_R_MCP_STATELESS=0`` restores the stateful
+registry behaviour.
+
 This module keeps the *decisions* as pure, unit-testable predicates
 (``resolve_transport`` / ``should_exit_idle`` / ``systemd_listen_sockets``) and
 isolates the imperative uvicorn wiring in ``run_http``.
@@ -59,6 +69,39 @@ DEFAULT_KEEPALIVE_SEC = 120.0
 # another local user on a shared machine reaching the transcript corpus.
 # The env var name is public API (documented in the README http section).
 HTTP_TOKEN_ENV = "AI_R_HTTP_TOKEN"
+
+# Stateless streamable-http dispatch (D3, forensics 2026-09-29).  The
+# stateful ``StreamableHTTPSessionManager`` keeps a per-transport-session
+# registry in process memory and answers any request whose
+# ``Mcp-Session-Id`` it does not know with HTTP 404 + JSON-RPC ``-32600
+# "Session not found"``.  A LONG-LIVED shared daemon outlives its clients:
+# sessions expire from the registry (idle timeout / disconnect cleanup /
+# daemon restart), and a client that reuses its cached session id instead
+# of re-initializing (observed with the zcode harness) then fails EVERY
+# call while the CLI keeps working.  Stateless mode drops the registry
+# entirely — every request is handled by a fresh transport pair and any
+# (stale) session-id header is ignored.  ai-r's tools are stateless
+# read-only queries, so nothing is lost.  ``AI_R_MCP_STATELESS=0`` forces
+# the stateful behaviour back; a malformed value fails loud.
+STATELESS_ENV = "AI_R_MCP_STATELESS"
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+
+
+def resolve_stateless(env: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether the http transport should dispatch statelessly (default)."""
+    env = os.environ if env is None else env
+    raw = (env.get(STATELESS_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY:
+        return False
+    raise ValueError(
+        f"unknown {STATELESS_ENV}={raw!r}; expected one of "
+        f"{_TRUTHY + _FALSY}"
+    )
 
 # systemd passes activation sockets starting at fd 3 (SD_LISTEN_FDS_START).
 _SD_LISTEN_FDS_START = 3
@@ -347,6 +390,22 @@ def _release_semantic_if_idle() -> bool:
     return release_if_idle()
 
 
+def apply_http_settings(
+    mcp: Any, env: Mapping[str, str], host: str, port: int
+) -> None:
+    """Pin the env-resolved http settings onto the FastMCP ``mcp`` object.
+
+    The testable imperative twin of the wiring ``run_http`` does before
+    building the streamable-http app (the module-level ``mcp`` is built at
+    import time, before the env-driven host/port are known): the
+    DNS-rebinding allowlist for the resolved host/port, and stateless
+    dispatch (:func:`resolve_stateless`, D3) so the session manager is
+    constructed WITHOUT a per-transport session registry.
+    """
+    mcp.settings.transport_security = transport_security_settings(host, port)
+    mcp.settings.stateless_http = resolve_stateless(env)
+
+
 def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragma: no cover
     """Serve the FastMCP app over streamable-http with idle self-exit.
 
@@ -372,12 +431,12 @@ def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragm
     port = int(env.get("AI_R_MCP_PORT") or DEFAULT_PORT)
     idle_sec = float(env.get("AI_R_MCP_IDLE_SEC") or DEFAULT_IDLE_SEC)
 
-    # Auth + DNS-rebinding: fail-closed for a remote bind without a token, and
-    # pin the transport-security allowlist to the *resolved* host/port (the
-    # module-level ``mcp`` was built before host/port were known).
+    # Auth + DNS-rebinding + stateless dispatch: fail-closed for a remote
+    # bind without a token, and pin the settings to the *resolved* host/port
+    # (the module-level ``mcp`` was built before host/port were known).
     token = resolve_http_token(env)
     require_http_token(host, token, env)
-    mcp.settings.transport_security = transport_security_settings(host, port)
+    apply_http_settings(mcp, env, host, port)
 
     state: dict = {"last": time.monotonic(), "active": 0}
     inner = mcp.streamable_http_app()
