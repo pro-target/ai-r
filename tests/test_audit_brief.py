@@ -307,3 +307,20 @@ def test_cli_markdown_and_json(
     assert main(["audit-brief", "no-such-uuid"]) == 3
     err = capsys.readouterr().err
     assert err.startswith("ai-r: ")
+
+
+def test_budget_note_truncation_always_present(
+    rich_claude_session: str,
+) -> None:
+    """The digest says out loud: a budget-side cut is NOT missing transcript text.
+
+    Guards the real-world misread where an auditor treated a truncated
+    preview as "the reply was never delivered" — the full text lived in the
+    transcript and resolved via get_body / read_session.
+    """
+    brief = audit_brief(rich_claude_session, budget_chars=0)
+    note = brief["budget"]["note_truncation"]
+    assert "NOT mean missing" in note
+    assert "get_body" in note
+    assert "read_session" in note
+    assert rich_claude_session in note
