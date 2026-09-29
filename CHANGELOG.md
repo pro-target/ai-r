@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`locate` now finds prefixed ids (`sess_…`) by their bare uuid/prefix.**
+  Agents like zcode (and opencode) store session ids with a harness prefix
+  (`sess_<uuid>`); the id matcher compared the needle against the full stored
+  id only, so `ai-r locate 2934a4ce` returned 0 matches while
+  `ai-r locate sess_2934a4ce-…` found the session (reproduced in the
+  2026-09-29 forensics — sessions looked "nonexistent"). The matcher now
+  also considers prefix-stripped segment forms (down through
+  `sess_subagent_agent_<uuid>`), both for the uuid and the path stem; every
+  variant is an exact segment-prefix of the stored id, so it stays an id
+  match, never a loose substring.
+
 ### Changed
 
 - **Core read caches — one corpus scan + one transcript parse per unchanged

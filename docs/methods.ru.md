@@ -35,7 +35,7 @@
 | `network(agent, session, since/until, kind, risk, domain, limit, noise, project_dir)` | ОДИН скан `query(type=tool_call, tool_kind=web)` → цель запроса (`url`/`query`) извлекается из input самого вызова → детерминированный словарь рисков (см. *Аудит-пресеты* ниже) |
 | `quotes(agent, session, since/until, source_kind, limit, noise, project_dir)` | сканы `query(type=user_turn)` + `query(type=assistant_turn)` → на каждый user-turn самый длинный дословный (нормализованный) кусок, общий с предыдущим assistant-turn → пара «цитата → коммент» (см. *Пресет quotes* ниже) |
 | `audit_brief(session, agent, budget_chars, redact)` | ОДИН скан `query(session=…)` → user-turns ДОСЛОВНО + свёртка tool/file-следа через `aggregate(group_by=tool_kind)` → трек решений `plan`/`plan_feedback` → разбивка токенов `ai_r.tokens` → детерминированная бюджет-лестница (см. *Аудиторские пресеты* ниже) |
-| `locate(needle, agent, limit, web, redact)` | обход инвентаря per-parser `list_sessions` → матч по uuid/id-префиксу ИЛИ подстроке заголовка → ранжирование mtime desc → на каждый матч path/agent/dir/size + `readable` + готовые `read_command`/`resume_command`; `web=true` добавляет локально известные веб-следы (см. *Аудиторские пресеты* ниже) |
+| `locate(needle, agent, limit, web, redact)` | обход инвентаря per-parser `list_sessions` → матч по uuid/id-префиксу ИЛИ подстроке заголовка (префиксные иды вида zcode/opencode `sess_<uuid>` матчатся и по форме без префикса — голый uuid/префикс их находит) → ранжирование mtime desc → на каждый матч path/agent/dir/size + `readable` + готовые `read_command`/`resume_command`; `web=true` добавляет локально известные веб-следы (см. *Аудиторские пресеты* ниже) |
 
 ## Аудит-пресеты: `incidents` и `network`
 

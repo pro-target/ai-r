@@ -35,7 +35,7 @@
 | `network(agent, session, since/until, kind, risk, domain, limit, noise, project_dir)` | ONE `query(type=tool_call, tool_kind=web)` scan → request target (`url`/`query`) extracted from the call's own input → deterministic risk dictionary (see *Audit presets* below) |
 | `quotes(agent, session, since/until, source_kind, limit, noise, project_dir)` | `query(type=user_turn)` + `query(type=assistant_turn)` scans → per user turn, the longest verbatim (normalized) run shared with a preceding assistant turn → «quote → comment» pair (see *Quotes preset* below) |
 | `audit_brief(session, agent, budget_chars, redact)` | ONE `query(session=…)` scan → user turns VERBATIM + tool/file footprint via `aggregate(group_by=tool_kind)` folds → `plan`/`plan_feedback` decision trail → `ai_r.tokens` breakdown → deterministic budget ladder (see *Auditor presets* below) |
-| `locate(needle, agent, limit, web, redact)` | the per-parser `list_sessions` inventory walk → uuid/id-prefix OR title-substring match → ranked mtime desc → per match the path/agent/dir/size + `readable` + ready-to-run `read_command`/`resume_command`; `web=true` adds the locally-known web traces (see *Auditor presets* below) |
+| `locate(needle, agent, limit, web, redact)` | the per-parser `list_sessions` inventory walk → uuid/id-prefix OR title-substring match (prefixed ids like zcode/opencode `sess_<uuid>` also match their prefix-stripped forms, so a bare uuid/prefix finds them) → ranked mtime desc → per match the path/agent/dir/size + `readable` + ready-to-run `read_command`/`resume_command`; `web=true` adds the locally-known web traces (see *Auditor presets* below) |
 
 ## Audit presets: `incidents` & `network`
 

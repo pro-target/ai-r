@@ -208,3 +208,45 @@ def test_cli_human_and_json(
 
     assert main(["locate", ""]) == 2
     assert capsys.readouterr().err.startswith("ai-r: ")
+
+
+# --- D1: prefixed ids (zcode/opencode ``sess_…``) match a bare uuid/prefix ---
+
+def test_prefixed_id_matches_bare_needle(fake_zcode_db: Path) -> None:
+    """A bare uuid/prefix must find a ``sess_``-prefixed zcode session.
+
+    Regression (forensics 2026-09-29): ``ai-r locate 2934a4ce`` returned 0
+    matches while ``ai-r locate sess_2934a4ce-…`` found the session — the
+    matcher compared the needle against the full stored id only.
+    """
+    bare = locate("test-zc-1")  # stored id is sess_test-zc-1
+    assert bare["count"] >= 1
+    rec = bare["matches"][0]
+    assert rec["uuid"] == "sess_test-zc-1"
+    assert rec["match"] == "id"
+    assert rec["agent"] == "zcode"
+
+    full = locate("sess_test-zc-1")
+    assert full["count"] == bare["count"]  # both forms find the same set
+
+
+def test_prefixed_id_needle_with_prefix_still_matches(fake_zcode_db: Path) -> None:
+    """The prefixed needle keeps working (no regression on the old path)."""
+    result = locate("sess_test-zc-2-sub")
+    assert result["count"] == 1
+    assert result["matches"][0]["uuid"] == "sess_test-zc-2-sub"
+
+
+def test_id_variants_strip_known_prefixes() -> None:
+    from ai_r.locate import _id_variants
+
+    assert _id_variants("sess_2934a4ce-8289-4efe-a967-0b0a98e1112b") == (
+        "sess_2934a4ce-8289-4efe-a967-0b0a98e1112b",
+        "2934a4ce-8289-4efe-a967-0b0a98e1112b",
+    )
+    # zcode subagent rollout ids strip three segments down to the uuid
+    assert _id_variants("sess_subagent_agent_791420a4-d2be-4c78-b7ab-5b37b0cfa87b")[
+        -1
+    ] == "791420a4-d2be-4c78-b7ab-5b37b0cfa87b"
+    # unprefixed ids are unchanged
+    assert _id_variants(OLD_ID) == (OLD_ID,)

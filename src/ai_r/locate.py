@@ -11,8 +11,10 @@ come from each parser's ``list_sessions()`` — the same inventory
 ``list_sessions``/``search_sessions`` walk — with zero new scanning code; the
 algorithm inside is deterministic selection + ranking:
 
-* **match** — the needle prefix-matches the uuid / path stem (id match) OR is
-  a case-insensitive substring of the title (title match);
+* **match** — the needle prefix-matches the uuid / path stem (id match;
+  prefixed ids like zcode/opencode ``sess_<uuid>`` also match their
+  prefix-stripped forms, so a bare uuid/prefix finds them) OR is a
+  case-insensitive substring of the title (title match);
 * **rank** — matches are ordered by last activity (mtime) descending, newest
   first; ``limit`` bounds the emitted list (``count`` keeps the full total);
 * **zero matches** — an honest empty + closest-title ``suggestions``
@@ -88,13 +90,43 @@ def _sort_ts(session: Session) -> float:
         return 0.0
 
 
+# How many leading ``<token>_`` segments may be stripped when building id
+# variants.  Covers every known prefixed id shape in one bound: zcode main
+# sessions (``sess_<uuid>``) strip one, zcode subagent rollouts
+# (``sess_subagent_agent_<uuid>``) strip three, opencode (``ses_…``) one.
+_ID_VARIANT_MAX_STRIP = 3
+
+
+def _id_variants(value: str) -> tuple[str, ...]:
+    """``value`` plus its leading ``<token>_``-stripped forms (D1).
+
+    Some agents store ids with a harness prefix (zcode/opencode
+    ``sess_…``); a caller holding the bare uuid/prefix must still match.
+    Each variant is an exact segment-prefix of the stored id, so this
+    stays an *id* match — never a loose substring.  Ids without ``_``
+    (claude/codex hex) yield the single unchanged form.
+    """
+    out = [value]
+    current = value
+    for _ in range(_ID_VARIANT_MAX_STRIP):
+        head, sep, tail = current.partition("_")
+        if not sep or not tail:
+            break
+        out.append(tail)
+        current = tail
+    return tuple(out)
+
+
 def _match_kind(session: Session, needle_l: str) -> Optional[str]:
     """``"id"`` / ``"title"`` when ``session`` matches, else ``None``."""
-    if session.uuid.lower().startswith(needle_l):
-        return "id"
+    needles = _id_variants(needle_l)
+    for variant in _id_variants(session.uuid.lower()):
+        if any(variant.startswith(needle) for needle in needles):
+            return "id"
     stem = Path(str(session.path)).stem.lower()
-    if stem.startswith(needle_l):
-        return "id"
+    for variant in _id_variants(stem):
+        if any(variant.startswith(needle) for needle in needles):
+            return "id"
     title = (session.title or "").lower()
     if needle_l in title:
         return "title"
