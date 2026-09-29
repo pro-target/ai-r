@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Session-detection cascade no longer returns dead sessions from stale flag
+  files.** The sh-layer hub hook writes a per-session flag file
+  (`~/.agents/.session-identity/<agent>/<sid>`) but nothing ever removes it,
+  so the registry accumulates flags of long-dead sessions. Cascade step 3
+  turned EVERY flag into a candidate with no freshness check — the shared
+  MCP HTTP daemon (which sees no caller env) reported a 23-hour-dead session
+  as "current" (directory order put the oldest flag first) while also
+  suppressing the step-6 store-recency fallback (reproduced in the
+  2026-09-29 forensics). Step 3 is now freshness-gated: a flag whose mtime is
+  older than `AI_R_FLAG_STALE_SEC` (default 3600 s; `0` disables the gate,
+  restoring the legacy keep-everything behaviour) is dropped unless the
+  agent's own store shows that session written inside the A3 fresh window
+  (the same store-recency signal the step-6 fallback trusts — extracted into
+  one shared `_store_fresh_sessions` helper); surviving flags are ordered
+  newest-first so the most recently refreshed session leads. A malformed
+  `AI_R_FLAG_STALE_SEC` fails loud.
+
 - **`locate` now finds prefixed ids (`sess_…`) by their bare uuid/prefix.**
   Agents like zcode (and opencode) store session ids with a harness prefix
   (`sess_<uuid>`); the id matcher compared the needle against the full stored
