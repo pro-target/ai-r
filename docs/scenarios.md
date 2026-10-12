@@ -1256,7 +1256,7 @@ no similarity cut-off (re-order, never drop); tail beyond the pool keeps BM25 or
 <summary>Show 1 scenario (STRICT-1)</summary>
 
 ### STRICT-1 — an undeclared tool argument is rejected, not silently dropped `[hermetic-ok]`
-- **Function:** every `mcp__ai-r__*` tool (transport-level `_StrictArgsFastMCP`)
+- **Function:** every `mcp__ai-r__*` tool (transport-level `_StrictArgsMCPServer`)
 - **Goal:** A caller that passes a parameter a verb does not declare gets a loud `invalid_argument`, never a successful-looking but unfiltered result — the failure a self-referential usage audit found in real history (`plan(limit=…)`, `list_sessions(since=…)`).
 - **Preconditions:** a live ai-r MCP server; no vault data required (rejection happens before any read). `[hermetic-ok]`.
 - **Steps:** call `plan(session="anything", limit=1)`; call `list_sessions(since="2026-07-05")`; call a fully-declared control such as `list_sessions(limit=1)` or `detect_current()`.

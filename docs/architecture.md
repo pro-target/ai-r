@@ -268,7 +268,8 @@ records adding an optional shared transport as the fix.
   (`AI_R_HTTP_TOKEN`, constant-time compared via `hmac.compare_digest`, `401`
   otherwise) — **required, fail-closed, for any non-loopback bind** (remote
   without a token is a hard refusal). This raises the SDK floor to
-  `mcp>=1.9.0` (the version that ships `streamable_http_app` +
+  `mcp>=2,<3` (the line that ships `MCPServer.streamable_http_app` taking
+  `stateless_http` / `transport_security` kwargs +
   `TransportSecuritySettings`).
 - **Haystack cache correctness.** The warm-scan cache keys on
   `(agent, uuid, mtime)`; on an mtime change the stale key is now **purged**
@@ -278,18 +279,21 @@ records adding an optional shared transport as the fix.
   server cannot grow unbounded RSS. A single oversize session stays servable.
 - **Concurrency — sync tools must not block the loop (amendment).** A shared
   server only pays off if it serves N agents *at once*, but the tool functions
-  are synchronous corpus scans and FastMCP runs a sync tool **inline on the
+  are synchronous corpus scans and mcp 1.x ran a sync tool **inline on the
   event loop** (`func_metadata.py`: `return fn(**args)`). So a single in-flight
   read/search froze the loop and starved every other connection until uvicorn's
   keep-alive dropped it (`not connected` under N parallel readers) — the shared
   cache was already thread-safe (`_haystack_cache_lock`), but the tools never
-  actually ran concurrently. Fix: `_StrictArgsFastMCP.call_tool` offloads a sync
-  tool's dispatch to a worker thread (`anyio.to_thread.run_sync`), so concurrent
-  calls run in parallel; and `timeout_keep_alive` is raised to
-  `AI_R_MCP_KEEPALIVE_SEC` (default 120 s, above the max expected tool duration)
-  so a briefly-idle connection is not dropped. The offload is gated on
-  `not tool.is_async`; **stdio serves one request at a time, so the extra hop is
-  a behavioral no-op there** (back-compat preserved).
+  actually ran concurrently. Fix (mcp 1.x): `_StrictArgsFastMCP.call_tool`
+  offloaded a sync tool's dispatch to a worker thread. Since the mcp 2.x
+  migration the SDK does this itself (`FuncMetadata.call_fn` runs a sync tool
+  via `anyio.to_thread.run_sync`), so the override no longer offloads — the
+  spec (worker-thread dispatch, N calls in flight at once) is pinned by
+  `tests/test_mcp_concurrency.py`; and `timeout_keep_alive` is raised to
+  `AI_R_MCP_KEEPALIVE_SEC` (default 120 s, above the max expected tool
+  duration) so a briefly-idle connection is not dropped. **stdio serves one
+  request at a time, so the worker hop is a behavioral no-op there**
+  (back-compat preserved).
 - **Back-compat / fail-closed.** `stdio` stays the default — existing sessions
   are unaffected until they opt in, with no mid-session break. An unrecognized
   `AI_R_MCP_TRANSPORT` is a hard error, never a silent fallback to the wrong
@@ -383,12 +387,13 @@ This ADR records the fix: repeat reads are now cached per process.
 
 ### ADR: fail-loud on unknown MCP arguments (surface-wide)
 
-- **What.** `mcp_server.mcp` is a `_StrictArgsFastMCP` subclass; its `call_tool`
+- **What.** `mcp_server.mcp` is a `_StrictArgsMCPServer` subclass (mcp 2.x
+  `MCPServer`; was `_StrictArgsFastMCP` on mcp 1.x); its `call_tool`
   rejects any argument key absent from the called tool's declared schema with
   `{"error": "invalid_argument", …}` (listing the accepted parameters) *before*
   the tool runs. Unknown *tool names* fall through to the base class; declared
   arguments are never short-circuited.
-- **Why.** FastMCP builds a pydantic model per tool from its signature and
+- **Why.** The SDK builds a pydantic model per tool from its signature and
   pydantic **silently drops** unknown keys, so an invented/mistyped parameter
   produced a successful-looking but **unfiltered** result — the same "never a
   silent wrong answer" failure the `kind` tombstone (ADR above) was created to
@@ -404,6 +409,32 @@ This ADR records the fix: repeat reads are now cached per process.
 - **Boundaries.** Deterministic, no data read on rejection. Pure helper
   `_unknown_tool_args` is unit-tested; `tests/test_mcp_strict_args.py` covers
   the phantom cases and declared-argument passthrough.
+
+### ADR: mcp 2.x migration (FastMCP → MCPServer)
+
+- **What.** The dependency floor moves `mcp>=1.9.0` → `mcp>=2,<3`
+  (`pyproject.toml`). `mcp 2.x` renamed `mcp.server.fastmcp.FastMCP` →
+  `mcp.server.mcpserver.MCPServer` and moved the conversion seam: `call_tool`
+  now returns a protocol `CallToolResult` (built via `FuncMetadata.call_fn` /
+  `convert_result`) instead of the raw tool value. `_StrictArgsFastMCP` became
+  `_StrictArgsMCPServer(MCPServer)`; the unknown-argument guard is unchanged
+  (same `invalid_argument` envelope, checked before dispatch), but the error
+  dict is wrapped with `tool.fn_metadata.convert_result` so the wire payload is
+  byte-identical to a tool returning it.
+- **Removed seam.** mcp 2.x runs sync tools on a worker thread itself
+  (`FuncMetadata.call_fn`: `anyio.to_thread.run_sync`), so the mcp 1.x
+  `_call_tool_blocking` / `anyio.run` offload hack is deleted; the spec it
+  pinned (off-loop + concurrent sync dispatch) stays enforced by
+  `tests/test_mcp_concurrency.py` against the SDK path.
+- **http wiring.** `streamable_http_app()` takes `stateless_http` /
+  `transport_security` per call (no `mcp.settings` pinning in 2.x), so
+  `serve.apply_http_settings` now *returns the app kwargs* instead of mutating
+  settings; `run_http` passes them to `mcp.streamable_http_app(**kwargs)`.
+  The in-memory test transport `mcp.shared.memory.create_connected_server_and_client_session`
+  is gone; tests use `mcp.client._memory.InMemoryTransport` + `ClientSession`.
+- **Boundaries.** No tool surface changed: same tools, signatures, docstrings
+  and payloads. Pinned by `tests/test_mcp_strict_args.py` (unwrap the
+  `CallToolResult` JSON text) and `tests/test_serve_stateless.py`.
 
 ### ADR: `user_ref` — a user-attachment dimension over `user_turn` (Q1)
 
