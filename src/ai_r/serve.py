@@ -18,14 +18,12 @@ nothing is exposed off-box and existing stdio sessions keep working unchanged.
 Concurrency
 -----------
 The shared server only pays off if it serves N agents *at once*.  Our MCP tool
-functions are synchronous and corpus-scanning, and FastMCP runs a sync tool
-inline on the event loop — so one slow read/search would freeze every other
-connection.  Two guards make the http transport genuinely concurrent: the sync
-tool dispatch is offloaded to a worker thread (see
-``ai_r.mcp_server._StrictArgsFastMCP.call_tool``; the body-search cache is
-thread-safe for exactly this), and ``timeout_keep_alive`` is raised well above
-the max expected tool duration (``AI_R_MCP_KEEPALIVE_SEC``) so a briefly-idle
-keep-alive connection is not dropped as "not connected".
+functions are synchronous and corpus-scanning, and mcp 2.x runs a sync tool
+on a worker thread itself — so a slow read/search never freezes the event
+loop (see ``ai_r.mcp_server._StrictArgsMCPServer.call_tool``; the body-search
+cache is thread-safe for exactly this), and ``timeout_keep_alive`` is raised
+well above the max expected tool duration (``AI_R_MCP_KEEPALIVE_SEC``) so a
+briefly-idle keep-alive connection is not dropped as "not connected".
 
 Statelessness (D3)
 ------------------
@@ -58,9 +56,10 @@ DEFAULT_IDLE_SEC = 900.0
 # uvicorn drops an idle keep-alive connection after this many seconds. The
 # default (5 s) is shorter than a cold full-corpus read/search, so a client
 # whose connection briefly idles between requests while another request runs
-# could be dropped ("not connected").  Sync tools now run off the event loop
-# (mcp_server: thread offload), but keep a generous floor well above the
-# expected max tool duration as defense-in-depth.  Env-tunable, AI_R_* convention.
+    # could be dropped ("not connected").  Sync tools run off the event loop
+    # (mcp 2.x worker-thread dispatch), but keep a generous floor well above
+    # the expected max tool duration as defense-in-depth.  Env-tunable,
+    # AI_R_* convention.
 DEFAULT_KEEPALIVE_SEC = 120.0
 
 # Optional shared bearer token for the http transport.  When set, every
@@ -198,13 +197,13 @@ def require_http_token(
 def transport_security_settings(host: str, port: int) -> Any:
     """Build DNS-rebinding protection matching the actual bind target.
 
-    The SDK auto-enables a loopback-only allowlist when a FastMCP instance is
-    constructed with a localhost host, but our ``mcp`` object is built at
-    import time before the env-driven host/port are known — and for a
-    deliberate remote bind (``AI_R_MCP_ALLOW_REMOTE=1``) the loopback-only
-    allowlist would reject the operator's own Host/Origin. So we compute the
-    settings here from the resolved host/port and always keep DNS-rebinding
-    protection ON (never a silent open door).
+    The SDK auto-enables a loopback-only allowlist when an MCPServer app is
+    built for a localhost host, but our app is built at serve time from the
+    env-driven host/port — and for a deliberate remote bind
+    (``AI_R_MCP_ALLOW_REMOTE=1``) the loopback-only allowlist would reject the
+    operator's own Host/Origin. So we compute the settings here from the
+    resolved host/port and always keep DNS-rebinding protection ON (never a
+    silent open door).
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -392,22 +391,26 @@ def _release_semantic_if_idle() -> bool:
 
 def apply_http_settings(
     mcp: Any, env: Mapping[str, str], host: str, port: int
-) -> None:
-    """Pin the env-resolved http settings onto the FastMCP ``mcp`` object.
+) -> dict[str, Any]:
+    """Resolve the env-driven streamable-http settings into app kwargs.
 
     The testable imperative twin of the wiring ``run_http`` does before
-    building the streamable-http app (the module-level ``mcp`` is built at
-    import time, before the env-driven host/port are known): the
+    building the streamable-http app (mcp 2.x: ``streamable_http_app`` takes
+    ``stateless_http`` / ``transport_security`` per call — there is no
+    ``mcp.settings`` pinning anymore).  Returns the kwargs
+    :func:`run_http` passes to ``mcp.streamable_http_app``: the
     DNS-rebinding allowlist for the resolved host/port, and stateless
     dispatch (:func:`resolve_stateless`, D3) so the session manager is
     constructed WITHOUT a per-transport session registry.
     """
-    mcp.settings.transport_security = transport_security_settings(host, port)
-    mcp.settings.stateless_http = resolve_stateless(env)
+    return {
+        "stateless_http": resolve_stateless(env),
+        "transport_security": transport_security_settings(host, port),
+    }
 
 
 def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragma: no cover
-    """Serve the FastMCP app over streamable-http with idle self-exit.
+    """Serve the MCPServer app over streamable-http with idle self-exit.
 
     Uses a systemd-passed socket when present (socket-activation); otherwise
     binds ``AI_R_MCP_HOST``:``AI_R_MCP_PORT`` (localhost:8756 by default).
@@ -436,10 +439,10 @@ def run_http(mcp: Any, env: Optional[Mapping[str, str]] = None) -> int:  # pragm
     # (the module-level ``mcp`` was built before host/port were known).
     token = resolve_http_token(env)
     require_http_token(host, token, env)
-    apply_http_settings(mcp, env, host, port)
+    app_kwargs = apply_http_settings(mcp, env, host, port)
 
     state: dict = {"last": time.monotonic(), "active": 0}
-    inner = mcp.streamable_http_app()
+    inner = mcp.streamable_http_app(**app_kwargs)
     if token is not None:
         inner = _bearer_auth_asgi(inner, token)
     app = _activity_asgi(inner, state)
