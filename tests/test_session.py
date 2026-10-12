@@ -863,3 +863,109 @@ def test_detect_session_fallback_priority_zcode_before_pi(
     sources = {c.source for c in candidates}
     assert sources == {"zcode-recent"}
     assert candidates[0].session_id == zc_sid
+
+
+# ---------------------------------------------------------------------------
+# D2: flag-file freshness gate (forensics 2026-09-29)
+# ---------------------------------------------------------------------------
+
+
+def _age_flag(path: Path, seconds: float) -> None:
+    """Wind a flag file's mtime back by ``seconds`` (the stale case)."""
+    old = datetime.now().timestamp() - seconds
+    os.utime(path, (old, old))
+
+
+def test_stale_flag_dropped_fresh_kept(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """The daemon scenario: no env at all; a dead session's leftover flag
+    (mtime frozen a day ago) must be dropped while the refreshed flag of
+    the live session stays — previously readdir order decided, and the
+    2026-09-29 forensics caught a 23h-dead session reported as current."""
+    stale_sid = "sess_b0ede3c8-0000-4000-8000-000000000001"
+    fresh_sid = "sess_2934a4ce-0000-4000-8000-000000000002"
+    stale_flag = _write_per_session(identity_dir, "zcode", stale_sid)
+    _write_per_session(identity_dir, "zcode", fresh_sid)
+    _age_flag(stale_flag, 24 * 3600)
+    candidates = detect_session_candidates()
+    ids = [c.session_id for c in candidates]
+    assert stale_sid not in ids
+    assert candidates[0].session_id == fresh_sid
+    assert candidates[0].source == "ts_file:zcode"
+
+
+def test_stale_flag_newest_first_ordering(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Two live flags: the most recently refreshed one leads."""
+    older_sid = "sess_11111111-0000-4000-8000-000000000001"
+    newer_sid = "sess_22222222-0000-4000-8000-000000000002"
+    older_flag = _write_per_session(identity_dir, "zcode", older_sid)
+    _write_per_session(identity_dir, "zcode", newer_sid)  # written second
+    _age_flag(older_flag, 300)  # still inside the default 1h window
+    candidates = [
+        c for c in detect_session_candidates() if c.agent is AgentName.ZCODE
+    ]
+    assert [c.session_id for c in candidates] == [newer_sid, older_sid]
+
+
+def test_all_flags_stale_falls_back_to_store(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Stale flags must not suppress the step-6 store-recency fallback:
+    with every flag dropped the live store session surfaces."""
+    stale_sid = "sess_b0ede3c8-0000-4000-8000-000000000001"
+    flag = _write_per_session(identity_dir, "zcode", stale_sid)
+    _age_flag(flag, 24 * 3600)
+    live_sid = "sess_2934a4ce-0000-4000-8000-000000000002"
+    _write_zcode_rollout(_fake_home(), live_sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    assert [c.session_id for c in candidates] == [live_sid]
+    assert candidates[0].source == "zcode-recent"
+
+
+def test_stale_mtime_kept_when_store_confirms_activity(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """A flag whose mtime is old BUT whose session the store shows written
+    right now stays (belt-and-braces for a hook that does not refresh
+    mtimes) — with the ts_file provenance, not the heuristic one."""
+    sid = "sess_33333333-0000-4000-8000-000000000003"
+    flag = _write_per_session(identity_dir, "zcode", sid)
+    _age_flag(flag, 2 * 3600)
+    _write_zcode_rollout(_fake_home(), sid, datetime.now(timezone.utc))
+    candidates = detect_session_candidates()
+    assert [c.session_id for c in candidates] == [sid]
+    assert candidates[0].source == "ts_file:zcode"
+    assert candidates[0].verified is True
+
+
+def test_flag_gate_disabled_keeps_stale(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AI_R_FLAG_STALE_SEC=0 disables the gate (legacy keep-everything)."""
+    monkeypatch.setenv("AI_R_FLAG_STALE_SEC", "0")
+    stale_sid = "sess_44444444-0000-4000-8000-000000000004"
+    flag = _write_per_session(identity_dir, "zcode", stale_sid)
+    _age_flag(flag, 48 * 3600)
+    candidates = detect_session_candidates()
+    assert [c.session_id for c in candidates] == [stale_sid]
+
+
+def test_resolve_flag_stale_sec_matrix() -> None:
+    from ai_r.session import (
+        DEFAULT_FLAG_STALE_SEC,
+        FLAG_STALE_SEC_ENV,
+        resolve_flag_stale_sec,
+    )
+
+    assert resolve_flag_stale_sec({}) == DEFAULT_FLAG_STALE_SEC
+    assert resolve_flag_stale_sec({FLAG_STALE_SEC_ENV: ""}) == (
+        DEFAULT_FLAG_STALE_SEC
+    )
+    assert resolve_flag_stale_sec({FLAG_STALE_SEC_ENV: " 120 "}) == 120.0
+    assert resolve_flag_stale_sec({FLAG_STALE_SEC_ENV: "0"}) is None
+    assert resolve_flag_stale_sec({FLAG_STALE_SEC_ENV: "-5"}) is None
+    with pytest.raises(ValueError, match=FLAG_STALE_SEC_ENV):
+        resolve_flag_stale_sec({FLAG_STALE_SEC_ENV: "soon"})
