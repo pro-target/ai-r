@@ -31,7 +31,7 @@ from typing import (
     Tuple,
 )
 
-from ai_r.parsers import PARSERS, Message, target_agents
+from ai_r.parsers import PARSERS, Message, cached_list_sessions, target_agents
 from ai_r.redact import redact_value
 
 from ai_r.events._common import (
@@ -115,7 +115,7 @@ class _SessionMessageCache:
             return self._cache[session_id]
         for agent_name in target_agents(agent):
             parser = PARSERS[agent_name]
-            for sess in parser.list_sessions():
+            for sess in cached_list_sessions(agent_name, parser):
                 if sess.uuid != session_id:
                     continue
                 messages: list[Message] = []
@@ -181,7 +181,7 @@ def _edit_input_from_event(
 
     for agent_name in target_agents(event.agent):
         parser = PARSERS[agent_name]
-        for sess in parser.list_sessions():
+        for sess in cached_list_sessions(agent_name, parser):
             if sess.uuid != session_id:
                 continue
             try:

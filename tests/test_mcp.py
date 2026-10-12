@@ -3073,3 +3073,44 @@ def test_plan_tool_feedback_empty_for_codex(
     # No approval flow → honest empty feedback, plans untouched.
     assert res["feedback"] == [] and res["feedback_count"] == 0
     assert res["count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# preview truncation clarity: the cut must carry its own retrieval path
+# (an auditor agent once read text_truncated as "no full text in transcript")
+# ---------------------------------------------------------------------------
+
+
+def test_query_truncated_preview_carries_text_note(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut preview says OUT LOUD that the full body is one get_body away."""
+    long_text = "context " * 300
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-note-1", user_text=long_text
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-note-1")
+    assert res["count"] == 1
+    ev = res["events"][0]
+    assert ev["text_truncated"] is True
+    assert ev["text_note"] == "preview only; full body via get_body(id)"
+    # Top-level honest count of cut previews (absent when nothing was cut).
+    assert res["previews_truncated"] == 1
+
+
+def test_query_no_previews_truncated_key_when_nothing_cut(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Short texts emit no note and no top-level previews_truncated key."""
+    _write_claude_body_session(
+        tmp_sessions_dir, uuid="preview-note-2", user_text="tiny turn"
+    )
+    _patch_claude_base(tmp_sessions_dir, monkeypatch)
+
+    res = query(type="user_turn", agent="claude", session="preview-note-2")
+    ev = res["events"][0]
+    assert "text_truncated" not in ev
+    assert "text_note" not in ev
+    assert "previews_truncated" not in res

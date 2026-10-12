@@ -135,6 +135,18 @@ class TestNoneCases:
         )
         assert resume_command(sess) is None
 
+    def test_zcode_electron_launcher_is_none(self) -> None:
+        # The ``zcode`` binary is an Electron desktop-app launcher (no
+        # flag surface) — no real resume command exists, absence is honest
+        # even with a known project dir.
+        sess = _session(
+            agent=AgentName.ZCODE,
+            uuid="sess_11111111-2222-3333-4444-555555555555",
+            path="/data/.zcode/cli/db/db.sqlite",
+            project_dir="/home/u/dev/x",
+        )
+        assert resume_command(sess) is None
+
     def test_subagent_kind_is_none(self) -> None:
         sess = _session(kind="subagent", project_dir="/home/u/dev/x")
         assert resume_command(sess) is None

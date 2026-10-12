@@ -60,7 +60,7 @@ __all__ = [
 # ``parsers/models.py`` → ``Message.tool_result.is_error``).  Kept in sync
 # with ``find_tool_calls``'s ``is_error_reliable``.
 ERROR_FLAG_RELIABLE_AGENTS: frozenset[AgentName] = frozenset(
-    {AgentName.CLAUDE, AgentName.OPENCODE}
+    {AgentName.CLAUDE, AgentName.OPENCODE, AgentName.ZCODE}
 )
 
 # How many closing *human* user turns the verdict dictionary scans.  The
@@ -86,6 +86,9 @@ _NON_HUMAN_MARKERS = (
     "<local-command-",
     "<task-notification>",
     "<command-name>",
+    # ZCode harness insertion (system-reminder style, mid-conversation):
+    # a TodoWrite nudge, never the user's own words.
+    "The TodoWrite tool hasn't been used recently",
 )
 
 # A "user turn" longer than this is pasted/injected content (a log, a diff,
@@ -154,6 +157,74 @@ _NEGATIVE_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 
+# Tail-exchange patterns (SP-1, calibrated on ses_04deb587). A late user
+# scope-question + an adjacent agent admission of non-achievement is a
+# strong signal that the originally-promised priority was *not* met, even
+# if a positive marker ("ок") appears earlier in the dialog. Without this
+# signal the classifier reported ``success``, masking the unfinished
+# priority and misleading the next session/auditor.
+#
+# Patterns are intentionally narrow: a generic "что?" mid-dialog or a
+# benign "частично" in a progress update must NOT trip the exchange — the
+# pair (user-prompted scope check + agent admission) is what makes it a
+# retreat from the originally-promised scope.
+
+# How many trailing messages to scan for the (user, assistant) pair.
+_TAIL_EXCHANGE_WINDOW = 10
+
+# User-side scope-question patterns. The user is *checking* whether the
+# promised scope was delivered — phrased as a question or status request.
+_SCOPE_QUESTION_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    # -- Russian --
+    _marker(
+        "scope-closed-ru",
+        r"закрыт\w* ли|что закрыт|главное закрыт|цели закрыт"
+        r"|закрыт\w* .* (цели|цель|задач|хвост)"
+        r"|(главные|все|какие) (цели|задачи|хвосты) закрыт\w*",
+    ),
+    _marker(
+        "scope-achieved-ru",
+        r"что достигнут|цель достигнут|приоритет выполнен"
+        r"|главн\w* цель\w*|достигнут\w* ли",
+    ),
+    _marker("scope-status-ru", r"каков статус|какой статус|что по итогу"),
+    # Narrow on purpose: a bare "итог" is a common connector; only the
+    # explicit question forms prompt a scope-check answer.
+    _marker("scope-summary-ru", r"что в итоге|какой итог|итог\?"),
+    # -- English --
+    _marker(
+        "scope-closed-en",
+        r"are (they|the|all|these) .* closed|is it (done|closed)|what's done",
+    ),
+    _marker(
+        "scope-achieved-en",
+        r"did we (achieve|finish|complete)|goals? (achieved|met|closed)",
+    ),
+    _marker("scope-summary-en", r"summary of|what was accomplished"),
+)
+
+# Agent-side admission of non-achievement. The agent concedes that the
+# promised scope was NOT met (not a benign progress update).
+_ADMISSION_MARKERS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    # -- Russian --
+    _marker("not-closed-ru", r"не закрыт|не закрыла|не закрыло"),
+    _marker("not-achieved-ru", r"не достиг|не выполнен|не успел|не получилось"),
+    # Narrow on purpose: bare "частично" is benign progress; require a
+    # scope-qualifier (mirrors the English `partially (done|closed)` form).
+    _marker(
+        "partial-ru",
+        r"частично (закрыт|выполнен|сделан|готов)"
+        r"|только \d+ из|0 из \d+|0 полностью",
+    ),
+    # -- English --
+    _marker(
+        "not-closed-en",
+        r"not (closed|done|reached|achieved|finished|completed)",
+    ),
+    _marker("partial-en", r"only \d+ of|0 of \d+|0 fully|partially (done|closed)"),
+)
+
+
 def _is_human_text(text: str) -> bool:
     """Whether a stripped user-turn text reads as the user's own words.
 
@@ -200,6 +271,58 @@ def _match_markers(
     """Labels of every marker that fires in at least one text (dict order)."""
     joined = "\n".join(texts)
     return [label for label, pattern in markers if pattern.search(joined)]
+
+
+def _detect_tail_exchange(
+    messages: Sequence[Message],
+) -> tuple[list[str], list[str]] | None:
+    """Find a tail-exchange pair: a *human* user scope-question followed
+    (within :data:`_TAIL_EXCHANGE_WINDOW`) by an adjacent assistant turn
+    carrying an admission of non-achievement.
+
+    The pair pattern (user-prompted scope check + agent admission) is what
+    distinguishes a real retreat from the originally-promised scope from a
+    benign progress update or a mid-dialog question. Returns
+    ``(scope_question_labels, admission_labels)`` if a pair is found,
+    else ``None``.
+    """
+    if len(messages) < 2:
+        return None
+    tail = list(messages[-_TAIL_EXCHANGE_WINDOW:])
+
+    user_indices = [
+        i
+        for i, msg in enumerate(tail)
+        if msg.role == "user" and _is_human_text((msg.text or "").strip())
+    ]
+    if not user_indices:
+        return None
+    asst_indices = [
+        i for i, msg in enumerate(tail) if msg.role == "assistant" and (msg.text or "").strip()
+    ]
+    if not asst_indices:
+        return None
+
+    for ui in user_indices:
+        user_text = tail[ui].text or ""
+        sq_hits = [
+            label
+            for label, pat in _SCOPE_QUESTION_MARKERS
+            if pat.search(user_text)
+        ]
+        if not sq_hits:
+            continue
+        # The next assistant turn after this user turn answers the question.
+        next_asst = next((ai for ai in asst_indices if ai > ui), None)
+        if next_asst is None:
+            continue
+        asst_text = tail[next_asst].text or ""
+        adm_hits = [
+            label for label, pat in _ADMISSION_MARKERS if pat.search(asst_text)
+        ]
+        if adm_hits:
+            return sq_hits, adm_hits
+    return None
 
 
 def session_outcome(
@@ -289,6 +412,24 @@ def session_outcome(
         status = "failure"
     else:
         status = "unknown"
+
+    # Tail-exchange (SP-1): a late user scope-question answered by an agent
+    # admission of non-achievement downgrades ``success`` / ``unknown`` to
+    # ``mixed`` (never overrides an already-failure verdict). Calibrated on
+    # real history (ses_04deb587) where a positive "ок" coexisted with a
+    # final exchange in which the agent admitted the primary goal was not
+    # closed — without this signal the classifier masked the unfinished
+    # priority.
+    tail_exchange = _detect_tail_exchange(messages)
+    if tail_exchange is not None:
+        sq_labels, adm_labels = tail_exchange
+        if status != "failure":
+            status = "mixed"
+        signals.append(
+            f"tail-exchange: user scope-question "
+            f"({', '.join(sq_labels)}) answered by agent admission "
+            f"({', '.join(adm_labels)})"
+        )
 
     return {
         "status": status,

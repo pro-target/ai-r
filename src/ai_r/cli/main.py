@@ -21,6 +21,7 @@ from ai_r.cli.commands import (
     file_frequency,
     find_file_edits,
     find_tool_calls,
+    get_body_cmd,
     list_cmd,
     locate_cmd,
     read_cmd,
@@ -41,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-r",
         description=(
-            "Inspect Claude, Codex, OpenCode, Antigravity and Pi sessions."
+            "Inspect Claude, Codex, OpenCode, Antigravity, Pi and ZCode "
+            "sessions."
         ),
     )
     parser.add_argument(
@@ -53,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_cmd.register(sub)
     read_cmd.register(sub)
+    get_body_cmd.register(sub)
     search_cmd.register(sub)
     find_file_edits.register(sub)
     find_tool_calls.register(sub)

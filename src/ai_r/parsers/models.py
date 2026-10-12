@@ -26,6 +26,7 @@ class AgentName(str, Enum):
     OPENCODE = "OPENCODE"
     ANTIGRAVITY = "ANTIGRAVITY"
     PI = "PI"
+    ZCODE = "ZCODE"
 
 
 @dataclass(frozen=True)
@@ -92,8 +93,11 @@ class Session:
             ``"codex_vscode"``, ``"Codex Desktop"``), passed through
             verbatim, no invented taxonomy; Antigravity —
             ``"antigravity-ide"`` | ``"antigravity-cli"`` (from which
-            brain root holds the session).  OpenCode and Pi carry no
-            launch-surface signal → always ``None``.
+            brain root holds the session); ZCode — the rollout model-io
+            record's raw ``querySource`` string (e.g. ``"main_turn"`` |
+            ``"subagent"``), passed through verbatim (DB-registered
+            sessions carry no equivalent signal → ``None``).  OpenCode
+            and Pi carry no launch-surface signal → always ``None``.
         models: Unique model identifiers observed in the session, in
             order of first appearance — the session-level rollup of the
             per-message :attr:`Message.model` signal.  Sources: Claude —
@@ -161,7 +165,9 @@ class Message:
         qa: Tuple of ``{"question": str, "options": tuple[str, ...],
             "answer": str}`` dicts capturing the user's reply to an
             interactive agent question (Claude ``AskUserQuestion``,
-            Codex ``request_user_input``, OpenCode ``question``).  Each
+            Codex ``request_user_input``, OpenCode ``question``, ZCode
+            ``AskUserQuestion`` — a Claude-shaped tool part whose
+            answer lives in the ``state.output`` result string).  Each
             entry pairs the *question text* with the *answer the user
             chose* so a downstream reader never sees a bare "option B"
             without the question it answered.  ``options`` lists the

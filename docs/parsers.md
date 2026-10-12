@@ -14,9 +14,12 @@ this file.
 | opencode     | yes            | yes                 | Reads message bodies from `part` table.|
 | pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
 | antigravity  | optional       | optional            | Real-data smoke skips when absent.     |
+| zcode        | yes            | yes                 | SQLite `~/.zcode/cli/db/db.sqlite`     |
+|              |                |                     | (canonical) + rollout JSONL fallback.  |
 
 Status confirmed 2026-06-21 via `ai-r list` / `ai-r read
---messages` against real session stores.
+--messages` against real session stores (zcode row re-confirmed
+2026-09-23).
 
 ### Antigravity (optional real-data smoke)
 
