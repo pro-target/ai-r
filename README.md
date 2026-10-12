@@ -317,7 +317,7 @@ many idle seconds (default `300`); the next request transparently re-loads it.
 
 Optional extra — `http`: `AI_R_EXTRAS=http bash install.sh` (or
 `pip install "ai-r[http]"`) adds [uvicorn](https://www.uvicorn.org) and enables
-a **shared streamable-http transport** (requires `mcp>=1.9.0`).
+a **shared streamable-http transport** (requires `mcp>=2`).
 
 - **Why.** By default every agent spawns its own `ai-r-mcp` over stdio — under
   multi-agent fan-out that is N processes, each with a cold cache, re-scanning
