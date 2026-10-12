@@ -64,7 +64,9 @@ def test_builder_scans_all_agents_when_unfiltered(
 ) -> None:
     diag = empty_result_diagnostics()
     agents = set(_by_agent(diag))
-    assert agents == {"claude", "codex", "opencode", "antigravity", "pi"}
+    assert agents == {
+        "claude", "codex", "opencode", "antigravity", "pi", "zcode",
+    }
 
 
 def test_builder_since_excludes_corpus_hint(fake_claude_session: Path) -> None:

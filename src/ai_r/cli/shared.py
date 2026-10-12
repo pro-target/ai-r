@@ -274,6 +274,14 @@ def _format_session_detail(
                 tool_names = msg.get("tool_use") or []
                 if tool_names:
                     lines.append(f"[tool_use: {', '.join(tool_names)}]")
+                # Interactive question→answer pairs (cross-agent parity with
+                # the MCP projection): a bare answer label is useless
+                # without its question, so both are rendered together.
+                for qa in msg.get("qa") or ():
+                    lines.append(
+                        f"[question→answer] Q: {qa.get('question', '')} "
+                        f"A: {qa.get('answer', '')}"
+                    )
     return "\n".join(lines)
 
 
@@ -296,13 +304,25 @@ def _messages_to_dicts(messages: Sequence[Any]) -> List[dict[str, Any]]:
     for msg in messages:
         tool_use = msg.tool_use or ()
         names = [t.get("name", "?") for t in tool_use if isinstance(t, dict)]
-        out.append(
-            {
-                "role": msg.role,
-                "text": msg.text or "",
-                "tool_use": names,
-            }
-        )
+        entry: dict[str, Any] = {
+            "role": msg.role,
+            "text": msg.text or "",
+            "tool_use": names,
+        }
+        # Interactive question→answer pairs — only when present (mirrors
+        # the MCP projection: absent, never an empty placeholder).
+        qa = getattr(msg, "qa", ()) or ()
+        if qa:
+            entry["qa"] = [
+                {
+                    "question": e.get("question", ""),
+                    "options": list(e.get("options", ()) or ()),
+                    "answer": e.get("answer", ""),
+                }
+                for e in qa
+                if isinstance(e, dict)
+            ]
+        out.append(entry)
     return out
 
 

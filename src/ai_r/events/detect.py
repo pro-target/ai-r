@@ -148,12 +148,13 @@ def _current_session_resume(
     """
     if not session_id or not agent:
         return None
-    from ai_r.parsers import PARSERS, coerce_agent
+    from ai_r.parsers import PARSERS, cached_list_sessions, coerce_agent
     from ai_r.resume import resume_command
 
     try:
-        parser = PARSERS[coerce_agent(agent)]
-        sessions = parser.list_sessions()
+        agent_name = coerce_agent(agent)
+        parser = PARSERS[agent_name]
+        sessions = cached_list_sessions(agent_name, parser)
     except (FileNotFoundError, ValueError, OSError, KeyError):
         return None
     for session in sessions:
@@ -197,11 +198,12 @@ def _current_session_activity(
     from datetime import datetime, timezone
 
     from ai_r.activity import session_activity, stall_seconds
-    from ai_r.parsers import PARSERS, coerce_agent
+    from ai_r.parsers import PARSERS, cached_list_sessions, coerce_agent
 
     try:
-        parser = PARSERS[coerce_agent(agent)]
-        sessions = parser.list_sessions()
+        agent_name = coerce_agent(agent)
+        parser = PARSERS[agent_name]
+        sessions = cached_list_sessions(agent_name, parser)
     except (ValueError, OSError, KeyError):
         return None
     for session in sessions:
