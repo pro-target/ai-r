@@ -337,6 +337,10 @@ a **shared streamable-http transport** (requires `mcp>=1.9.0`).
   - `AI_R_MCP_IDLE_SEC` — idle self-exit threshold.
   - `AI_R_MCP_HOST` / `AI_R_MCP_ALLOW_REMOTE` — bind host / allow non-loopback.
   - `AI_R_HTTP_TOKEN` — bearer token (required for a remote bind).
+  - `AI_R_MCP_STATELESS` — stateless request dispatch (default `1`): the
+    long-lived shared server outlives its clients, so a request with a
+    stale `Mcp-Session-Id` is served instead of being rejected with
+    `404 "Session not found"`; `0` restores the stateful registry.
   - `AI_R_HAYSTACK_CACHE_MAX` — search cache ceiling by entry count.
   - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — by total size (an RSS safeguard for a
     long-lived server).

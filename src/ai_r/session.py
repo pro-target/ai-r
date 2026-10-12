@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 from ai_r.agents import detect_agent
 from ai_r.parsers.models import AgentName
@@ -116,17 +117,20 @@ def _read_flag(path: Path) -> Optional[str]:
     return value or None
 
 
-def _per_session_flags(agent: AgentName) -> list[str]:
-    """Return ``session_id`` filenames for ``agent``'s per-session files.
+def _per_session_flags(agent: AgentName) -> list[tuple[str, float]]:
+    """Return ``(session_id, mtime)`` per per-session flag file for ``agent``.
 
     Skips ``current`` and any ``.<dotfile>`` (sidecar data).  Each
     returned name has passed :func:`_is_valid_session_id` so callers do
     not need to re-validate.  Symlinks are excluded (defense-in-depth).
+    The mtime feeds the freshness gate — the sh-layer hook refreshes a
+    live session's flag on every event, so a frozen mtime means the
+    session went quiet (D2).
     """
     base = _agent_dir(agent)
     if not base.is_dir():
         return []
-    out: list[str] = []
+    out: list[tuple[str, float]] = []
     for entry in base.iterdir():
         if entry.name == "current":
             continue
@@ -136,8 +140,75 @@ def _per_session_flags(agent: AgentName) -> list[str]:
             continue
         if not _is_valid_session_id(entry.name):
             continue
-        out.append(entry.name)
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        out.append((entry.name, mtime))
     return out
+
+
+# --- Flag-file freshness gate (D2, forensics 2026-09-29) --------------------
+#
+# The sh-layer hub hook writes a per-session flag file but nothing ever
+# removes it, so the registry accumulates flags of LONG-DEAD sessions.  The
+# shared MCP HTTP daemon (no caller env) fell into step 3 with no other
+# signal and returned a days-old session as "current" (readdir order put
+# the oldest flag first) while also suppressing the step-6 store-recency
+# fallback.  A flag is therefore kept only while it is provably live:
+# refreshed within the stale window, or the agent's own store shows the
+# session written inside the A3 fresh window (the same recency signal
+# `_store_recent_candidates` trusts).
+
+FLAG_STALE_SEC_ENV = "AI_R_FLAG_STALE_SEC"
+DEFAULT_FLAG_STALE_SEC = 3600.0
+
+
+def resolve_flag_stale_sec(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[float]:
+    """Flag-file stale threshold in seconds; ``None`` disables the gate.
+
+    ``AI_R_FLAG_STALE_SEC`` overrides (0/negative disables — the legacy
+    keep-everything behaviour); unset/blank → :data:`DEFAULT_FLAG_STALE_SEC`.
+    A malformed value fails loud (fail-closed style of ``resolve_transport``).
+    """
+    env = os.environ if env is None else env
+    raw = (env.get(FLAG_STALE_SEC_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_FLAG_STALE_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"invalid {FLAG_STALE_SEC_ENV}={raw!r}: expected seconds "
+            "(0 disables the flag freshness gate)"
+        )
+    return value if value > 0 else None
+
+
+def _flag_fresh_entries(
+    agent: AgentName,
+    entries: list[tuple[str, float]],
+    stale_sec: float,
+) -> list[tuple[str, float]]:
+    """Drop provably-stale flag entries; survivors ordered newest-first.
+
+    Stale-by-mtime entries survive only when the agent's store shows that
+    session updated inside the A3 fresh window (belt-and-braces for a hook
+    that does not refresh mtimes).  Store cross-check happens at most once
+    per agent and only when something is actually stale.
+    """
+    now = time.time()
+    fresh: list[tuple[str, float]] = []
+    stale: list[tuple[str, float]] = []
+    for entry in entries:
+        (fresh if (now - entry[1]) <= stale_sec else stale).append(entry)
+    if stale:
+        recent = _store_recent_uuids(agent)
+        fresh.extend(e for e in stale if e[0] in recent)
+    fresh.sort(key=lambda e: (-e[1], e[0]))
+    return fresh
 
 
 def _read_self(flag_dir: Path, session_id: str) -> Optional[Tuple[int, int]]:
@@ -341,12 +412,17 @@ def _env_candidates() -> list[SessionCandidate]:
 def _per_session_candidates(
     priority_agent: Optional[AgentName],
 ) -> list[SessionCandidate]:
-    """Step 3: emit one candidate per per-session flag file.
+    """Step 3: emit one candidate per LIVE per-session flag file.
 
     ``priority_agent`` (env-detected agent, if any) is scanned first so
     the cascade still prefers the running agent.  Symlinks, ``current``,
-    and dotfiles are skipped.  Per-agent shape validation applies.
+    and dotfiles are skipped.  Per-agent shape validation applies.  The
+    D2 freshness gate drops flags that are provably stale (see
+    :func:`_flag_fresh_entries`); survivors are ordered newest-flag-first
+    so a dead session's leftover flag can no longer shadow a live one by
+    directory order.
     """
+    stale_sec = resolve_flag_stale_sec()
     out: list[SessionCandidate] = []
     seen: set[tuple[AgentName, str]] = set()
     order: list[AgentName] = []
@@ -356,7 +432,10 @@ def _per_session_candidates(
         if agent_name not in order:
             order.append(agent_name)
     for agent_name in order:
-        for session_id in _per_session_flags(agent_name):
+        entries = _per_session_flags(agent_name)
+        if stale_sec is not None:
+            entries = _flag_fresh_entries(agent_name, entries, stale_sec)
+        for session_id, _mtime in entries:
             key = (agent_name, session_id)
             if key in seen:
                 continue
@@ -461,6 +540,45 @@ _STORE_FALLBACK_AGENTS: "tuple[AgentName, ...]" = (AgentName.ZCODE, AgentName.PI
 _STORE_RECENT_MAX = 3
 
 
+def _store_fresh_sessions(agent: AgentName) -> "list[Any]":
+    """``agent`` sessions updated inside the A3 fresh window, newest first.
+
+    The ONE store-recency signal shared by cascade steps 3 and 6 (DRY):
+    scans the agent's session store via its parser (already date-sorted
+    descending) and returns every session whose ``date`` falls inside the
+    A3 fresh window (:func:`ai_r.activity.stall_seconds`, default 600s).
+    Uncapped — callers apply their own limits.  ``[]`` on any failure
+    (missing store, parser error): an unreadable store never breaks the
+    cascade, it just cannot confirm freshness.
+    """
+    try:
+        from ai_r.activity import stall_seconds
+        from ai_r.parsers import PARSERS
+
+        parser = PARSERS[agent]
+    except Exception:
+        return []
+    try:
+        sessions = parser.list_sessions()  # already sorted date desc
+    except Exception:
+        return []
+    now = datetime.now(timezone.utc)
+    window = stall_seconds()
+    out: "list[Any]" = []
+    for session in sessions:
+        if session.date is None or not session.uuid:
+            continue
+        if (now - session.date).total_seconds() > window:
+            break  # date-desc sort: everything after is older still
+        out.append(session)
+    return out
+
+
+def _store_recent_uuids(agent: AgentName) -> "set[str]":
+    """Uuids :func:`_store_fresh_sessions` shows written RIGHT NOW."""
+    return {s.uuid for s in _store_fresh_sessions(agent)}
+
+
 def _store_recent_candidates(agent: AgentName) -> "list[SessionCandidate]":
     """Step 6: store-recency fallback — ``agent`` sessions updated RIGHT NOW.
 
@@ -494,26 +612,9 @@ def _store_recent_candidates(agent: AgentName) -> "list[SessionCandidate]":
     <agent>/<sid>``, which cascade step 3 already prefers over this
     fallback).
     """
-    try:
-        from ai_r.activity import stall_seconds
-        from ai_r.parsers import PARSERS
-
-        parser = PARSERS[agent]
-    except Exception:
-        return []
-    try:
-        sessions = parser.list_sessions()  # already sorted date desc
-    except Exception:
-        return []
-    now = datetime.now(timezone.utc)
-    window = stall_seconds()
     source = f"{agent.value.lower()}-recent"
     out: "list[SessionCandidate]" = []
-    for session in sessions:
-        if session.date is None or not session.uuid:
-            continue
-        if (now - session.date).total_seconds() > window:
-            break  # date-desc sort: everything after is older still
+    for session in _store_fresh_sessions(agent):
         if not _is_valid_session_id(session.uuid):
             continue
         out.append(
@@ -539,8 +640,11 @@ def detect_session_candidates() -> list[SessionCandidate]:
     1. ``AI_SESSION_ID`` env override — one candidate, ``agent=None``.
     2. Per-agent env vars — one candidate per set var.
     3. Per-session flag files in ``$HOME/.agents/.session-identity/<agent>/``
-       — one candidate per valid filename; env-detected agent scanned
-       first.
+       — one candidate per valid filename, env-detected agent scanned
+       first; the D2 freshness gate drops flags not refreshed within
+       ``AI_R_FLAG_STALE_SEC`` (default 3600 s; 0 disables) unless the
+       agent's store shows the session written inside the A3 fresh
+       window, and survivors are ordered newest-flag-first.
     4. ``current`` pointer (deprecated) — emits a :class:`DeprecationWarning`
        the first time at least one ``current`` candidate is appended.
     5. ``ai-r list`` heuristic — at most one candidate, ``verified=False``.
