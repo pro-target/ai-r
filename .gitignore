@@ -45,6 +45,7 @@ data/
 # Agent-local memory/config (serena, claude code, etc.) — not for repo
 .serena/
 .claude/
+/.mimosa/
 
 # Internal working/audit notes — private, not for public repo
 _docs/
