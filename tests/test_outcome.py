@@ -140,6 +140,12 @@ def test_low_error_rate_is_not_a_failure_signal() -> None:
 def test_unreliable_agent_error_fields_are_none() -> None:
     """Codex has no per-result error flag → None fields, words still decide."""
     assert AgentName.CODEX not in ERROR_FLAG_RELIABLE_AGENTS
+
+
+def test_zcode_error_flag_is_reliable() -> None:
+    """ZCode parts carry ``state.status == "error"`` (zcode.py parser maps it
+    to ``tool_result.is_error``) — error-rate signal must be authoritative."""
+    assert AgentName.ZCODE in ERROR_FLAG_RELIABLE_AGENTS
     msgs = [
         Message(
             role="tool",
@@ -253,6 +259,136 @@ def test_outcome_contains_no_raw_session_text() -> None:
     dumped = json.dumps(out, ensure_ascii=False)
     assert "hunter2x9extra" not in dumped
     assert out["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# Tail-exchange: user scope-question + agent admission of non-achievement
+# downgrades an otherwise-positive outcome to "mixed" (SP-1, calibrated on
+# real history ses_04deb587 where a late "ок" coexisted with a final exchange
+# in which the agent admitted the primary goal was not closed).
+# ---------------------------------------------------------------------------
+
+
+def test_tail_exchange_downgrades_success_to_mixed() -> None:
+    """Positive marker earlier + late user scope-question + agent admission
+    of non-achievement → mixed (NOT success). Calibrated on ses_04deb587:
+    "ок" at :41, then :137 "Закрыты главные цели?" → agent admitted "1/15
+    pilot only, 0 fully closed". Without this signal the classifier reported
+    success, masking the unfinished priority.
+    """
+    msgs = [
+        _user("Оркестратор, отправь аудитора закрыть хвосты цепочки"),
+        _assistant("начинаю"),
+        _user("ок, продолжай"),  # positive marker "ок" — would be success alone
+        _assistant("работаю"),
+        _user("Закрыты главные цели из сессий за 2 недели по цепочке?"),
+        _assistant(
+            "Главная цель НЕ достигнута. Из 15 chain-сессий аудирована "
+            "полностью только одна, 0 полностью закрыто."
+        ),
+    ]
+    out = session_outcome(msgs, AgentName.OPENCODE)
+    assert out["status"] == "mixed"
+    assert out["user_verdict"] == "positive"  # marker still detected
+    assert any("tail-exchange" in s for s in out["signals"])
+
+
+def test_positive_ack_without_scope_question_stays_success() -> None:
+    """Anti-regression: positive "ок" + later benign "что ещё?" + assistant
+    listing more work (no admission of non-achievement) → still success.
+    Ack-then-continue is not a tail-exchange retreat.
+    """
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("что ещё осталось?"),
+        _assistant("вот список: A, B, C"),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
+def test_scope_question_without_admission_stays_success() -> None:
+    """Anti-regression: user scope-question + assistant reporting success
+    (no admission) → still success. Scope-question alone is not a retreat."""
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("Закрыты ли цели?"),
+        _assistant("Да, всё закрыто, готово."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+
+
+def test_admission_without_scope_question_still_success() -> None:
+    """Anti-regression: agent self-reports partial progress mid-dialog
+    WITHOUT a preceding user scope-question → not a tail-exchange.
+    (Mid-dialog progress is normal; only a user-prompted admission signals
+    that the user is checking on the originally-promised scope.)"""
+    msgs = [
+        _user("сделай X, Y, Z"),
+        _assistant("сделал X, но Y и Z частично — продолжаю"),
+        _user("отлично, спасибо"),  # positive marker
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+
+
+def test_benign_partial_does_not_trigger_tail_exchange() -> None:
+    """Anti-regression (precision): scope-question + assistant mentioning
+    bare "частично" in benign context (no scope-qualifier) → NOT a
+    tail-exchange. Calibrated against critic finding on c989ce6 where bare
+    "частично" + bare "итог" could false-positive a real success into mixed.
+    The classifier must stay honest — never guess a retreat from a benign
+    progress update.
+    """
+    msgs = [
+        _user("сделай X"),
+        _assistant("готово"),
+        _user("ок"),
+        _user("итог?"),  # bare "итог?" — narrow scope-summary form
+        _assistant("частично в работе над следующим шагом, но X готово."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    # "итог?" matches scope-summary-ru (narrowed form); "частично в работе"
+    # does NOT match partial-ru (requires "частично (закрыт|выполнен|...)" or
+    # numeric qualifier). No admission → no tail-exchange → stays success.
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
+def test_admission_before_scope_question_no_exchange() -> None:
+    """Anti-regression: assistant admission BEFORE the user scope-question
+    (i.e. mid-dialog admission, then user asks for status) → NOT a
+    tail-exchange. The pair requires the scope-question to come first
+    (the user prompting the admission)."""
+    msgs = [
+        _user("сделай X"),
+        _assistant("Главная цель не достигнута, продолжаю работу"),
+        _user("ок"),
+        _user("итог?"),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "success"
+    assert not any("tail-exchange" in s for s in out["signals"])
+
+
+def test_tail_exchange_english() -> None:
+    """English variant: 'is it done?' + 'only 1/15 closed' → mixed."""
+    msgs = [
+        _user("close the chain tails"),
+        _assistant("starting"),
+        _user("ok"),  # positive
+        _user("Are the main goals closed?"),
+        _assistant("Main goal NOT reached. Only 1 of 15 sessions audited, 0 fully closed."),
+    ]
+    out = session_outcome(msgs, AgentName.CLAUDE)
+    assert out["status"] == "mixed"
+    assert any("tail-exchange" in s for s in out["signals"])
 
 
 # ---------------------------------------------------------------------------

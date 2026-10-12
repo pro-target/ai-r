@@ -349,7 +349,8 @@ def _clean_detect_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for var in (
         "AI_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
         "OPENCODE_SESSION_ID", "AGENT_NAME", "AI_AGENT", "CODING_AGENT",
-        "CODEX_HOME", "CLAUDECODE", "OPENCODE", "AI_SESSION_OUTPUT",
+        "CODEX_HOME", "CLAUDECODE", "OPENCODE", "ZCODE_APP_VERSION",
+        "AI_SESSION_OUTPUT",
     ):
         monkeypatch.delenv(var, raising=False)
     # Point the flag-file base at an empty temp dir so no host flag leaks in.

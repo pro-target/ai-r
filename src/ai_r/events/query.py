@@ -15,6 +15,7 @@ from typing import Any, List, Optional, Sequence
 
 from ai_r.find_file_edits import parse_iso_bound, previous_user_intent
 from ai_r.parsers import PARSERS, Message, target_agents
+from ai_r.parsers._common import _cached_agent_sessions, cached_read_messages
 from ai_r.ranking import bm25_scores as _bm25_scores, tokenize as _tokenize
 from ai_r.redact import merge_redaction_counts, redact_text
 from ai_r.semantic import semantic_order as _semantic_order
@@ -170,12 +171,14 @@ def _attach_intents(event_dicts: List[dict[str, Any]]) -> None:
             return msgs_cache[session_id]
         for agent_name in target_agents(agent or None):
             parser = PARSERS[agent_name]
-            for sess in parser.list_sessions():
+            for sess in _cached_agent_sessions(agent_name.value, parser):
                 if sess.uuid != session_id:
                     continue
                 messages: list[Message] = []
                 try:
-                    messages = parser.read_messages(sess.uuid)
+                    messages = cached_read_messages(
+                        agent_name.value, parser, sess.uuid
+                    )
                 except (FileNotFoundError, ValueError, OSError):
                     messages = []
                 msgs_cache[session_id] = messages

@@ -24,6 +24,7 @@ from typing import (
 )
 
 from ai_r.parsers import PARSERS, coerce_agent, target_agents
+from ai_r.parsers._common import _cached_agent_sessions, cached_read_messages
 from ai_r.redact import merge_redaction_counts, redact_value
 
 from ai_r.events._common import _coerce_tool_input, _plan_ref_value
@@ -205,11 +206,13 @@ def _session_plan_context(
     """
     for agent_name in target_agents(agent_hint):
         parser = PARSERS[agent_name]
-        for sess in parser.list_sessions():
+        for sess in _cached_agent_sessions(agent_name.value, parser):
             if sess.uuid != session_id:
                 continue
             try:
-                messages = parser.read_messages(sess.uuid)
+                messages = cached_read_messages(
+                    agent_name.value, parser, sess.uuid
+                )
             except (FileNotFoundError, ValueError, OSError):
                 return [], []
             agent_lc = agent_name.value.lower()
@@ -307,6 +310,7 @@ def plan(
     group: str = "task",
     agent: Optional[str] = None,
     bodies: str = "final",
+    _events: Optional[List[dict[str, Any]]] = None,
 ) -> List[dict[str, Any]]:
     """Preset: normalized plan atoms for a session (or across sessions).
 
@@ -342,6 +346,13 @@ def plan(
         text, e.g. a steps-only Codex plan) and ``body_source`` —
         ``"approval_edited_by_user"`` when the authoritative user-edited
         approval text overrides the signal body, else ``"plan_signal"``.
+    _events:
+        INTERNAL reuse seam (used by ``audit_brief``'s single-scan pass):
+        pre-materialized ``query(type="plan_event", …, redact=False)``
+        rows for the SAME session/agent, skipping the internal query walk.
+        Row order does not matter (the grouping re-sorts by the id's
+        file-order ``seq``), but the rows must be the same shape ``query``
+        returns.
     """
     if group != "task":
         raise ValueError(f"group must be 'task', got {group!r}")
@@ -353,7 +364,12 @@ def plan(
         raise ValueError(f"bodies must be 'final' or 'none', got {bodies!r}")
     # ``redact=False``: internal call — the public wrappers apply the single
     # emission-time redaction pass on their own final output (F2.1).
-    events = query(type="plan_event", session=session, agent=agent, redact=False)
+    if _events is None:
+        events = query(
+            type="plan_event", session=session, agent=agent, redact=False
+        )
+    else:
+        events = _events
     plans = _assign_plan_kinds(events)
     ids_by_session = _plan_ids_by_session(events)
     agent_by_session = {
@@ -403,6 +419,7 @@ def plan_feedback(
     *,
     agent: Optional[str] = None,
     rounds: str = "all",
+    _events: Optional[List[dict[str, Any]]] = None,
 ) -> List[dict[str, Any]]:
     """All «plan quote → user comment» pairs for a session's plan iterations.
 
@@ -437,10 +454,19 @@ def plan_feedback(
     ``Write`` carry it); other agents honestly contribute nothing.
     Technical failures (permission-stream errors) and bare no-comment
     rejections are filtered out.
+
+    ``_events`` is the INTERNAL reuse seam mirroring :func:`plan`: the
+    caller's pre-materialized ``query(type="plan_event", …, redact=False)``
+    rows for the same session/agent, skipping the internal query walk.
     """
     if rounds not in ("all", "last"):
         raise ValueError(f"rounds must be 'all' or 'last', got {rounds!r}")
-    events = query(type="plan_event", session=session, agent=agent, redact=False)
+    if _events is None:
+        events = query(
+            type="plan_event", session=session, agent=agent, redact=False
+        )
+    else:
+        events = _events
     ids_by_session = _plan_ids_by_session(events)
     agent_by_session = {
         ev.get("session_id") or "": ev.get("agent") for ev in events
@@ -518,11 +544,13 @@ def _resolve_plan_signal(event_id: str) -> Optional[_PlanSignal]:
         return None
     for agent_name in target_agents(owning.agent):
         parser = PARSERS[agent_name]
-        for sess in parser.list_sessions():
+        for sess in _cached_agent_sessions(agent_name.value, parser):
             if sess.uuid != session_id:
                 continue
             try:
-                messages = parser.read_messages(sess.uuid)
+                messages = cached_read_messages(
+                    agent_name.value, parser, sess.uuid
+                )
             except (FileNotFoundError, ValueError, OSError):
                 return None
             signals = _plan_signals_for_session(
@@ -647,11 +675,14 @@ def _resolve_tool_use(event: Any, stream: Sequence[Any]) -> Optional[dict]:
         ).startswith("tool_call"):
             ordinal += 1
     try:
-        parser = PARSERS[coerce_agent(event.agent)]
+        agent_name = coerce_agent(event.agent)
+        parser = PARSERS[agent_name]
     except (KeyError, ValueError):
         return None
     try:
-        messages = parser.read_messages(event.session_id)
+        messages = cached_read_messages(
+            agent_name.value, parser, event.session_id
+        )
     except (FileNotFoundError, ValueError, OSError):
         return None
     if not (0 <= event.message_index < len(messages)):
@@ -684,11 +715,14 @@ def _reread_thinking(event: Any) -> str:
     if not isinstance(idx, int):
         return ""
     try:
-        parser = PARSERS[coerce_agent(event.agent)]
+        agent_name = coerce_agent(event.agent)
+        parser = PARSERS[agent_name]
     except (KeyError, ValueError):
         return ""
     try:
-        messages = parser.read_messages(event.session_id)
+        messages = cached_read_messages(
+            agent_name.value, parser, event.session_id
+        )
     except (FileNotFoundError, ValueError, OSError):
         return ""
     if not (0 <= idx < len(messages)):

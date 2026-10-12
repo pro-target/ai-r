@@ -28,16 +28,22 @@ import pytest
 
 from ai_r import mcp_server as m
 from ai_r.parsers import AgentName, Session
+from ai_r.parsers import _common as _pc
 
 
 @pytest.fixture(autouse=True)
 def _clear_scan_cache():
-    """Isolate every case from warm entries left by earlier tests."""
-    cache = getattr(m, "_agent_sessions_cache", None)
+    """Isolate every case from warm entries left by earlier tests.
+
+    The inventory cache moved to ``ai_r.parsers._common`` (shared with the
+    core hot paths); the MCP wrapper is still its consumer, so the fixture
+    clears the cache at its new home.
+    """
+    cache = getattr(_pc, "_agent_sessions_cache", None)
     if cache is not None:
         cache.clear()
     yield
-    cache = getattr(m, "_agent_sessions_cache", None)
+    cache = getattr(_pc, "_agent_sessions_cache", None)
     if cache is not None:
         cache.clear()
 

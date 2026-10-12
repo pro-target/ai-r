@@ -32,7 +32,7 @@ dependencies = [
     # (``TransportSecuritySettings``: DNS-rebinding Origin/Host validation)
     # that ``ai_r.serve.run_http`` relies on. Older SDKs lack these APIs, so
     # the http transport would crash at import/call time.
-    "mcp>=1.9.0",
+    "mcp<2",
 ]
 
 [project.optional-dependencies]
