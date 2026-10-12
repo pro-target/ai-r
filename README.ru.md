@@ -326,6 +326,10 @@ Claude и Antigravity — остальным `jq` не нужен).
   - `AI_R_MCP_IDLE_SEC` — порог само-выхода по простою.
   - `AI_R_MCP_HOST` / `AI_R_MCP_ALLOW_REMOTE` — хост bind / разрешить не-loopback.
   - `AI_R_HTTP_TOKEN` — bearer-токен (обязателен для удалённого bind).
+  - `AI_R_MCP_STATELESS` — stateless-диспетчер запросов (по умолчанию `1`):
+    долгоживущий общий сервер переживает своих клиентов, и запрос с
+    протухшим `Mcp-Session-Id` обслуживается, а не отбивается
+    `404 "Session not found"`; `0` возвращает stateful-реестр.
   - `AI_R_HAYSTACK_CACHE_MAX` — потолок кэша поиска по числу записей.
   - `AI_R_HAYSTACK_CACHE_CHARS_MAX` — по суммарному объёму (предохранитель RSS
     долгоживущего сервера).
