@@ -307,7 +307,7 @@ Claude и Antigravity — остальным `jq` не нужен).
 
 **Необязательное дополнение — `http`** (`AI_R_EXTRAS=http bash install.sh` или
 `pip install "ai-r[http]"`): добавляет [uvicorn](https://www.uvicorn.org) и
-включает **общий streamable-http транспорт** (требует `mcp>=1.9.0`).
+включает **общий streamable-http транспорт** (требует `mcp>=2`).
 
 - **Зачем.** По умолчанию каждый агент поднимает свой `ai-r-mcp` по stdio — под
   многоагентным веером это N процессов, каждый со своим холодным кэшем,
