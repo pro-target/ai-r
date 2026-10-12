@@ -2,16 +2,29 @@
 
 Regression guard for the silent-drop class the self-referential usage audit
 surfaced: callers passed ``plan(limit=…)`` and ``list_sessions(since=…)`` —
-parameters absent from those tools' schemas — and the FastMCP transport
+parameters absent from those tools' schemas — and the MCP transport
 dropped them without error, returning an unfiltered result that *looked*
-scoped.  ``_StrictArgsFastMCP`` now rejects any undeclared argument up front.
+scoped.  ``_StrictArgsMCPServer`` rejects any
+undeclared argument up front.
+
+mcp 2.x: ``call_tool`` returns a protocol ``CallToolResult`` wrapping the
+payload (JSON text content), so the assertions unwrap it first.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 
 from ai_r.mcp_server import _unknown_tool_args, mcp
+
+
+def _payload(result) -> dict:
+    """Unwrap a CallToolResult into the JSON dict the tool produced."""
+    texts = [c.text for c in result.content if getattr(c, "text", None)]
+    payload = json.loads(texts[0])
+    assert isinstance(payload, dict)
+    return payload
 
 
 # --- _unknown_tool_args (pure) ---------------------------------------------
@@ -35,11 +48,11 @@ def test_unknown_args_missing_properties_treats_all_as_unknown() -> None:
     assert _unknown_tool_args({}, {"a": 1}) == ["a"]
 
 
-# --- _StrictArgsFastMCP.call_tool (integration, hermetic) ------------------
+# --- _StrictArgsMCPServer.call_tool (integration, hermetic) ------------------
 
 def test_call_tool_rejects_phantom_plan_limit() -> None:
     """``plan(limit=…)`` — the real footgun — fails loud before any data read."""
-    result = asyncio.run(mcp.call_tool("plan", {"session": "abc", "limit": 1}))
+    result = _payload(asyncio.run(mcp.call_tool("plan", {"session": "abc", "limit": 1})))
     assert isinstance(result, dict)
     assert result["error"] == "invalid_argument"
     assert "limit" in result["message"]
@@ -48,7 +61,7 @@ def test_call_tool_rejects_phantom_plan_limit() -> None:
 
 
 def test_call_tool_rejects_phantom_list_sessions_since() -> None:
-    result = asyncio.run(mcp.call_tool("list_sessions", {"since": "2026-07-05"}))
+    result = _payload(asyncio.run(mcp.call_tool("list_sessions", {"since": "2026-07-05"})))
     assert isinstance(result, dict)
     assert result["error"] == "invalid_argument"
     assert "since" in result["message"]
@@ -63,9 +76,9 @@ def test_call_tool_accepts_find_tool_calls_session() -> None:
     facet, the guard must let it THROUGH — the call reaches the tool rather
     than hitting the unknown-argument envelope.
     """
-    result = asyncio.run(
+    result = _payload(asyncio.run(
         mcp.call_tool("find_tool_calls", {"tool_name": "Bash", "session": "abc"})
-    )
+    ))
     # Not our rejection envelope for an unknown key: either non-dict tool
     # content, or a dict that is not the invalid_argument-for-unknown-arg
     # error (a scoped scan of the bogus uuid legitimately returns an empty
@@ -80,11 +93,11 @@ def test_call_tool_accepts_find_tool_calls_session() -> None:
 def test_call_tool_rejects_phantom_find_tool_calls_arg() -> None:
     """A genuinely undeclared ``find_tool_calls`` argument still fails loud —
     the guard was narrowed to admit ``session``, not disabled."""
-    result = asyncio.run(
+    result = _payload(asyncio.run(
         mcp.call_tool(
             "find_tool_calls", {"tool_name": "Bash", "sesion": "abc"}
         )
-    )
+    ))
     assert isinstance(result, dict)
     assert result["error"] == "invalid_argument"
     assert "sesion" in result["message"]
@@ -96,9 +109,9 @@ def test_call_tool_checks_mapping_shaped_arguments() -> None:
     unknown-argument guard into pydantic's silent key drop."""
     from types import MappingProxyType
 
-    result = asyncio.run(
+    result = _payload(asyncio.run(
         mcp.call_tool("plan", MappingProxyType({"session": "abc", "limit": 1}))
-    )
+    ))
     assert isinstance(result, dict)
     assert result["error"] == "invalid_argument"
     assert "limit" in result["message"]
@@ -110,7 +123,7 @@ def test_call_tool_allows_declared_args_through() -> None:
     ``detect_current`` is hermetic (reads runtime env, no vault), so a valid
     call returns the tool's own result rather than the unknown-argument error.
     """
-    result = asyncio.run(mcp.call_tool("detect_current", {"agent": "claude"}))
+    result = _payload(asyncio.run(mcp.call_tool("detect_current", {"agent": "claude"})))
     # Not our rejection envelope: either non-dict tool content, or a dict that
     # is not the invalid_argument error for an unknown key.
     if isinstance(result, dict):

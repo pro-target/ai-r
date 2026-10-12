@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.client._memory import InMemoryTransport
+from mcp.client.session import ClientSession
 
 from ai_r.mcp_server import (
     _build_haystack,
@@ -55,24 +56,43 @@ from ai_r.parsers import AgentName
 # ---------------------------------------------------------------------------
 
 
+def _run(coro):
+    """Run a coroutine in a fresh event loop.  Avoids the deprecated
+    ``asyncio.get_event_loop()`` semantics in Python 3.12+.
+    """
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+async def _client():
+    """mcp 2.x in-memory client over the module-level server.
+
+    ``create_connected_server_and_client_session`` is gone in mcp 2.x; the
+    SDK's ``InMemoryTransport`` + ``ClientSession`` pair replaces it (the
+    session must be ``initialize()``-d explicitly).
+    """
+    transport = InMemoryTransport(mcp)
+    read, write = await transport.__aenter__()
+    session = ClientSession(read, write)
+    await session.__aenter__()
+    await session.initialize()
+    try:
+        yield session
+    finally:
+        await session.__aexit__(None, None, None)
+        await transport.__aexit__(None, None, None)
+
+
 async def _tool_names() -> list[str]:
-    async with create_connected_server_and_client_session(mcp) as client:
+    async for client in _client():
         result = await client.list_tools()
         return [t.name for t in result.tools]
 
 
 async def _call(name: str, args: dict) -> list[str]:
     """Invoke a tool and return the *text* of every content block."""
-    async with create_connected_server_and_client_session(mcp) as client:
+    async for client in _client():
         result = await client.call_tool(name, args)
         return [c.text for c in result.content]
-
-
-def _run(coro):
-    """Run a coroutine in a fresh event loop.  Avoids the deprecated
-    ``asyncio.get_event_loop()`` semantics in Python 3.12+.
-    """
-    return asyncio.new_event_loop().run_until_complete(coro)
 
 
 # ---------------------------------------------------------------------------

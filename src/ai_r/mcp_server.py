@@ -54,8 +54,7 @@ _SRC = Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import anyio  # noqa: E402  (transitive via mcp; used for sync-tool thread offload)
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 from ai_r import __version__  # noqa: E402
 from ai_r.find_file_edits import (  # noqa: E402
@@ -278,7 +277,7 @@ def _unknown_tool_args(
 ) -> list[str]:
     """Argument keys the caller passed that the tool's schema does not declare.
 
-    The FastMCP transport validates arguments against a pydantic model built
+    The SDK transport validates arguments against a pydantic model built
     from each tool's signature, and pydantic *silently drops* unknown keys
     before the function runs — so a caller that mistypes a facet or invents a
     parameter (e.g. ``plan(limit=…)`` or ``list_sessions(since=…)``, both seen
@@ -291,8 +290,8 @@ def _unknown_tool_args(
     return sorted(k for k in arguments if k not in allowed)
 
 
-class _StrictArgsFastMCP(FastMCP):
-    """FastMCP that fails loud on unknown tool arguments instead of dropping them.
+class _StrictArgsMCPServer(MCPServer):
+    """MCPServer that fails loud on unknown tool arguments instead of dropping them.
 
     Overrides :meth:`call_tool` to reject any argument key absent from the
     tool's declared schema with the project's standard
@@ -301,7 +300,12 @@ class _StrictArgsFastMCP(FastMCP):
     answer.  An unknown *tool name* falls through to the base class unchanged.
     """
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Any = None,
+    ):
         tool = self._tool_manager.get_tool(name)
         # ``Mapping`` (not bare ``dict``): any mapping-shaped arguments the
         # transport hands over get the unknown-key check — a non-dict mapping
@@ -312,49 +316,32 @@ class _StrictArgsFastMCP(FastMCP):
             unknown = _unknown_tool_args(tool.parameters, arguments)
             if unknown:
                 allowed = sorted((tool.parameters or {}).get("properties", {}))
-                return {
+                error_payload = {
                     "error": "invalid_argument",
                     "message": (
                         f"unknown argument(s): {', '.join(unknown)}. "
                         f"{name} accepts: {', '.join(allowed) or '(none)'}."
                     ),
                 }
+                # mcp 2.x: ``call_tool`` returns a protocol ``CallToolResult``
+                # (conversion lives inside the base dispatch), so the error
+                # envelope is converted with the tool's own converter —
+                # byte-identical to what a tool returning this dict would
+                # produce (JSON text content).
+                return tool.fn_metadata.convert_result(error_payload)
         # Concurrency (F6/http): our tool functions are SYNCHRONOUS and can
-        # spend hundreds of ms scanning the corpus.  FastMCP runs a sync tool
-        # INLINE on the event loop (func_metadata.py: ``return fn(**args)``),
-        # so under the shared streamable-http server a single in-flight
-        # read/search would freeze the loop and starve every other connection
-        # until uvicorn's keep-alive dropped it ("not connected" under N
-        # parallel readers).  Offload the blocking dispatch to a worker thread
-        # so concurrent tool calls actually run in parallel — the body-search
-        # haystack cache is already thread-safe (``_haystack_cache_lock``) for
-        # exactly this.  stdio serves one request at a time, so the extra hop
-        # is a behavioral no-op there (back-compat preserved).  Async tools and
-        # the unknown-tool fall-through keep the base path unchanged.
-        if tool is not None and not tool.is_async:
-            return await anyio.to_thread.run_sync(
-                _call_tool_blocking, self, name, arguments
-            )
-        return await super().call_tool(name, arguments)
+        # spend hundreds of ms scanning the corpus.  mcp 2.x runs a sync tool
+        # on a worker thread itself (``FuncMetadata.call_fn``:
+        # ``anyio.to_thread.run_sync``), so concurrent tool calls under the
+        # shared streamable-http server actually run in parallel — pinned by
+        # tests/test_mcp_concurrency.py.  The body-search haystack cache is
+        # thread-safe (``_haystack_cache_lock``) for exactly this.  stdio
+        # serves one request at a time, so the worker hop is a behavioral
+        # no-op there (back-compat preserved).
+        return await super().call_tool(name, arguments, context)
 
 
-def _call_tool_blocking(
-    server: FastMCP, name: str, arguments: dict[str, Any]
-) -> Any:
-    """Run FastMCP's (synchronous) tool dispatch to completion off the loop.
-
-    Executed inside an :func:`anyio.to_thread.run_sync` worker thread by
-    :meth:`_StrictArgsFastMCP.call_tool` for sync tools.  The base
-    ``FastMCP.call_tool`` is a coroutine, so it is driven on a private event
-    loop via :func:`anyio.run`; our sync tools perform no real awaiting, so it
-    completes without yielding.  ``FastMCP.call_tool`` (not ``super()``) is
-    called explicitly to run the *base* dispatch — the unknown-argument guard
-    already ran in the override above, so there is no re-entry into it.
-    """
-    return anyio.run(FastMCP.call_tool, server, name, arguments)
-
-
-mcp = _StrictArgsFastMCP(
+mcp = _StrictArgsMCPServer(
     name="ai-r",
     instructions=(
         "ai-r: read Claude, Codex, OpenCode, Antigravity and Pi session "
