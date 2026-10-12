@@ -198,5 +198,14 @@ def _run_find_tool_calls(args: argparse.Namespace) -> int:
             print(f"    assistant: {first_assist}")
 
     suffix = " (truncated)" if result["truncated"] else ""
+    if result.get("output_truncated"):
+        # Loud, honest signal: the JSON path carries ``output_truncated``,
+        # the human path must not bury a size-based emission cut either —
+        # otherwise a wide audit looks like "new sessions are missing".
+        suffix += (
+            " (output truncated: response exceeded the byte budget for"
+            " uncapped content — records shown are the OLDEST, the newest"
+            " were dropped)"
+        )
     print(f"\n{result['count']} tool call(s){suffix}.")
     return 0
