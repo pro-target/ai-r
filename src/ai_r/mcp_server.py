@@ -240,6 +240,11 @@ def _redact_fields(
 # stays on-demand via ``get_body``.
 _EVENT_TEXT_PREVIEW_CHARS = 160
 
+# Attached to every truncated preview so a consumer agent can never mistake
+# the cut for "the transcript has no more text" — the full body is always
+# one get_body(id) away.
+_TEXT_NOTE = "preview only; full body via get_body(id)"
+
 
 def _preview_event_texts(
     events: List[dict[str, Any]],
@@ -253,8 +258,10 @@ def _preview_event_texts(
     text — this runs on the MCP wrapper's already-materialized row dicts.
     It also runs AFTER emission-time redaction (the core redacts before
     returning), so a secret at the head of a long body is masked in the
-    preview too.  A real cut is marked with a trailing ``…`` and
-    ``text_truncated: true``; shorter texts are left untouched (no flag).
+    preview too.  A real cut is marked with a trailing ``…``,
+    ``text_truncated: true`` AND a ``text_note`` pointing at the retrieval
+    path (a consumer must never read the cut as "no more text exists");
+    shorter texts are left untouched (no flag, no note).
     ``id`` / ``refs`` / ``sha256`` are never modified, so ``get_body(id)``
     still resolves the full body.
     """
@@ -263,6 +270,7 @@ def _preview_event_texts(
         if isinstance(text, str) and len(text) > max_chars:
             ev["text"] = text[:max_chars] + "…"
             ev["text_truncated"] = True
+            ev["text_note"] = _TEXT_NOTE
 
 
 def _unknown_tool_args(
@@ -2640,8 +2648,11 @@ def query(
 
     Events are reference-by-default: each emitted event's ``text`` is a
     **preview** cut to ~160 chars (applied after redaction).  A real cut is
-    marked with a trailing ``…`` and ``text_truncated: true`` (absent when
-    nothing was cut).  ``id``/``refs``/``sha256`` are untouched — fetch the
+    marked with a trailing ``…``, ``text_truncated: true`` and a ``text_note``
+    pointing at the retrieval path (absent when nothing was cut); the response
+    also carries a top-level ``previews_truncated`` count when any preview was
+    cut.  A cut preview NEVER means the transcript lacks the full text.
+    ``id``/``refs``/``sha256`` are untouched — fetch the
     full body on demand with ``get_body(id)``.
 
     ``kind`` was **removed** — it duplicated ``noise`` (``noise="only"`` for
@@ -2710,6 +2721,14 @@ def query(
     # the core directly and keep the full text.
     _preview_event_texts(events)
     result: dict[str, Any] = {"events": events, "count": len(events)}
+    previews_truncated = sum(
+        1 for ev in events if ev.get("text_truncated") is True
+    )
+    if previews_truncated:
+        # Honest signal: N previews were cut here, but the full bodies are
+        # NOT missing — each carries ``text_note`` and resolves via
+        # ``get_body(id)``.
+        result["previews_truncated"] = previews_truncated
     if redactions:
         result["redactions"] = redactions
     if semantic_info:

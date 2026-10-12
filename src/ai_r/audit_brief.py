@@ -259,7 +259,7 @@ def audit_brief(
               "tokens":     {...session_tokens...},
               "component_tokens": {...} | null,
               "budget":     {budget_chars, used_chars, dropped: [...],
-                             over_budget, note?},
+                             over_budget, note_truncation, note?},
               "redactions": {...}    # only when something was masked
             }
 
@@ -443,6 +443,14 @@ def audit_brief(
         "used_chars": 0,
         "dropped": dropped,  # the live list — appends count immediately
         "over_budget": False,
+        # Always-present clarity line (its chars are measured too): a cut
+        # here is a DIGEST-side cut, never evidence that the transcript
+        # lacks the text — an auditor misread exactly this, so the digest
+        # now says it out loud on every call.
+        "note_truncation": (
+            "truncated previews / dropped detail do NOT mean missing "
+            f"transcript text; full bodies: get_body(<id>) / read_session('{uuid}')"
+        ),
     }
     response["budget"] = budget_block
     if redactions:
