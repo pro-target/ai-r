@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ai-r stats --with-tokens` no longer prints estimates as bare integers.**
+  The human-readable table now flags folded totals that include
+  estimated/unknown-usage sessions with a `~` suffix and a one-line legend, so
+  an estimate can no longer read like a billed figure (JSON output already
+  carried `exact`/`estimated`/`unknown` provenance counters — unchanged).
+
 - **The shared http MCP server no longer fails clients with a stale
   `Mcp-Session-Id` (`404` / `-32600 "Session not found"`).** The SDK's
   stateful `StreamableHTTPSessionManager` keeps its session registry in
