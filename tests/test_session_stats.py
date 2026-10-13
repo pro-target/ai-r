@@ -769,6 +769,28 @@ def test_cli_stats_with_tokens_json(
     assert "tokens" in payload["totals"]
 
 
+def test_cli_stats_with_tokens_human_marks_estimate(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Human table flags non-exact folded totals with ``~`` plus a legend.
+
+    The fixture transcript records no parser usage, so the folded block is
+    estimate-sourced: the bare integer must not read like a billed figure.
+    """
+    _write_claude_edit_session(
+        tmp_sessions_dir, "st-cli-tk",
+        turns=[("edit it", "Edit", "/repo/tok2.py")],
+    )
+    _patch_claude(monkeypatch, tmp_sessions_dir)
+    rc, out, err = _run_inproc(
+        ["stats", "--agent", "claude", "--with-tokens"],
+        env={"AI_R_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "~" in out
+    assert "estimated/unknown" in out
+
+
 def test_cli_stats_no_sessions_stderr(
     tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

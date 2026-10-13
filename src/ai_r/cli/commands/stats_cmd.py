@@ -130,10 +130,19 @@ def _run_stats(args: argparse.Namespace) -> int:
             f"{row['intents']:>7} {row['messages']:>8}"
         )
         if args.with_tokens:
-            total = (row.get("tokens") or {}).get("total")
-            line += f" {total if total is not None else '?':>12}"
+            tok = row.get("tokens") or {}
+            total = tok.get("total")
+            # Provenance mark: a bare integer reads like a billed figure, but
+            # folded totals may mix exact parser usage with estimates.  `~`
+            # flags any non-exact contribution (aggregate provenance counters).
+            cell = "?" if total is None else str(total)
+            if total is not None and (tok.get("estimated") or tok.get("unknown")):
+                cell += "~"
+            line += f" {cell:>12}"
         line += f"  {agents}"
         print(line)
     if "note" in result:
         print(f"\nnote: {result['note']}")
+    if args.with_tokens:
+        print("\ntokens: `~` = total includes estimated/unknown-usage sessions")
     return 0
