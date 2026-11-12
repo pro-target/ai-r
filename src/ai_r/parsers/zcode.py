@@ -66,7 +66,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._common import (
     _is_valid_uuid,
@@ -1339,23 +1339,24 @@ def _turn_usage_stats(conn: sqlite3.Connection, sid: str) -> Optional[dict]:
         return None
     if not rows:
         return None
-    stats = {
-        "turns": len(rows),
-        "model_retry_count": 0,
-        "context_exceeded": 0,
-        "turn_duration_ms": 0,
-        "turn_error_types": {},
-    }
+    retry_total = 0
+    ctx_exceeded_count = 0
+    duration_total = 0
+    error_types: Dict[str, int] = {}
     for retry, ctx_exceeded, duration, error_type in rows:
-        stats["model_retry_count"] += retry or 0
-        stats["context_exceeded"] += 1 if ctx_exceeded else 0
-        stats["turn_duration_ms"] += duration or 0
+        retry_total += retry or 0
+        ctx_exceeded_count += 1 if ctx_exceeded else 0
+        duration_total += duration or 0
         if isinstance(error_type, str) and error_type:
-            stats["turn_error_types"][error_type] = (
-                stats["turn_error_types"].get(error_type, 0) + 1
-            )
-    if not stats["turn_error_types"]:
-        stats.pop("turn_error_types")
+            error_types[error_type] = error_types.get(error_type, 0) + 1
+    stats: Dict[str, Any] = {
+        "turns": len(rows),
+        "model_retry_count": retry_total,
+        "context_exceeded": ctx_exceeded_count,
+        "turn_duration_ms": duration_total,
+    }
+    if error_types:
+        stats["turn_error_types"] = error_types
     return stats
 
 
