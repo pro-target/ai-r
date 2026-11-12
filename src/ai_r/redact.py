@@ -97,6 +97,17 @@ _PATTERNS: Tuple[Tuple[str, str], ...] = (
         "SLACK_TOKEN",
         r"\bxox[baprs]-(?=[A-Za-z0-9\-]*\d)[A-Za-z0-9\-]{10,}(?![A-Za-z0-9\-])",
     ),
+    # Telegram bot tokens: ``<bot_id>:AA<base64url-ish body>`` — the id is
+    # 8+ digits (no upper bound: an 11+ digit future id must still mask),
+    # the body 30+ url-safe chars (BotFather tokens carry 35 chars after
+    # the colon).  ``(?<!\d)`` keeps the match out of longer digit runs
+    # (times, ports); tokens embedded verbatim in
+    # ``api.telegram.org/bot<token>/…`` URLs match too because the
+    # preceding ``bot`` is not a digit.
+    (
+        "TG_BOT_TOKEN",
+        r"(?<!\d)\d{8,}:AA[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])",
+    ),
     # Stripe secret / restricted keys: ``sk_live_``/``sk_test_`` (and the
     # restricted ``rk_`` variants).  The ``_live_``/``_test_`` infix + fixed
     # ``[sr]k_`` prefix make these unambiguous secrets — no digit lookahead
