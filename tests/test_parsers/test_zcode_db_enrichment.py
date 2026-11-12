@@ -94,8 +94,8 @@ def _make_db(tmp_sessions_dir: Path) -> Path:
     )
     conn.execute(
         "INSERT INTO session VALUES (?, NULL, 'Enriched session', "
-        "'/home/user/proj', 'interactive', 1_790_100_000_000, "
-        "1_790_100_500_000)",
+        "'/home/user/proj', 'interactive', 1790100000000, "
+        "1790100500000)",
         (_SID,),
     )
     # User message with the structured input intent (quotes + origin).
@@ -212,8 +212,8 @@ def _make_db(tmp_sessions_dir: Path) -> Path:
     )
     conn.execute(
         "INSERT INTO session VALUES (?, NULL, 'Invalid quotes session', "
-        "'/home/user/proj', 'interactive', 1_790_200_000_000, "
-        "1_790_200_500_000)",
+        "'/home/user/proj', 'interactive', 1790200000000, "
+        "1790200500000)",
         (_SID2,),
     )
     conn.execute(
