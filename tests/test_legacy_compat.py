@@ -102,12 +102,15 @@ def test_get_latest_context_fuzzy_falls_back(monkeypatch, clean_argv):
     assert legacy_compat.run_legacy_get_latest_context() is None
 
 
-def test_get_latest_context_limit_falls_back(monkeypatch, clean_argv):
-    """``ai-r list`` has no ``--limit``; legacy must be used to
-    honour the requested truncation."""
+def test_get_latest_context_limit_invokes_ai_r(monkeypatch, clean_argv):
+    """``ai-r list`` supports ``--limit``; it is forwarded directly."""
     _available(monkeypatch)
+    calls: List[List[str]] = []
+    monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--agent", "OPENCODE", "--limit", "5")
-    assert legacy_compat.run_legacy_get_latest_context() is None
+    rc = legacy_compat.run_legacy_get_latest_context()
+    assert rc == 0
+    assert calls == [["ai-r", "list", "--agent", "opencode", "--limit", "5"]]
 
 
 def test_get_latest_context_id_with_agent_invokes_ai_r(monkeypatch, clean_argv):
@@ -167,10 +170,15 @@ def test_audit_search_falls_back(monkeypatch, clean_argv):
     assert legacy_compat.run_legacy_agent_audit() is None
 
 
-def test_audit_limit_falls_back(monkeypatch, clean_argv):
+def test_audit_limit_invokes_ai_r(monkeypatch, clean_argv):
+    """``ai-r list`` supports ``--limit``; it is forwarded directly."""
     _available(monkeypatch)
+    calls: List[List[str]] = []
+    monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--agent", "OPENCODE", "--limit", "5")
-    assert legacy_compat.run_legacy_agent_audit() is None
+    rc = legacy_compat.run_legacy_agent_audit()
+    assert rc == 0
+    assert calls == [["ai-r", "list", "--agent", "opencode", "--limit", "5"]]
 
 
 def test_audit_agent_only_invokes_list(monkeypatch, clean_argv):

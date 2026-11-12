@@ -167,13 +167,8 @@ def run_legacy_get_latest_context() -> Optional[int]:
         if isinstance(flags.get("--limit"), str):
             try:
                 n = int(flags["--limit"])
-                # ai-r has no --limit; default behaviour already
-                # shows all matches, so we just don't pass it.  We
-                # also fall back when the user asked for a limit,
-                # because the AI output wouldn't honour it.  That
-                # keeps the legacy semantics intact.
                 if n > 0:
-                    return None
+                    args.extend(["--limit", str(n)])
             except ValueError:
                 return None
         return _run_ai_r(args)
@@ -188,9 +183,7 @@ def run_legacy_get_latest_context() -> Optional[int]:
             try:
                 n = int(flags["--limit"])
                 if n > 0:
-                    # ai-r has no --limit; fall back to legacy
-                    # to honour the requested truncation.
-                    return None
+                    args.extend(["--limit", str(n)])
             except ValueError:
                 return None
         return _run_ai_r(args)
@@ -207,25 +200,18 @@ def run_legacy_agent_audit() -> Optional[int]:
     Returns the ``ai-r`` exit code if handled, or ``None`` if the
     caller should fall through to the legacy implementation.  Never
     raises.
-
-    Legacy CLI surface is ~25 flags; the vast majority have no
-    equivalent in ai-r (``--search`` is content search, not
-    title; ``--stats`` / ``--export`` / ``--timeline`` / etc. are
-    legacy-only).  We translate only the minimal set needed for the
-    smoke tests, and fall back for everything else.
     """
     if not is_ai_r_available():
         return None
 
     flags = _parse_simple_flags(sys.argv[1:])
 
-    # All flags that the legacy script supports but ai-r does
-    # not.  If any are present, the request cannot be served by the
+    # All flags that the legacy script supports but ai-r list does
+    # not. If any are present, the request cannot be served by the
     # new CLI and we fall back.
     legacy_only = {
-        "--days", "--from-date", "--to-date", "--stats", "--export",
-        "--full", "--index", "--all", "--search", "--msg-type",
-        "--author", "--intent", "--list", "--no-list",
+        "--stats", "--export", "--full", "--index", "--search",
+        "--msg-type", "--author", "--intent", "--list", "--no-list",
         "--title-search", "--last", "--after-phrase", "--timeline",
         "--parallel", "--title-only", "--file-creator",
     }
@@ -246,22 +232,22 @@ def run_legacy_agent_audit() -> Optional[int]:
             return None
         return _run_ai_r(["read", "--agent", mapped, str(session_id)])
 
+    args = ["list"]
     agent = flags.get("--agent")
     if agent:
         mapped = _LEGACY_AGENT_TO_AI_R.get(str(agent).upper())
         if not mapped:
             return None
-        if isinstance(flags.get("--limit"), str):
-            # ai-r has no --limit; fall back to legacy to keep
-            # the user's truncation request.
-            return None
-        return _run_ai_r(["list", "--agent", mapped])
+        args.extend(["--agent", mapped])
 
-    if isinstance(flags.get("--limit"), str):
-        # Same rationale as above.
-        return None
+    for filter_flag in ("--limit", "--days", "--from-date", "--to-date"):
+        val = flags.get(filter_flag)
+        if isinstance(val, str):
+            args.extend([filter_flag, val])
 
-    # No filter → list everything.  This is the one case where the
-    # legacy default and the ai-r default coincide closely
-    # enough to redirect.
-    return _run_ai_r(["list"])
+    if flags.get("--all"):
+        args.append("--all")
+    if flags.get("--json"):
+        args.append("--json")
+
+    return _run_ai_r(args)
