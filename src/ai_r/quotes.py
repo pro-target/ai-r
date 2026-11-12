@@ -282,6 +282,7 @@ def quotes(
                 getattr(msg_obj, "extra", None) or {}
             ).get("conversation_quotes")
             if isinstance(structured, list) and structured:
+                structured_emitted = 0
                 for sq in structured:
                     if not isinstance(sq, dict):
                         continue
@@ -307,7 +308,12 @@ def quotes(
                             comment if isinstance(comment, str) else ""
                         ),
                     })
-                continue
+                    structured_emitted += 1
+                if structured_emitted:
+                    continue
+                # Non-empty ``conversationQuotes`` where EVERY record was
+                # invalid (no usable ``text``) — fall through to the
+                # heuristic rather than dropping the turn entirely.
             if len(user_text) < MIN_QUOTE_CHARS:
                 continue
             # Preceding assistant turns, nearest first, within the window.

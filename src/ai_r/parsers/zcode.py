@@ -1189,7 +1189,8 @@ def _session_input_extras(conn: sqlite3.Connection, sid: str) -> dict:
     """
     try:
         rows = conn.execute(
-            "SELECT kind, payload, status, status_reason, time_created "
+            "SELECT kind, payload, status, status_reason, time_created, "
+            "promoted_message_id "
             "FROM session_input WHERE session_id = ? "
             "ORDER BY time_created",
             (sid,),
@@ -1197,7 +1198,7 @@ def _session_input_extras(conn: sqlite3.Connection, sid: str) -> dict:
     except sqlite3.Error:
         return {}
     extras: dict = {}
-    for kind, payload_blob, status, reason, created in rows:
+    for kind, payload_blob, status, reason, created, promoted_mid in rows:
         payload = _json_or_none(payload_blob) or {}
         if kind == "backgroundNotification":
             body = payload.get("text")
@@ -1208,7 +1209,9 @@ def _session_input_extras(conn: sqlite3.Connection, sid: str) -> dict:
                     if m:
                         note[tag.replace("-", "_")] = m.group(1).strip()
             extras.setdefault("background_notifications", []).append(note)
-        elif status in ("cancelled", "discarded"):
+        elif status in ("cancelled", "discarded") or (
+            status == "admitted" and promoted_mid is None
+        ):
             text = payload.get("text")
             entry = {
                 "status": status,
@@ -1367,6 +1370,15 @@ def read_token_usage(
     one model call's usage — the same cross-agent semantics OpenCode
     uses).  Rollout sessions sum the per-call ``response.usage`` blocks.
     A counter the format does not record is ``None`` (rollout reasoning).
+
+    DB sessions with a ``turn_usage`` table additionally carry the
+    turn-level rollup (``turns``/``model_retry_count``/
+    ``context_exceeded``/``turn_duration_ms``/``turn_error_types``).
+    Contract nuance: ``None`` is returned only when BOTH signals are
+    absent — a session with ``turns > 0`` but zero message tokens
+    (e.g. every turn errored before any assistant usage was recorded)
+    returns the zeroed token block with the turn stats attached, not
+    ``None``.
 
     Raises:
         FileNotFoundError: the session does not exist.

@@ -169,6 +169,11 @@ def _make_db(tmp_sessions_dir: Path) -> Path:
                          "</task-notification>"}),
              4, None, None, "promoted", None,
              1_790_100_300_000, 1_790_100_300_000),
+            # admitted but never promoted → also an unpromoted input.
+            ("si-5", _SID, "sendText", "startNow",
+             json.dumps({"text": "queued, session died before promotion"}),
+             5, None, None, "admitted", None,
+             1_790_100_190_000, 1_790_100_195_000),
         ],
     )
     conn.execute(
@@ -191,6 +196,56 @@ def _make_db(tmp_sessions_dir: Path) -> Path:
              1_790_100_400_000, 1_790_100_400_500, None,
              1_790_100_402_000, 2_000, None, 1, 2, 0, 0,
              0, 0, 0, 0, 0, 0, 1, 0, 1, "context_length_exceeded", None),
+        ],
+    )
+    # sess-zc-enrich-2: a user turn whose conversationQuotes are ALL
+    # invalid (no usable text) — the quotes preset must fall through to
+    # the verbatim heuristic instead of dropping the turn.
+    _SID2 = "sess-zc-enrich-2"
+    assistant_line = (
+        "The parser must keep the enrichment fail-soft so legacy "
+        "databases without the new tables still parse cleanly."
+    )
+    quoted_span = (
+        "keep the enrichment fail-soft so legacy databases without "
+        "the new tables"
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, NULL, 'Invalid quotes session', "
+        "'/home/user/proj', 'interactive', 1_790_200_000_000, "
+        "1_790_200_500_000)",
+        (_SID2,),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("enr2-m-0", _SID2, 1_790_200_100_000, 1_790_200_100_000,
+         json.dumps({"role": "assistant",
+                     "time": {"created": 1_790_200_100_000}}),
+         0),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+        ("enr2-m-1", _SID2, 1_790_200_200_000, 1_790_200_200_000,
+         json.dumps({
+             "role": "user",
+             "time": {"created": 1_790_200_200_000},
+             "metadata": {"inputIntent": {"conversationQuotes": [
+                 {"comment": "text field missing"},
+                 "not even a dict",
+                 {"text": ""},
+             ]}},
+         }), 1),
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("enr2-p-0", "enr2-m-0", _SID2, 1_790_200_100_000,
+             1_790_200_100_000,
+             json.dumps({"type": "text", "text": assistant_line}), 0),
+            ("enr2-p-1", "enr2-m-1", _SID2, 1_790_200_200_000,
+             1_790_200_200_000,
+             json.dumps({"type": "text",
+                         "text": quoted_span + " — got it, please do"}), 0),
         ],
     )
     conn.commit()
@@ -236,6 +291,18 @@ def test_quotes_preset_prefers_structured_zcode(enrich_db: Path) -> None:
     assert rec["source_id"] is None
 
 
+def test_quotes_fall_through_on_all_invalid_structured(
+    enrich_db: Path,
+) -> None:
+    """conversationQuotes present but ALL invalid → heuristic runs."""
+    out = quotes(agent="zcode", session="sess-zc-enrich-2")
+    assert out["count"] == 1
+    rec = out["quotes"][0]
+    assert rec["source_kind"] == "assistant"
+    assert "fail-soft" in rec["quote"]
+    assert rec["source_id"] is not None
+
+
 # ---------------------------------------------------------------------------
 # 2. session_input → read_session extras
 # ---------------------------------------------------------------------------
@@ -244,8 +311,10 @@ def test_quotes_preset_prefers_structured_zcode(enrich_db: Path) -> None:
 def test_session_input_extras(enrich_db: Path) -> None:
     s = zcode.read_session(_SID, override=str(enrich_db))
     cancelled = s.extra["unpromoted_inputs"]
-    assert len(cancelled) == 2
-    assert {c["status"] for c in cancelled} == {"cancelled", "discarded"}
+    assert len(cancelled) == 3
+    assert {c["status"] for c in cancelled} == {
+        "cancelled", "discarded", "admitted",
+    }
     assert all("text" in c and c["text"] for c in cancelled)
     notes = s.extra["background_notifications"]
     assert len(notes) == 1
