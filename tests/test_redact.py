@@ -62,6 +62,11 @@ JWT_TOKEN = (
 # literal is not a scannable ``API_KEY = "<long>"`` assignment (secret scanners
 # flag that shape); the runtime value is the full key the redaction test needs.
 GOOGLE_API_KEY = "AIza" + "SyD_FAKEfakeFAKEfake0123456789-abcd"
+# Telegram bot token: the PUBLIC doc example from the Telegram Bot API
+# (``<bot_id>:AA<base64url-ish body>``, https://core.telegram.org/bots/api).
+# Split prefix/body like STRIPE/GOOGLE above so the literal is not one
+# contiguous scanner-shaped token; the runtime value is what the test needs.
+TG_BOT_TOKEN = "110201543:" + "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 BEARER_LINE = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload123.sig456"
 URL_CREDS = "postgres://alice:s3cretpass@db.example.com:5432/app"
 GENERIC_LINE = "PASSWORD=hunter2x9extra"
@@ -92,6 +97,7 @@ PRIVATE_KEY_BLOCK = (
         (STRIPE_RESTRICTED, "STRIPE_KEY"),
         (JWT_TOKEN, "JWT"),
         (GOOGLE_API_KEY, "GOOGLE_API_KEY"),
+        (TG_BOT_TOKEN, "TG_BOT_TOKEN"),
         (BEARER_LINE, "BEARER_TOKEN"),
         (URL_CREDS, "URL_CREDENTIALS"),
         (GENERIC_LINE, "GENERIC_SECRET"),
@@ -178,6 +184,54 @@ def test_new_vendor_patterns_mask_value_and_context() -> None:
     ],
 )
 def test_new_patterns_false_positive_guards(benign: str) -> None:
+    redacted, counts = redact_text(benign)
+    assert counts == {}
+    assert redacted == benign
+
+
+def test_tg_bot_token_variants() -> None:
+    """Bot-id length variants and the API-URL embedding all mask as TG_BOT_TOKEN.
+
+    Expected shapes come from the Telegram Bot API docs: ``<bot_id>:AA…`` with
+    an 8–10 digit id; tokens also appear verbatim inside
+    ``https://api.telegram.org/bot<token>/<method>`` URLs.
+    """
+    # 10-digit id, ``AAG…`` body (30+ chars after ``AA``).
+    ten = "7502619390:" + "AAG" + "Qx9y8z7w6v5u4t3s2r1q0p9o8n7m6"
+    # 8-digit id.
+    eight = "12345678:" + "AAH" + "abc123def456ghi789jkl012mnop34"
+    for sample in (ten, eight):
+        redacted, counts = redact_text(f"use {sample} for the bot")
+        assert counts == {"TG_BOT_TOKEN": 1}
+        assert sample not in redacted
+        assert "[REDACTED_TG_BOT_TOKEN]" in redacted
+    # Token embedded in a telegram.org API URL (``/bot<token>/getMe``).
+    redacted, counts = redact_text(
+        f"curl https://api.telegram.org/bot{TG_BOT_TOKEN}/getMe"
+    )
+    assert counts == {"TG_BOT_TOKEN": 1}
+    assert TG_BOT_TOKEN not in redacted
+    assert "api.telegram.org/bot[REDACTED_TG_BOT_TOKEN]/getMe" in redacted
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        # Clock times and version numbers are not bot tokens.
+        "see you at 17:33 sharp",
+        "released version 1.2.3 today",
+        # ``123:AA`` — the right prefix shape but far too short a body.
+        "short 123:AA is not a token",
+        # URLs with a (numeric) port: no 8–10 digit id before the colon,
+        # and the port is not an ``AA…`` body.
+        "http://localhost:8080/debug",
+        "postgres://db:5432/app",
+        # A >10 digit run before ``:AA…`` is not a bot id (ids are 8–10
+        # digits): no partial match out of the middle of the digit run.
+        "12345678901234:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+    ],
+)
+def test_tg_bot_token_false_positive_guards(benign: str) -> None:
     redacted, counts = redact_text(benign)
     assert counts == {}
     assert redacted == benign
