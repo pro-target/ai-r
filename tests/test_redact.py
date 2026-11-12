@@ -192,15 +192,18 @@ def test_new_patterns_false_positive_guards(benign: str) -> None:
 def test_tg_bot_token_variants() -> None:
     """Bot-id length variants and the API-URL embedding all mask as TG_BOT_TOKEN.
 
-    Expected shapes come from the Telegram Bot API docs: ``<bot_id>:AA…`` with
-    an 8–10 digit id; tokens also appear verbatim inside
-    ``https://api.telegram.org/bot<token>/<method>`` URLs.
+    Expected shapes come from the Telegram Bot API docs: ``<bot_id>:AA…``;
+    ids have no upper bound (11+ digit ids mask too), tokens also appear
+    verbatim inside ``https://api.telegram.org/bot<token>/<method>`` URLs.
     """
     # 10-digit id, ``AAG…`` body (30+ chars after ``AA``).
     ten = "7502619390:" + "AAG" + "Qx9y8z7w6v5u4t3s2r1q0p9o8n7m6"
     # 8-digit id.
     eight = "12345678:" + "AAH" + "abc123def456ghi789jkl012mnop34"
-    for sample in (ten, eight):
+    # 14-digit id: past any current id length — still masked whole (the
+    # ``(?<!\d)`` lookbehind, not an upper bound, guards partial matches).
+    fourteen = "12345678901234:" + "AAH" + "abc123def456ghi789jkl012mnop34"
+    for sample in (ten, eight, fourteen):
         redacted, counts = redact_text(f"use {sample} for the bot")
         assert counts == {"TG_BOT_TOKEN": 1}
         assert sample not in redacted
@@ -226,9 +229,10 @@ def test_tg_bot_token_variants() -> None:
         # and the port is not an ``AA…`` body.
         "http://localhost:8080/debug",
         "postgres://db:5432/app",
-        # A >10 digit run before ``:AA…`` is not a bot id (ids are 8–10
-        # digits): no partial match out of the middle of the digit run.
-        "12345678901234:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        # A digit run starting mid-number never matches partially — but a
+        # full ``<long id>:AA<body 30+>`` span is a positive case (see
+        # test_tg_bot_token_variants).
+        "no match inside 51234567890123456789012:AA here",
     ],
 )
 def test_tg_bot_token_false_positive_guards(benign: str) -> None:
