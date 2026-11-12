@@ -115,7 +115,7 @@ def test_find_verbatim_quote_normalizes_markdown() -> None:
 
 
 def test_vocab_shape() -> None:
-    assert SOURCE_KINDS == {"assistant"}
+    assert SOURCE_KINDS == {"assistant", "structured"}
 
 
 # ---------------------------------------------------------------------------

@@ -201,6 +201,14 @@ class Message:
             ``message.model``.  ``None`` for user/tool messages and where
             the format carries no signal (Antigravity) — absence is
             honest, never fabricated.
+        extra: Free-form parser-specific metadata bag for the message.
+            Currently used by the ZCode parser for the structured input
+            intent the DB records on user turns:
+            ``conversation_quotes`` (list of ``{"text", "comment"}`` —
+            the user's annotated selections of prior content) and
+            ``input_origin`` (e.g. ``"desktop"``).  Empty where the
+            format carries no such signal — honest absence.  Not part
+            of the equality contract.
         user_refs: Structured references the USER attached in this message —
             image/file/attachment content parts the format exposes as a
             distinct block (Claude ``image``, OpenCode ``file``/``patch``,
@@ -222,6 +230,7 @@ class Message:
     tokens: Optional[dict] = field(default=None, compare=False)
     model: Optional[str] = None
     user_refs: Tuple[dict, ...] = field(default=(), compare=False)
+    extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 __all__ = ["AgentName", "Message", "Session"]

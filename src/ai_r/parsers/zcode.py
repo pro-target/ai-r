@@ -41,9 +41,10 @@ SQLite schema (relevant columns; mirrors OpenCode's layout closely)::
   ``state.output`` result string — and is additionally surfaced as
   :attr:`Message.qa` on the same (assistant) message.
 * ``step-start`` / ``step-finish`` / ``timeline`` — boundaries, skipped.
-  ``file`` / ``patch`` parts are NOT observed in the store (as of
-  2026-09) — there is no user-attachment signal to map, so they stay
-  skipped rather than guessed.
+  ``file`` parts ARE observed (2026-11) — tool-result artifact images
+  (``zcode-artifact://`` URLs), not user attachments; there is no
+  user-attachment signal to map, so they stay skipped rather than
+  guessed.  ``patch`` parts are not observed.
 
 Multi-part messages share one ``time_created`` millisecond; ``sequence``
 is the per-message part ordinal and the load-bearing tie-breaker.
@@ -446,10 +447,101 @@ def _qa_from_ask_part(state: dict) -> List[dict]:
     ]
 
 
+def _input_intent_extras(message_data: Optional[dict]) -> dict:
+    """The structured user-input intent ``message.data.metadata`` carries.
+
+    ZCode records the user's input intent on user-role messages:
+    ``metadata.inputIntent.conversationQuotes`` (the user's annotated
+    selections of prior content — ``[{text, comment?}]``) and
+    ``metadata.inputIntent.inputOrigin`` (e.g. ``"desktop"``).  A
+    turn-level ``error`` object recorded on the message row (e.g.
+    ``{"name": "AiSdkModelAdapterError", "data": {...}}``) rides along as
+    ``"error"`` even without an input intent.  Keys are absent when the
+    message carries no such signal (never fabricated).
+    """
+    if not isinstance(message_data, dict):
+        return {}
+    extras: dict = {}
+    err = message_data.get("error")
+    if isinstance(err, dict) and err:
+        extras["error"] = err
+    intent = message_data.get("metadata")
+    intent = intent.get("inputIntent") if isinstance(intent, dict) else None
+    if not isinstance(intent, dict):
+        return extras
+    raw_quotes = intent.get("conversationQuotes")
+    if isinstance(raw_quotes, list):
+        quotes: List[dict] = []
+        for q in raw_quotes:
+            if not isinstance(q, dict):
+                continue
+            text = q.get("text")
+            if not (isinstance(text, str) and text):
+                continue
+            entry = {"text": text}
+            comment = q.get("comment")
+            if isinstance(comment, str) and comment:
+                entry["comment"] = comment
+            quotes.append(entry)
+        if quotes:
+            extras["conversation_quotes"] = quotes
+    origin = intent.get("inputOrigin")
+    if isinstance(origin, str) and origin:
+        extras["input_origin"] = origin
+    return extras
+
+
+_TOOL_USAGE_FIELDS = (
+    # (tool_use entry key, tool_usage column, coercer)
+    ("approval_status", "approval_status", str),
+    ("destructive", "destructive", bool),
+    ("cancelled_by_user", "cancelled_by_user", bool),
+    ("exit_code", "exit_code", int),
+    ("duration_ms", "duration_ms", int),
+)
+
+
+def _tool_usage_by_call_id(
+    conn: sqlite3.Connection, sid: str
+) -> dict:
+    """``tool_call_id`` → selected ``tool_usage`` columns for ``sid``.
+
+    Fail-soft: a schema without the ``tool_usage`` table (or any sqlite
+    error) yields an empty map — the enrichment simply does not happen.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT tool_call_id, approval_status, destructive, "
+            "cancelled_by_user, exit_code, duration_ms "
+            "FROM tool_usage WHERE session_id = ?",
+            (sid,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict = {}
+    for row in rows:
+        call_id = row[0]
+        if not (isinstance(call_id, str) and call_id):
+            continue
+        enriched: dict = {}
+        values = row[1:]
+        for (key, _col, coerce), val in zip(_TOOL_USAGE_FIELDS, values):
+            if val is None:
+                continue
+            try:
+                enriched[key] = coerce(val)
+            except (TypeError, ValueError):
+                continue
+        if enriched:
+            out[call_id] = enriched
+    return out
+
+
 def _build_message(
     message_data: Optional[dict],
     parts: List[Tuple[dict, Optional[int]]],
     timestamp: Optional[datetime] = None,
+    tool_usage_by_call: Optional[dict] = None,
 ) -> Optional[Message]:
     """Assemble a :class:`Message` from metadata + ordered part rows.
 
@@ -507,6 +599,14 @@ def _build_message(
                 tu_entry["tool_original"] = "Bash"
             if isinstance(call_id, str) and call_id:
                 tu_entry["tool_use_id"] = call_id
+            if (
+                tool_usage_by_call
+                and isinstance(call_id, str)
+                and call_id in tool_usage_by_call
+            ):
+                # ``tool_usage`` join (2026-11): the audit facts the DB
+                # records per call ride the tool_use entry.
+                tu_entry.update(tool_usage_by_call[call_id])
             tool_use.append(tu_entry)
             output = state.get("output")
             is_error = state.get("status") == "error"
@@ -554,6 +654,7 @@ def _build_message(
             if role == "assistant"
             else None
         ),
+        extra=_input_intent_extras(message_data),
     )
 
 
@@ -567,6 +668,7 @@ def _extract_messages_from_db(
         rows = cursor.execute(_SELECT_MESSAGES_WITH_PARTS, (sid,)).fetchall()
     except sqlite3.Error:
         return []
+    tool_usage_by_call = _tool_usage_by_call_id(conn, sid)
 
     messages: List[Message] = []
     current_mid: Optional[str] = None
@@ -584,7 +686,10 @@ def _extract_messages_from_db(
             mtime_obj = (current_data.get("time") or {}).get("created") \
                 if isinstance(current_data.get("time"), dict) else None
             ts = _epoch_ms_to_datetime(mtime_obj) or ts
-        msg = _build_message(current_data, current_parts, timestamp=ts)
+        msg = _build_message(
+            current_data, current_parts, timestamp=ts,
+            tool_usage_by_call=tool_usage_by_call,
+        )
         if msg is not None:
             messages.append(msg)
         current_mid = None
@@ -1058,6 +1163,68 @@ def list_sessions(
     return sessions
 
 
+# ``<task-notification>`` body tags a background notification carries.
+_TASK_NOTIFICATION_TAG_RES = tuple(
+    (tag, re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL))
+    for tag in ("task-id", "tool-use-id", "status", "summary")
+)
+
+# Compactness cap for an unpromoted input's text preview (chars).
+_INPUT_TEXT_CAP = 200
+
+
+def _session_input_extras(conn: sqlite3.Connection, sid: str) -> dict:
+    """The ``session_input`` signals the message stream does not show.
+
+    Two shapes, both read fail-soft (a schema without the table — or any
+    sqlite error — simply yields nothing):
+
+    * ``unpromoted_inputs`` — user inputs that never became messages
+      (``status`` ``cancelled``/``discarded``/``admitted`` but not
+      promoted): ``{status, ts, text, reason?}`` per row (text capped).
+    * ``background_notifications`` — ``backgroundNotification`` rows
+      (subagent-finished pings): ``{ts, task_id?, tool_use_id?, status?,
+      summary?}`` parsed from the ``<task-notification>`` body tags, so a
+      notification can be joined back to the spawning ``tool_use`` call.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT kind, payload, status, status_reason, time_created "
+            "FROM session_input WHERE session_id = ? "
+            "ORDER BY time_created",
+            (sid,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    extras: dict = {}
+    for kind, payload_blob, status, reason, created in rows:
+        payload = _json_or_none(payload_blob) or {}
+        if kind == "backgroundNotification":
+            body = payload.get("text")
+            note: dict = {"ts": created}
+            if isinstance(body, str):
+                for tag, tag_re in _TASK_NOTIFICATION_TAG_RES:
+                    m = tag_re.search(body)
+                    if m:
+                        note[tag.replace("-", "_")] = m.group(1).strip()
+            extras.setdefault("background_notifications", []).append(note)
+        elif status in ("cancelled", "discarded"):
+            text = payload.get("text")
+            entry = {
+                "status": status,
+                "ts": created,
+                "text": (
+                    text[:_INPUT_TEXT_CAP] + "…"
+                    if isinstance(text, str) and len(text) > _INPUT_TEXT_CAP
+                    else text if isinstance(text, str) else ""
+                ),
+            }
+            if isinstance(reason, str) and reason:
+                entry["reason"] = reason
+            extras.setdefault("unpromoted_inputs", []).append(entry)
+    return extras
+
+
 def _read_session_by_uuid(
     uuid: str,
     base_dir: Optional[str],
@@ -1080,6 +1247,12 @@ def _read_session_by_uuid(
                 _SELECT_MESSAGE_COUNT, (uuid,)
             ).fetchone()[0]
             session = _row_to_session(row, db_path, _subagent_meta_map())
+            input_extras = _session_input_extras(conn, uuid)
+            if input_extras:
+                session = dataclasses.replace(
+                    session,
+                    extra={**session.extra, **input_extras},
+                )
             return dataclasses.replace(
                 session,
                 message_count=int(count or 0),
@@ -1143,6 +1316,46 @@ def read_messages(
         conn.close()
 
 
+def _turn_usage_stats(conn: sqlite3.Connection, sid: str) -> Optional[dict]:
+    """Session-level ``turn_usage`` rollup, or ``None`` without signal.
+
+    Enriches the token block with the turn-level facts the per-message
+    ``tokens`` cannot show: ``turns`` (row count), ``model_retry_count``
+    (sum), ``context_exceeded`` (rows that hit the limit),
+    ``turn_duration_ms`` (sum) and ``turn_error_types`` (``error_type``
+    → count, only non-null types).  Fail-soft: a schema without the
+    ``turn_usage`` table (or any sqlite error) → ``None``.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT model_retry_count, context_exceeded, duration_ms, "
+            "error_type FROM turn_usage WHERE session_id = ?",
+            (sid,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    stats = {
+        "turns": len(rows),
+        "model_retry_count": 0,
+        "context_exceeded": 0,
+        "turn_duration_ms": 0,
+        "turn_error_types": {},
+    }
+    for retry, ctx_exceeded, duration, error_type in rows:
+        stats["model_retry_count"] += retry or 0
+        stats["context_exceeded"] += 1 if ctx_exceeded else 0
+        stats["turn_duration_ms"] += duration or 0
+        if isinstance(error_type, str) and error_type:
+            stats["turn_error_types"][error_type] = (
+                stats["turn_error_types"].get(error_type, 0) + 1
+            )
+    if not stats["turn_error_types"]:
+        stats.pop("turn_error_types")
+    return stats
+
+
 def read_token_usage(
     uuid: str,
     base_dir: Optional[str] = None,
@@ -1166,6 +1379,7 @@ def read_token_usage(
     conn = _open_db(session.path)
     if conn is None:
         return None
+    turn_stats = _turn_usage_stats(conn, session.uuid)
     try:
         cursor = conn.cursor()
         rows = cursor.execute(
@@ -1196,12 +1410,15 @@ def read_token_usage(
             val = block.get(field)
             if val is not None:
                 totals[field] += val
-    if not found:
-        return None
     total = totals["input"] + totals["output"]
-    if total <= 0:
+    if not found and turn_stats is None:
         return None
-    return {**totals, "total": total}
+    if total <= 0 and turn_stats is None:
+        return None
+    result = {**totals, "total": total}
+    if turn_stats:
+        result.update(turn_stats)
+    return result
 
 
 def search(

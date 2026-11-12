@@ -76,9 +76,12 @@ MIN_QUOTE_CHARS: int = 40
 _LOOKBACK_ASSISTANT_TURNS: int = 60
 
 # The source-kind vocabulary — what the quoted text was taken from.  v1:
-# assistant prose only (a user quoting the agent).  The ``source_kind`` filter
-# validates against this set.
-SOURCE_KINDS: frozenset[str] = frozenset({"assistant"})
+# assistant prose only (a user quoting the agent).  ``structured`` (2026-11)
+# is the harness's own record of the selection — the ZCode DB logs the
+# user's annotated quotes as ``conversationQuotes`` on the turn, so those
+# turns skip the verbatim heuristic entirely and no source event is
+# invented.  The ``source_kind`` filter validates against this set.
+SOURCE_KINDS: frozenset[str] = frozenset({"assistant", "structured"})
 
 # Emitted-string caps (chars) — the preset's token budget.
 _QUOTE_CHARS_CAP = 500
@@ -269,6 +272,42 @@ def quotes(
             if not isinstance(u_idx, int):
                 continue
             user_text = _text_at(messages, u_idx)
+            # Structured quotes (ZCode 2026-11): the harness itself
+            # recorded the user's annotated selections on the turn —
+            # they take PRIORITY over the heuristic and no source event
+            # is guessed.  Turns without the signal fall through to the
+            # verbatim matching below, unchanged.
+            msg_obj = messages[u_idx] if 0 <= u_idx < len(messages) else None
+            structured = (
+                getattr(msg_obj, "extra", None) or {}
+            ).get("conversation_quotes")
+            if isinstance(structured, list) and structured:
+                for sq in structured:
+                    if not isinstance(sq, dict):
+                        continue
+                    quote_text = sq.get("text")
+                    if not (isinstance(quote_text, str) and quote_text):
+                        continue
+                    comment = sq.get("comment")
+                    records.append({
+                        "id": uev.get("id"),
+                        "agent": uev.get("agent"),
+                        "session_id": sid,
+                        "session_title": title_by_uuid.get(sid),
+                        "ts": uev.get("ts"),
+                        "message_index": u_idx,
+                        "source_id": None,
+                        "source_message_index": None,
+                        "source_kind": "structured",
+                        "quote_chars": len(quote_text),
+                        "quote": None,
+                        "comment": None,
+                        "_raw_quote": quote_text,
+                        "_raw_comment": (
+                            comment if isinstance(comment, str) else ""
+                        ),
+                    })
+                continue
             if len(user_text) < MIN_QUOTE_CHARS:
                 continue
             # Preceding assistant turns, nearest first, within the window.
