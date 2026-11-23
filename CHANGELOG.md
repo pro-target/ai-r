@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **New `ai-r usage <needle>` subcommand: mentions vs uses for an arbitrary
+  entity.** `mentions` counts sessions whose title/body mentions the needle
+  (the `search_sessions` core, `scope=all`); `uses` counts tool calls whose
+  input actually contains the needle (the `find_tool_calls` core's
+  `input_contains` facet — a fact of use, not a conversation about it). The
+  two counts always agree on scope: `--agent` / `--project` (substring on the
+  session's project dir) / `--days` are resolved once into a session set both
+  cores see. `--json` emits the machine-readable rollup (with a per-agent
+  breakdown); the human output prints `needle | mentions | uses` plus the
+  per-agent rows when no `--agent` was given.
+
 ### Fixed
 
 - **`ai-r stats --with-tokens` no longer prints estimates as bare integers.**
