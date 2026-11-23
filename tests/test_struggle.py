@@ -61,7 +61,8 @@ CREATE TABLE part (
     message_id   TEXT NOT NULL,
     session_id   TEXT NOT NULL,
     time_created INTEGER NOT NULL,
-    data         TEXT NOT NULL
+    data         TEXT NOT NULL,
+    sequence     INTEGER
 );
 """
 
@@ -73,18 +74,23 @@ _SESSIONS = [
     ("sess_qd1", "error"),        # QD: strict marker in a tool output
     ("sess_qd2", "error"),        # QD false positive: skill quote
     ("sess_qd3", "error"),        # QD false positive: marker in input
+    ("sess_ll1", "error"),        # LL: overspending builder turn
+    ("sess_br1", "error"),        # BR: blind retry after an errored call
     ("sess_ok", "completed"),     # healthy session
 ]
 
-# (session_id, turn_id, status, started_at, req, output_tokens, last flag)
+# (session_id, turn_id, status, started_at, req, output_tokens, tools)
 _TURNS = [
-    ("sess_sd1", "t1", "error", 1_795_354_000_000, 1, 0),
-    ("sess_sd2", "t1", "error", 1_795_354_000_000, 0, 0),
-    ("sess_sd3", "t1", "completed", 1_795_354_000_000, 2, 0),
-    ("sess_qd1", "t1", "error", 1_795_354_100_000, 21, 7450),
-    ("sess_qd2", "t1", "error", 1_795_354_100_000, 3, 500),
-    ("sess_qd3", "t1", "error", 1_795_354_100_000, 3, 500),
-    ("sess_ok", "t1", "completed", 1_795_354_200_000, 4, 900),
+    ("sess_sd1", "t1", "error", 1_795_354_000_000, 1, 0, 0),
+    ("sess_sd2", "t1", "error", 1_795_354_000_000, 0, 0, 0),
+    ("sess_sd3", "t1", "completed", 1_795_354_000_000, 2, 0, 0),
+    ("sess_qd1", "t1", "error", 1_795_354_100_000, 21, 7450, 21),
+    ("sess_qd2", "t1", "error", 1_795_354_100_000, 3, 500, 3),
+    ("sess_qd3", "t1", "error", 1_795_354_100_000, 3, 500, 3),
+    # Spec case C: 280 tool calls, died error (but did produce output).
+    ("sess_ll1", "t1", "error", 1_795_354_150_000, 30, 40_000, 280),
+    ("sess_br1", "t1", "error", 1_795_354_160_000, 3, 800, 3),
+    ("sess_ok", "t1", "completed", 1_795_354_200_000, 4, 900, 4),
 ]
 
 
@@ -117,11 +123,11 @@ def struggle_db(tmp_path: Path) -> Path:
             "'interactive', 1_795_354_000_000, 1_795_354_500_000, ?)",
             (sid, f"title {sid}", outcome),
         )
-    for sid, tid, status, started, req, out in _TURNS:
+    for sid, tid, status, started, req, out, tools in _TURNS:
         conn.execute(
             "INSERT INTO turn_usage VALUES "
-            "(?, ?, ?, ?, NULL, ?, 0, ?, 0, NULL, NULL)",
-            (sid, tid, status, started, req, out),
+            "(?, ?, ?, ?, NULL, ?, ?, ?, 0, NULL, NULL)",
+            (sid, tid, status, started, req, tools, out),
         )
     for sid in {s for s, _ in _SESSIONS}:
         conn.execute(
@@ -142,8 +148,38 @@ def struggle_db(tmp_path: Path) -> Path:
             command="sqlite3 db 'select * from part where output like "
             "%Usage limit reached%'",
         ),
+        # sess_br1 (spec case D): a Bash call errors, the very next call
+        # repeats it verbatim except for the digit run — normalized dup.
+        _tool_part(
+            "p-br-1", "sess_br1", "Bash",
+            command="cat /tmp/report-1234.log", status="error",
+        ),
+        _tool_part(
+            "p-br-2", "sess_br1", "Bash",
+            command="cat /tmp/report-9999.log",
+        ),
+        # Same tool, but the inputs differ beyond digits: NOT a retry.
+        _tool_part(
+            "p-br-3", "sess_br1", "Read", command="cat /tmp/a/one.txt"
+        ),
+        _tool_part(
+            "p-br-4", "sess_br1", "Read", command="cat /tmp/a/two.txt"
+        ),
     ]
-    conn.executemany("INSERT INTO part VALUES (?, ?, ?, ?, ?)", parts)
+    # All parts share one timestamp, so enforce the intended call order
+    # (br-1, br-2, then br-3, br-4) via an earlier message row.
+    conn.executemany(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        parts,
+    )
+    conn.execute(
+        "INSERT INTO message VALUES "
+        "('m-br0', 'sess_br1', 1_795_353_950_000, '{}')"
+    )
+    conn.execute(
+        "UPDATE part SET message_id='m-br0' WHERE id IN ('p-br-1','p-br-2')"
+    )
     conn.commit()
     conn.close()
     return db_path
@@ -235,6 +271,94 @@ def test_unknown_kind_rejected(struggle_db: Path) -> None:
         struggle(db=str(struggle_db), kinds=("nope",))
 
 
+# ------------------------------------------------------- stage 2: ll / br
+
+
+def test_ll_overspending_builder(struggle_db: Path) -> None:
+    records = struggle(db=str(struggle_db), kinds=("ll",))
+    assert [r["session_id"] for r in records] == ["sess_ll1"]
+    rec = records[0]
+    assert rec["severity"] == "high"  # errored overspending turn
+    assert "tool_calls=280" in rec["evidence"]
+
+
+def test_ll_below_threshold_not_reported(struggle_db: Path) -> None:
+    conn = sqlite3.connect(str(struggle_db))
+    conn.execute(
+        "UPDATE turn_usage SET tool_call_count=240 WHERE session_id='sess_ll1'"
+    )
+    conn.commit()
+    conn.close()
+    assert struggle(db=str(struggle_db), kinds=("ll",)) == []
+
+
+def test_ll_completed_turn_is_medium(struggle_db: Path) -> None:
+    conn = sqlite3.connect(str(struggle_db))
+    conn.execute(
+        "UPDATE turn_usage SET status='completed' "
+        "WHERE session_id='sess_ll1'"
+    )
+    conn.commit()
+    conn.close()
+    records = struggle(db=str(struggle_db), kinds=("ll",))
+    assert records[0]["severity"] == "medium"
+
+
+def test_br_normalized_duplicate_after_error(struggle_db: Path) -> None:
+    records = struggle(db=str(struggle_db), kinds=("br",))
+    assert [r["session_id"] for r in records] == ["sess_br1"]
+    rec = records[0]
+    assert rec["kind"] == "br"
+    assert "Bash" in rec["evidence"]
+    # The pair differs only in digits/hashes: matched via normalization.
+    assert "p-br-1" in rec["evidence"] and "p-br-2" in rec["evidence"]
+
+
+def test_br_scope_limited_to_struggle_candidates(struggle_db: Path) -> None:
+    """BR scans only errored/signalled sessions (v1 cost bound)."""
+    conn = sqlite3.connect(str(struggle_db))
+    # An errored Bash call + verbatim dup inside the healthy session.
+    conn.execute(
+        "INSERT INTO message VALUES "
+        "('m-ok0', 'sess_ok', 1_795_353_900_000, '{}')"
+    )
+    for pid in ("p-ok-1", "p-ok-2"):
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, "
+            "data) VALUES (?, 'm-ok0', 'sess_ok', 1_795_353_900_000, ?)",
+            (pid, json.dumps({
+                "type": "tool", "callID": f"call_{pid}", "tool": "Bash",
+                "state": {"status": "error", "input": {"command": "ls /x"}},
+            })),
+        )
+    conn.commit()
+    conn.close()
+    records = struggle(db=str(struggle_db), kinds=("br",))
+    assert {r["session_id"] for r in records} == {"sess_br1"}
+
+
+def test_br_session_pin_scans_any_session(struggle_db: Path) -> None:
+    """--session opts in explicitly, even without other signals."""
+    conn = sqlite3.connect(str(struggle_db))
+    conn.execute(
+        "INSERT INTO message VALUES "
+        "('m-ok0', 'sess_ok', 1_795_353_900_000, '{}')"
+    )
+    for pid in ("p-ok-1", "p-ok-2"):
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, "
+            "data) VALUES (?, 'm-ok0', 'sess_ok', 1_795_353_900_000, ?)",
+            (pid, json.dumps({
+                "type": "tool", "callID": f"call_{pid}", "tool": "Bash",
+                "state": {"status": "error", "input": {"command": "ls /x"}},
+            })),
+        )
+    conn.commit()
+    conn.close()
+    records = struggle(db=str(struggle_db), kinds=("br",), session="sess_ok")
+    assert {r["session_id"] for r in records} == {"sess_ok"}
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -250,7 +374,7 @@ def test_cli_json_output(struggle_db, capsys: pytest.CaptureFixture) -> None:
     code = _run_cli("--db", str(struggle_db), "--json")
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {r["kind"] for r in payload} == {"sd", "qd"}
+    assert {r["kind"] for r in payload} == {"sd", "qd", "ll", "br"}
     qd = next(r for r in payload if r["kind"] == "qd")
     assert qd["reset_at"] == "2026-10-01 18:08:06"
 
