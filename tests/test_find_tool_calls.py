@@ -1271,6 +1271,138 @@ def test_find_tool_calls_is_error_reliable_zcode(
     assert rec["is_error"] is True  # fixture: state.status == "error"
 
 
+def test_find_tool_calls_is_error_reliable_antigravity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Antigravity shares ERROR_FLAG_RELIABLE_AGENTS -> is_error_reliable=True."""
+    import types
+    from datetime import datetime, timezone
+
+    from ai_r.parsers import PARSERS
+    from ai_r.parsers.models import AgentName, Message, Session
+
+    fake_session = Session(
+        uuid="ag-rel-1",
+        agent=AgentName.ANTIGRAVITY,
+        title="ag reliable test",
+        date=datetime(2026, 6, 14, 10, 0, tzinfo=timezone.utc),
+        path="/tmp/fake-ag-brain",
+        message_count=2,
+    )
+    fake_msgs = [
+        Message(role="user", text="run it"),
+        Message(
+            role="assistant",
+            text="",
+            tool_use=(
+                {
+                    "name": "run_command",
+                    "input": json.dumps({"CommandLine": "false"}),
+                    "tool_use_id": "ag_step_1_0",
+                },
+            ),
+        ),
+        Message(
+            role="tool",
+            text="",
+            tool_result=(
+                {
+                    "content": "exit 1",
+                    "is_error": True,
+                    "tool_use_id": "ag_step_1_0",
+                },
+            ),
+        ),
+    ]
+    fake_parser = types.SimpleNamespace(
+        list_sessions=lambda: [fake_session],
+        read_messages=lambda uuid: fake_msgs,
+        source_roots=lambda: (),
+    )
+    monkeypatch.setitem(PARSERS, AgentName.ANTIGRAVITY, fake_parser)
+    result = find_tool_calls(tool_name="run_command", agent="antigravity")
+    assert result["count"] == 1
+    rec = result["records"][0]
+    assert rec["is_error_reliable"] is True
+    assert rec["is_error"] is True
+    assert rec["tool_kind"] == "bash"
+
+
+def test_antigravity_tool_classifiers_and_paths() -> None:
+    """Antigravity tool vocabulary + PascalCase path/task keys in _common.py."""
+    from ai_r.events._common import (
+        _path_from_payload,
+        classify_tool,
+        resolve_tool,
+    )
+
+    for edit_tool in ("edit_file", "replace_file_content", "multi_replace_file_content"):
+        assert classify_tool(edit_tool) == "edit"
+        assert resolve_tool(edit_tool, {}) == ("edit", None)
+
+    for write_tool in ("write_file", "write_to_file"):
+        assert classify_tool(write_tool) == "write"
+        assert resolve_tool(write_tool, {}) == ("write", None)
+
+    for read_tool in (
+        "read_file",
+        "view_file",
+        "view_file_outline",
+        "view_code_item",
+        "grep_search",
+        "find_by_name",
+        "list_dir",
+    ):
+        assert classify_tool(read_tool) == "read"
+        assert resolve_tool(read_tool, {}) == ("read", None)
+
+    # invoke_subagent: single call + batch Subagents resolution.
+    assert resolve_tool(
+        "invoke_subagent", {"TypeName": "research", "Role": "Explore"}
+    ) == ("task", "research")
+    assert resolve_tool("invoke_subagent", {"type_name": "builder"}) == (
+        "task",
+        "builder",
+    )
+    assert resolve_tool("invoke_subagent", {"Role": "Code reviewer"}) == (
+        "task",
+        "Code reviewer",
+    )
+    assert resolve_tool("invoke_subagent", {"role": "auditor"}) == (
+        "task",
+        "auditor",
+    )
+    assert resolve_tool(
+        "invoke_subagent",
+        {
+            "Subagents": [
+                {"TypeName": "research", "Prompt": "a"},
+                {"type_name": "research", "Prompt": "b"},
+            ]
+        },
+    ) == ("task", "research")
+    # Heterogeneous or empty or missing TypeName in batch -> None (no guessing).
+    assert resolve_tool(
+        "invoke_subagent",
+        {"Subagents": [{"TypeName": "research"}, {"TypeName": "builder"}]},
+    ) == ("task", None)
+    assert resolve_tool(
+        "invoke_subagent",
+        {"Subagents": [{"TypeName": "research"}, {"Prompt": "untyped"}]},
+    ) == ("task", None)
+    assert resolve_tool("invoke_subagent", {"Subagents": []}) == ("task", None)
+
+    # PascalCase path keys.
+    for key in (
+        "Path",
+        "TargetFile",
+        "AbsolutePath",
+        "SearchPath",
+        "DirectoryPath",
+    ):
+        assert _path_from_payload({key: "/workspace/foo.py"}) == "/workspace/foo.py"
+
+
 # ---------------------------------------------------------------------------
 # Smart output truncation
 # ---------------------------------------------------------------------------

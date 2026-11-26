@@ -502,12 +502,18 @@ def _render_qa(qa: Any) -> str:
 # high-signal inputs for understanding *what* a tool call did.
 _TOOL_INPUT_KEYS: tuple[str, ...] = (
     "command",
+    "CommandLine",
     "file_path",
     "path",
+    "Path",
+    "TargetFile",
+    "AbsolutePath",
     "notebook_path",
     "pattern",
     "query",
+    "Query",
     "url",
+    "Url",
 )
 
 
@@ -632,7 +638,8 @@ def _message_token_blocks(
     message — so the result lines up positionally with
     ``_project_messages(messages, hard_cap)``.  Each entry is the message's
     exact ``tokens`` block (F3.3) to attach, or ``None`` when the record
-    carries no per-message usage (Codex / Antigravity / user turns).
+    carries no per-message usage (Codex / legacy Antigravity ``overview.txt``
+    / user turns).
 
     Claude dedup: a streamed API call writes several JSONL records sharing
     one ``(message.id, requestId)`` — every one carries an identical
@@ -969,8 +976,10 @@ def list_sessions(
     Each summary carries ``kind`` (``"agent"`` for a top-level session,
     ``"subagent"`` for a spawned subagent/sidechain) and ``parent_uuid``
     (the parent session's uuid for subagents, else ``None``).  Subagent
-    detection covers Claude, OpenCode, Codex, Pi and ZCode; Antigravity's format
-    has no parent signal, so it always reports ``kind="agent"``.
+    detection covers Claude, OpenCode, Codex, Pi, ZCode and Antigravity
+    (v1.5+ ``conversations/<uuid>.db`` and subagent metadata; legacy
+    ``overview.txt`` sessions without parent metadata report
+    ``kind="agent"``).
 
     Each summary also carries the F1.4 origin fields, ``None`` when the
     source format has no signal (never fabricated):
@@ -978,7 +987,9 @@ def list_sessions(
     * ``project_dir`` — the project directory the session ran in
       (Claude: transcript ``cwd`` / Desktop metadata / verified slug
       decode; Codex: ``session_meta.cwd``; OpenCode:
-      ``session.directory``; Pi: header ``cwd``; Antigravity: no signal).
+      ``session.directory``; Pi: header ``cwd``; Antigravity:
+      ``conversations/<uuid>.db`` workspace URI / subagent & summary DB
+      fallbacks, ``None`` on legacy ``overview.txt`` sessions).
     * ``launch_surface`` — where the session was driven from (Claude:
       ``"claude-cli"`` | ``"claude-desktop"``; Codex: the raw
       ``originator``, e.g. ``"codex_vscode"``; Antigravity:
@@ -989,8 +1000,9 @@ def list_sessions(
     in the session, in order of first appearance (Claude: assistant
     ``message.model``; Codex: ``turn_context.model``; OpenCode:
     ``message.data.modelID``; Pi: assistant ``message.model``;
-    Antigravity records no model signal).  ``[]`` when the format carries
-    no signal — honest absence, never fabricated.
+    Antigravity: v1.5+ ``transcript_full.jsonl`` / ``conversations/<uuid>.db``,
+    ``[]`` on legacy ``overview.txt`` sessions).  ``[]`` when the format
+    carries no signal — honest absence, never fabricated.
 
     Each summary also carries the A3 recency signal, measured against a
     single wall-clock ``now`` sampled once for the whole call:
@@ -1186,9 +1198,11 @@ def read_session(
               ``source="estimate"`` (never merged with the exact tier),
               ``None`` on an empty transcript;
             * per-message ``tokens`` on projected entries that carry exact
-              usage — Claude (deduplicated per streamed API call), OpenCode
-              and Pi.  Codex / Antigravity / user turns carry **no**
-              ``tokens`` key at all (absent, not ``null``).  The dedup/attach
+              usage — Claude (deduplicated per streamed API call), OpenCode,
+              Pi, ZCode and Antigravity (v1.5+ ``transcript_full.jsonl``).
+              Codex / legacy Antigravity ``overview.txt`` / user turns carry
+              **no** ``tokens`` key at all (absent, not ``null``).  The
+              dedup/attach
               is decided on absolute message positions BEFORE pagination, so
               page boundaries never shift which record is "first" for a call.
 
@@ -1214,10 +1228,10 @@ def read_session(
             child's own spawn metadata, falling back to the spawning call's
             sidecar) and ``status`` where the spawn recorded one
             (``"async_launched"`` for a background spawn).  A childless parent
-            (or an agent like Antigravity that never records ``parent_uuid``)
-            yields an empty ``children`` list and a ``total`` equal to the
-            parent's own block — honest, not an error.  Independent of
-            ``with_tokens``.  Default ``False``.
+            (or a legacy Antigravity ``overview.txt`` session without
+            ``parent_uuid`` metadata) yields an empty ``children`` list and a
+            ``total`` equal to the parent's own block — honest, not an error.
+            Independent of ``with_tokens``.  Default ``False``.
         include_thinking: When ``True`` attach the model's reasoning
             (``message.thinking``) as a separate ``thinking`` string field on
             each projected message that carried it — kept OUT of ``content``
@@ -1243,7 +1257,7 @@ def read_session(
           ``{status: success|failure|mixed|unknown, signals, user_verdict,
           markers, tool_results, tool_errors, error_rate,
           error_rate_reliable}``.  ``status`` combines the tool-call
-          error rate (real flag only for Claude/OpenCode/ZCode —
+          error rate (real flag for Claude/OpenCode/ZCode/Antigravity —
           ``None`` elsewhere, never guessed) with a calibrated bilingual
           success/failure dictionary over the tail user turns;
           ``"unknown"`` when neither signal exists (SSOT
@@ -1602,8 +1616,8 @@ def find_tool_calls(
     ``True`` failures only, ``False`` successes only).  ``output_mode``
     selects output truncation — ``"head"``/``"tail"``/``"smart"``;
     ``None`` is adaptive (``"smart"`` on errors, ``"head"`` otherwise).
-    Each record also carries ``is_error_reliable`` (``True`` only for
-    Claude/OpenCode/ZCode) plus the wrapper-aware classification: ``tool_kind``
+    Each record also carries ``is_error_reliable`` (``True`` for
+    Claude/OpenCode/ZCode/Antigravity) plus the wrapper-aware classification: ``tool_kind``
     (``edit``/``write``/``read``/``bash``/``task``/``skill``/``mcp``/
     ``web``/``other``) and ``tool_resolved`` — the real name under a
     Skill/Task/MCP wrapper (subagent type, skill name, or
@@ -1700,11 +1714,11 @@ def session_stats(
     sessions), ``intents`` (distinct requests behind those edits), the
     distinct ``agents`` in the group, and total ``messages``.
 
-    RISK-4 note: subagent detection is currently **Claude-only**.  When no
-    subagent sessions are in scope, a ``group_by="kind"`` result shows a
-    single ``agent`` bucket — so the result always carries
-    ``kind_split_available`` (``False`` here) plus a ``note`` making clear
-    that this is NOT a verified "no subagents", just an absent split.
+    RISK-4 note: when no subagent sessions are in scope, a
+    ``group_by="kind"`` result shows a single ``agent`` bucket — so the
+    result always carries ``kind_split_available`` (``False`` here) plus a
+    ``note`` making clear that this is NOT a verified "no subagents", just
+    an absent split.
 
     ``with_tokens=True`` (F3.3) additionally reads every matched session's
     **token usage at request time** (nothing runs in the background) and
@@ -1712,8 +1726,9 @@ def session_stats(
     ``{input, output, reasoning, cache_read, cache_write, total, exact,
     estimated, unknown}``.  Per session the numbers are *exact* where the
     agent's own files record usage (Claude ``message.usage``, Codex
-    ``token_count``, OpenCode ``message.data.tokens``, Pi ``usage``); a
-    session without a recorded signal (e.g. Antigravity) gets a
+    ``token_count``, OpenCode/ZCode ``message.data.tokens``, Pi ``usage``,
+    Antigravity v1.5+ ``transcript_full.jsonl``); a session without a
+    recorded signal (e.g. legacy Antigravity ``overview.txt``) gets a
     transcript-volume **estimate** — tokenized with the optional
     `tiktoken` dependency (``pip install "ai-r[tokens]"``) when installed,
     else a rough chars/4 heuristic — and counts under ``estimated``, never
@@ -1854,7 +1869,8 @@ def network(
     ``tool_kind="web"``) supplies the candidates — Claude
     ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
     (surfaced from ``web_search_call`` rollout records),
-    Gemini/Antigravity ``web_fetch``/``google_web_search``; Pi records no
+    Gemini/Antigravity ``web_fetch``/``google_web_search``/``search_web``/
+    ``read_url_content``; Pi records no
     web tool (honest absence).  The request target (``url``/``query``) is
     extracted from each call's own input and assessed with a deterministic
     **risk dictionary**: ``plain_http``, ``credentials_in_url``,
@@ -2554,7 +2570,8 @@ def query(
       produced the event's message: an ``assistant_turn`` /
       ``tool_call`` / ``plan_event`` inherits the model of the assistant
       message behind it and carries it as a top-level ``model`` field
-      (absent without a signal — user turns, Antigravity — so
+      (absent without a signal — user turns, or legacy Antigravity
+      ``overview.txt`` sessions — so
       ``aggregate(group_by="model")`` buckets those under
       ``"(unknown)"``).  Model ids are agent-defined strings (no fixed
       vocabulary); events without a signal never match; an empty string
@@ -3091,8 +3108,8 @@ def _build_haystack(
     the ``search_sessions(include_thinking=True)`` flag when reasoning must
     be searchable.  When enabled it covers ALL agents
     (feature-for-all-where-signal) — including OpenCode, whose reasoning was
-    moved out of ``text`` into ``thinking``, and Claude / Codex / Pi
-    reasoning that is otherwise discarded.
+    moved out of ``text`` into ``thinking``, and Claude / Codex / Pi /
+    Antigravity reasoning that is otherwise discarded.
     """
     chunks: List[str] = []
     total_chars = 0

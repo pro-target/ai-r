@@ -34,6 +34,7 @@ from ai_r.parsers import (
 )
 from ai_r.events._common import resolve_tool
 from ai_r.events.model import normalize_session_filter
+from ai_r.outcome import ERROR_FLAG_RELIABLE_AGENTS
 from ai_r.redact import merge_redaction_counts, redact_value
 from ai_r.security import coerce_tool_input as _coerce_input
 
@@ -290,13 +291,15 @@ def find_tool_calls(
         preceding user message text or ``None``), ``assistant``
         (the assistant text of the message hosting the call),
         ``is_error`` (bool: the correlated call outcome — ``True`` when
-        the agent flagged the call as failed; authoritative for Claude
-        and OpenCode/ZCode, best-effort ``False`` for
-        Codex/Antigravity/Pi and
-        whenever no result correlates to the call) and ``output`` (the
+        the agent flagged the call as failed; authoritative for Claude,
+        OpenCode/ZCode and Antigravity v1.5+ ``transcript_full.jsonl``
+        sessions, best-effort ``False`` for Codex/Pi, legacy Antigravity
+        ``overview.txt`` sessions and whenever no result correlates to
+        the call) and ``output`` (the
         correlated ``tool_result`` content, ``""`` when none) plus
-        ``is_error_reliable`` (bool: ``True`` only for
-        Claude/OpenCode/ZCode,
+        ``is_error_reliable`` (bool: ``True`` for
+        :data:`~ai_r.outcome.ERROR_FLAG_RELIABLE_AGENTS` —
+        Claude/OpenCode/ZCode/Antigravity —
         whose outcome flag is authoritative; ``False`` for the other
         agents where ``is_error`` is best-effort) and
         ``truncated_fields`` (list naming any of ``input``/``intent``/
@@ -305,7 +308,8 @@ def find_tool_calls(
         ``input``/``intent``/``assistant``/``output`` fields are each
         bounded to a per-field char cap; an over-cap value is sliced with
         a ``…[truncated]`` marker.  Call↔result correlation is by
-        ``tool_use_id`` (Claude ``tool_use.id`` / OpenCode ``callID``);
+        ``tool_use_id`` (Claude ``tool_use.id`` / OpenCode ``callID`` /
+        Antigravity positional step id);
         agents whose calls carry no id never correlate and keep
         ``is_error=False`` with an empty ``output``.
 
@@ -564,8 +568,7 @@ def find_tool_calls(
                         "assistant": capped_asst,
                         "is_error": call_is_error,
                         "is_error_reliable": (
-                            agent_name.value.lower()
-                            in {"claude", "opencode", "zcode"}
+                            agent_name in ERROR_FLAG_RELIABLE_AGENTS
                         ),
                         "output": capped_output,
                         "truncated_fields": truncated_fields,

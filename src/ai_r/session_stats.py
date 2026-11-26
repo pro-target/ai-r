@@ -30,7 +30,7 @@ subagents at all, a ``group_by="kind"`` result would show a single
 checked and there were none". To stay honest the result always carries a
 ``kind_split_available`` boolean and, when ``False``, a human-readable
 ``note`` saying the split is degenerate because no subagent sessions were
-in scope (subagent detection is Claude-only today).
+in scope (legacy sessions without parent metadata yield none).
 
 Invariants (kept identical to the rest of the package): zero-LLM,
 deterministic, read-only, pure-stdlib (no new dependencies).
@@ -67,9 +67,11 @@ def children_of(
     the same ``list_sessions`` spine the rollups consume — no re-parse of
     transcripts, purely inventory metadata.
 
-    Note: Antigravity never records a ``parent_uuid``, so a parent under that
-    agent (or any childless parent) yields an empty list — an honest "no
-    children found", not an error.
+    Note: Antigravity v1.5+ records ``parent_uuid`` in
+    ``conversations/<uuid>.db`` (with ``subagents/*.json`` and
+    ``conversation_summaries.db`` fallbacks); legacy ``overview.txt``
+    sessions without parent metadata (or any childless parent) yield an
+    empty list — an honest "no children found", not an error.
     """
     if not parent_uuid or not str(parent_uuid).strip():
         return []
