@@ -248,12 +248,16 @@ def _file_uri_to_path(uri: Any) -> Optional[str]:
     if not isinstance(uri, str):
         return None
     s = uri.strip()
-    if not s:
+    if not s or "\x00" in s:
         return None
     if s.startswith("file://"):
         parsed = urllib.parse.urlparse(s)
+        if parsed.netloc not in ("", "localhost"):
+            return None
         path = urllib.parse.unquote(parsed.path)
-        return path or None
+        if not path or "\x00" in path:
+            return None
+        return path
     if s.startswith("/"):
         return s
     return None
@@ -398,7 +402,7 @@ def _connect_sqlite_ro(db_path: Path) -> Optional[sqlite3.Connection]:
         return None
     try:
         uri = f"file:{urllib.parse.quote(str(db_path), safe='/')}?mode=ro"
-        return sqlite3.connect(uri, uri=True)
+        return sqlite3.connect(uri, uri=True, timeout=0.5)
     except (sqlite3.Error, OSError):
         return None
 
@@ -1003,9 +1007,10 @@ def _scan_brain(
 
         source = record.get("source", "")
         rtype = record.get("type", "")
-        if (isinstance(source, str) and source.startswith("MODEL")) or (
-            isinstance(rtype, str) and rtype.startswith("MODEL")
-        ):
+        if (
+            (isinstance(source, str) and source.startswith("MODEL"))
+            or (isinstance(rtype, str) and rtype.startswith("MODEL"))
+        ) and not (isinstance(rtype, str) and rtype in _TOOL_RESULT_TYPES):
             raw_model = record.get("model")
             if isinstance(raw_model, str):
                 model_name = raw_model.strip()
@@ -1411,7 +1416,7 @@ def read_token_usage(
         if not (
             (isinstance(source, str) and source.startswith("MODEL"))
             or (isinstance(rtype, str) and rtype.startswith("MODEL"))
-        ):
+        ) or (isinstance(rtype, str) and rtype in _TOOL_RESULT_TYPES):
             continue
         usage = _extract_record_tokens(record)
         if usage is None:

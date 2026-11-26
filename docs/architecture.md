@@ -733,10 +733,11 @@ keeping the zero-external-dependency core and read-only invariants intact.
   length-delimited strings/submessages). Adding Google's `protobuf` runtime +
   generated descriptors to read ~10 scalar/string fields would pull a heavy wheel
   and version-skew surface into the stdlib-lean parser layer for a single agent.
-  Opening `.db` via SQLite URI `mode=ro` guarantees strict read-only access
-  (never creating `-wal`/`-shm` sidecars or touching live IDE locks), while a
-  ~60-line pure-Python wire-format reader decodes varint/length-delimited fields
-  deterministically and skips unknown wire types without crashing.
+  Opening `.db` via SQLite URI `mode=ro` with a short `0.5s` timeout guarantees
+  strict read-only access without stalling on live IDE writes, while a compact
+  pure-Python wire-format reader decodes varint/length-delimited fields
+  deterministically, skips unknown field numbers, and fails soft on unsupported
+  wire types without crashing.
 - **Why sorting by `step_index` before positional correlation is mandatory.**
   `transcript_full.jsonl` flushes steps as they *finish*, so on-disk line order is
   **non-monotonic in `step_index`** (in observed sessions tool-result steps `2..8`
