@@ -2513,6 +2513,115 @@ def test_find_file_edits_antigravity_content_part_tool(
     assert hit["file"] == "/tmp/ag-content/handler.py"
 
 
+def test_antigravity_edit_tools_hunks_and_input_summary(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Antigravity edit/write tools, path keys, hunks and _tool_use_summary."""
+    from ai_r.events.render import _hunk_from_tool
+    from ai_r.find_file_edits import EDIT_TOOLS, edit_path_from_input
+    from ai_r.mcp_server import _tool_use_summary
+
+    for name in (
+        "edit_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_file",
+        "write_to_file",
+    ):
+        assert name in EDIT_TOOLS
+
+    assert edit_path_from_input({"Path": "/ag/a.py"}) == "/ag/a.py"
+    assert edit_path_from_input({"TargetFile": "/ag/b.py"}) == "/ag/b.py"
+
+    # Hunk shapes (preserving priority of existing shapes).
+    assert _hunk_from_tool(
+        "multi_replace_file_content",
+        {
+            "TargetFile": "/ag/m.py",
+            "ReplacementChunks": [
+                {"TargetContent": "old1", "ReplacementContent": "new1"},
+                {"TargetContent": "old2", "ReplacementContent": "new2"},
+            ],
+        },
+    ) == [
+        {"kind": "replace", "old": "old1", "new": "new1"},
+        {"kind": "replace", "old": "old2", "new": "new2"},
+    ]
+    assert _hunk_from_tool(
+        "write_file", {"Path": "/ag/w1.py", "Content": "hello\n"}
+    ) == [{"kind": "write", "content": "hello\n"}]
+    assert _hunk_from_tool(
+        "write_to_file", {"TargetFile": "/ag/w2.py", "CodeContent": "body\n"}
+    ) == [{"kind": "write", "content": "body\n"}]
+    assert _hunk_from_tool(
+        "edit_file",
+        {"Path": "/ag/e1.py", "Target": "before", "Replacement": "after"},
+    ) == [{"kind": "replace", "old": "before", "new": "after"}]
+    assert _hunk_from_tool(
+        "replace_file_content",
+        {
+            "TargetFile": "/ag/e2.py",
+            "TargetContent": "old_block",
+            "ReplacementContent": "new_block",
+        },
+    ) == [{"kind": "replace", "old": "old_block", "new": "new_block"}]
+
+    # _tool_use_summary PascalCase keys.
+    assert (
+        _tool_use_summary(
+            {
+                "name": "run_command",
+                "input": json.dumps(
+                    {"CommandLine": "pytest -q", "toolSummary": "Run tests"}
+                ),
+            }
+        )
+        == "[tool_use: run_command CommandLine=pytest -q]"
+    )
+    assert (
+        _tool_use_summary(
+            {"name": "read_file", "input": json.dumps({"Path": "/ag/a.py"})}
+        )
+        == "[tool_use: read_file Path=/ag/a.py]"
+    )
+    assert (
+        _tool_use_summary(
+            {
+                "name": "replace_file_content",
+                "input": json.dumps({"TargetFile": "/ag/b.py"}),
+            }
+        )
+        == "[tool_use: replace_file_content TargetFile=/ag/b.py]"
+    )
+    assert (
+        _tool_use_summary(
+            {
+                "name": "view_file",
+                "input": json.dumps({"AbsolutePath": "/ag/c.py"}),
+            }
+        )
+        == "[tool_use: view_file AbsolutePath=/ag/c.py]"
+    )
+    assert (
+        _tool_use_summary(
+            {
+                "name": "grep_search",
+                "input": json.dumps({"Query": "needle", "SearchPath": "/ag"}),
+            }
+        )
+        == "[tool_use: grep_search Query=needle]"
+    )
+    assert (
+        _tool_use_summary(
+            {
+                "name": "read_url_content",
+                "input": json.dumps({"Url": "https://example.com"}),
+            }
+        )
+        == "[tool_use: read_url_content Url=https://example.com]"
+    )
+
+
 # ---------------------------------------------------------------------------
 # find_file_edits — bound filter naive vs aware normalization
 # ---------------------------------------------------------------------------

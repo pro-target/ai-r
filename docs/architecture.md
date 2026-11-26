@@ -18,7 +18,7 @@ responsibility and depends only on the layer below it.
 │   • claude.py     — JSONL                                    │
 │   • codex.py      — JSONL                                    │
 │   • opencode.py   — SQLite (with snap/flatpak detection)     │
-│   • antigravity.py — brain directory                         │
+│   • antigravity.py — brain JSONL + SQLite/protobuf metadata  │
 │   • pi.py          — JSONL session tree                      │
 │                                                              │
 │   Shared schema: Session, AgentName                          │
@@ -88,7 +88,7 @@ Path resolution per agent:
 | Claude | `~/.claude/projects/<slug>/<uuid>.jsonl` |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<uuid>.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db` (or snap variants) |
-| Antigravity | `~/.gemini/antigravity/brain/<uuid>/` |
+| Antigravity | `~/.gemini/{antigravity,antigravity-cli,antigravity-ide,antigravity-backup}/brain/<uuid>/` + `conversations/<uuid>.db` (`.pb` / `conversation_summaries.db` / `subagents/<uuid>.json` fallbacks, dedup by `uuid`) |
 | Pi | `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` |
 
 The `Session` and `Message` models are shared; see
@@ -118,7 +118,8 @@ extract the producing model where the format records one (`Message.model`,
 rolled up per session as `Session.models`; Claude assistant
 `message.model` with the `<synthetic>` stub mapped to `null`, Codex
 `turn_context.model`, OpenCode `message.data.modelID`, Pi assistant
-`message.model`; Antigravity has no structured signal), every event
+`message.model`, Antigravity `MODEL/PLANNER_RESPONSE.model` — legacy
+`overview.txt` brains without it stay `null`), every event
 inherits the model of the message behind it (a `tool_call`/`plan_event`
 carries its assistant turn's model), and the surface reuses the existing
 verbs — a `model` facet on `query`, `group_by="model"` on `aggregate`, a
@@ -460,8 +461,10 @@ reader/consumer boundary it deliberately does NOT cross.
 - **Per-agent honesty.** Structured signals only where the format records them:
   Claude `image` parts + text-mined refs; OpenCode a `file` content-part on the
   user role (a bug-fix — it used to be classified as `tool_use`); Codex
-  `input_image`; Antigravity/Pi carry no structured attachment signal, so they
-  contribute only the text path (honestly empty when the prose carries none,
+  `input_image`; Antigravity lifts structured `media` items on `USER_INPUT`
+  (`mime_type`/`uri`; legacy `overview.txt` brains carry none and fall back to
+  text-only); Pi carries no structured attachment signal, so it contributes
+  only the text path (honestly empty when the prose carries none,
   never fabricated). `ide_context` is tagged distinctly because an
   `<ide_opened_file>` / `<ide_selection>` injection is weaker evidence than a
   deliberate attachment. A URL inside a fenced code block is not extracted.
@@ -504,10 +507,11 @@ body". This ADR records the reversal to **opt-in** and why.
   there, the parser folds an orphan reasoning record's `thinking` onto the adjacent
   answer message (`fold_orphan_thinking` in `ai_r.parsers._common`), preserving
   `message_index`, so `has_thinking` / `read_session` / `get_body` surface reasoning
-  uniformly for Claude / Codex / OpenCode / Pi. The one residual gap is a reasoning
+  uniformly for Claude / Codex / OpenCode / Pi / Antigravity (`MODEL/PLANNER_RESPONSE.thinking`;
+  legacy `overview.txt` Antigravity brains carry no reasoning signal and report
+  `has_thinking=False`). The one residual gap is a reasoning
   record with no following answer text before the next user turn (a rare tail),
-  which stays capture- and search-only. Antigravity records no reasoning signal, so
-  `has_thinking` is always `False`. `component_tokens.thinking` accounts for the
+  which stays capture- and search-only. `component_tokens.thinking` accounts for the
   volume regardless.
 - **Fail-soft / invariants.** `has_thinking` is a hint, explicitly **not** part
   of the event `sha256` (adding it changes no identity), and the query row emits
@@ -692,3 +696,65 @@ re-derived by hand instead of being answered once, at the source.
   an error — and the registry is sampled once per `list_sessions` call
   (TTL-cached ~2.5 s), not once per session, so a listing spawns the subprocess
   at most once. SSOT `ai_r.liveness.session_liveness` + `resolve_session_liveness`.
+
+### ADR: Antigravity v1.5+ parity — brain JSONL + read-only SQLite/protobuf metadata without external dependencies
+
+Earlier Antigravity support treated `~/.gemini/antigravity*/brain/<uuid>/` as a
+markdown/overview scratchpad, leaving subagent hierarchy, `project_dir`, tool
+results (`is_error`), exact tokens, `model`, `thinking`, and structured `media`
+attachments blank. Antigravity v1.5+ stores full structured sessions across two
+companion layers; this ADR records bringing the parser to full parity while
+keeping the zero-external-dependency core and read-only invariants intact.
+
+- **What changed.** Four roots under `~/.gemini/{antigravity,antigravity-cli,antigravity-ide,antigravity-backup}/`
+  are scanned and deduplicated by `uuid`, pairing the transcript layer in
+  `brain/<uuid>/.system_generated/logs/` (`transcript_full.jsonl` >
+  `transcript.json` > `transcript.jsonl` > `overview.txt`) with the metadata
+  companion `conversations/<uuid>.db` (`trajectory_metadata_blob` where
+  `id='main'`, falling back to `conversations/<uuid>.pb`,
+  `conversation_summaries.db`, and
+  `<parent_brain>/.system_generated/subagents/<uuid>.json`). From `.db`/fallbacks
+  come `project_dir` (`file://` workspace URI in `f1.1`/`f7` or `workspaceUris`),
+  session `created_at` (`f2`), and subagent hierarchy (`f5`=`parent_uuid`,
+  `f6`=`root_uuid`, `f8.1`=`subagent_type`, `f8.2`/`f8.3`=`title`/`prompt`,
+  `f17`=`spawn_depth`). From `MODEL/PLANNER_RESPONSE` and `USER_INPUT` come
+  per-call and per-message exact tokens (`input_tokens`, `output_tokens`,
+  `cache_read_tokens`), `model` (`Message.model` / `Session.models`), `thinking`
+  (`Message.thinking` / `has_thinking`), per-step `created_at`, `USER_INPUT.media`
+  attachments (`user_ref`), the full tool vocabulary (`edit_file`,
+  `replace_file_content`, `multi_replace_file_content`, `write_file`,
+  `write_to_file`, `read_file`, `view_file`, `run_command`, `invoke_subagent`,
+  `search_web`, `read_url_content`), and authoritative tool outcomes
+  (`ERROR_FLAG_RELIABLE_AGENTS`). `resume_command` stays honestly `null`
+  (Antigravity has no CLI resume-by-UUID flag).
+- **Why stdlib `sqlite3` (`mode=ro`) + a ~60-line protobuf wire decoder (no
+  `protobuf` dependency).** Both `trajectory_metadata_blob.data` in `.db` and raw
+  `.pb` files encode a small set of stable protobuf wire tags (varints and
+  length-delimited strings/submessages). Adding Google's `protobuf` runtime +
+  generated descriptors to read ~10 scalar/string fields would pull a heavy wheel
+  and version-skew surface into the stdlib-lean parser layer for a single agent.
+  Opening `.db` via SQLite URI `mode=ro` with a short `0.5s` timeout guarantees
+  strict read-only access without stalling on live IDE writes, while a compact
+  pure-Python wire-format reader decodes varint/length-delimited fields
+  deterministically, skips unknown field numbers, and fails soft on unsupported
+  wire types without crashing.
+- **Why sorting by `step_index` before positional correlation is mandatory.**
+  `transcript_full.jsonl` flushes steps as they *finish*, so on-disk line order is
+  **non-monotonic in `step_index`** (in observed sessions tool-result steps `2..8`
+  sit on disk *before* the `MODEL/PLANNER_RESPONSE` at `step_index=1` that
+  invoked them), and neither `tool_calls[*]` (`{name, args}`) nor `MODEL/GENERIC`
+  carries a `call_id`. Records must therefore be sorted by `step_index` before
+  assembling messages: a `PLANNER_RESPONSE` at `S` with `N` `tool_calls` then
+  binds positionally to the next `N` tool-result steps (`MODEL/GENERIC`, marking
+  `status in ("ERROR", "INVALID")` or non-empty `error` as `is_error=True`),
+  which also stops `MODEL/GENERIC` payloads from being mis-emitted as assistant
+  text.
+- **Fail-soft & legacy `overview.txt` degradation.** `transcript_full.jsonl` is
+  preferred over `transcript.jsonl` (which carries `truncated_fields`), while
+  raw byte-sliced `logs/chunks/*` are avoided when the full log exists; truncated
+  streaming tails or malformed JSON lines are skipped per-line without aborting
+  the session. Legacy `overview.txt`-only brains without `.db`/`.pb` companions
+  or step-level metadata degrade honestly to `project_dir=None`,
+  `parent_uuid=None` (`kind="agent"`), `models=()`, `thinking=None`, and
+  `source="estimate"` tokens — never crashing and never fabricating missing
+  signals.

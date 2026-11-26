@@ -13,21 +13,56 @@ this file.
 | codex        | yes            | yes                 | Fully working.                         |
 | opencode     | yes            | yes                 | Reads message bodies from `part` table.|
 | pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
-| antigravity  | optional       | optional            | Real-data smoke skips when absent.     |
+| antigravity  | yes            | yes                 | Two-layer v1.5+ store across 4 roots:  |
+|              |                |                     | `brain/<uuid>/transcript_full.jsonl`   |
+|              |                |                     | + `conversations/<uuid>.db` (ro)       |
+|              |                |                     | (`overview.txt`/`.pb` fallbacks).      |
 | zcode        | yes            | yes                 | SQLite `~/.zcode/cli/db/db.sqlite`     |
 |              |                |                     | (canonical) + rollout JSONL fallback.  |
 
 Status confirmed 2026-06-21 via `ai-r list` / `ai-r read
 --messages` against real session stores (zcode row re-confirmed
-2026-09-23).
+2026-09-23; antigravity v1.5+ two-layer store live-validated against
+52 real `brain/` directories + 46 `.db` / 5 `.pb` companions).
 
-### Antigravity (optional real-data smoke)
+### Antigravity (two-layer store: `brain/<uuid>/` JSONL + `conversations/<uuid>.db`)
 
-Antigravity correctness is covered by fixture unit tests
+Antigravity v1.5+ stores sessions under four roots beneath `~/.gemini/` —
+`antigravity`, `antigravity-cli`, `antigravity-ide`, and `antigravity-backup`
+— deduplicated by `<uuid>` (preferring `transcript_full.jsonl` / `.db` over
+`transcript.jsonl` over legacy `overview.txt` / `.pb`, tie-broken by max
+`mtime`):
+
+1. **Transcript layer (`brain/<uuid>/`)** —
+   `.system_generated/logs/transcript_full.jsonl` (canonical, un-truncated) >
+   `transcript.json` > `transcript.jsonl` (UI copy with `truncated_fields`) >
+   `overview.txt` (legacy metadata-only log), alongside markdown plan files
+   (`implementation_plan.md`, `walkthrough.md`, `task.md*`). Because steps are
+   appended as they finish, on-disk line order is **non-monotonic in
+   `step_index`**; the parser sorts records by `step_index` before assembling
+   `Message`s so `MODEL/PLANNER_RESPONSE.tool_calls` bind positionally to the
+   following `MODEL/GENERIC` tool-result steps (`status in ("ERROR",
+   "INVALID")` or non-empty `error` → `is_error=True`, stopping `MODEL/GENERIC`
+   from being mis-emitted as assistant prose), and extracts per-call exact
+   tokens (`input_tokens`, `output_tokens`, `cache_read_tokens`), `model`,
+   `thinking`, `created_at`, and `USER_INPUT.media` attachments.
+2. **Metadata companion (`conversations/<uuid>.db`)** — opened read-only via
+   stdlib `sqlite3` (`mode=ro`) and decoded with a small stdlib protobuf
+   wire-format reader over `trajectory_metadata_blob` (`id='main'`), yielding
+   `project_dir` (`file://` workspace URI in `f1.1`/`f7`), `created_at`
+   (`f2`), and subagent hierarchy (`f5`=`parent_uuid`, `f6`=`root_uuid`,
+   `f8.1`=`subagent_type`, `f8.2`/`f8.3`=`title`/`prompt`,
+   `f17`=`spawn_depth`), with fallbacks to `conversations/<uuid>.pb`,
+   `conversation_summaries.db`, and
+   `<parent_brain>/.system_generated/subagents/<uuid>.json`. Legacy
+   `overview.txt`-only brains without companion metadata degrade fail-soft to
+   `None` / `()` / `estimate`.
+
+Correctness is covered by hermetic unit fixtures
 ([test_antigravity.py](../tests/test_parsers/test_antigravity.py) plus the
-`fake_antigravity_brain` fixture in [conftest.py](../tests/conftest.py)).
-When a host has a real `~/.gemini/antigravity*/brain` tree, the same test
-module runs read-only smoke coverage against one parseable real brain.
+`fake_antigravity_brain` fixture in [conftest.py](../tests/conftest.py)) and
+read-only real-data smoke checks when `~/.gemini/antigravity*/brain` is
+present.
 
 ### OpenCode (message bodies in `part` table)
 

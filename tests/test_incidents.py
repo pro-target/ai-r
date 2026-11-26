@@ -180,6 +180,24 @@ def test_regret_dictionary_ru_en() -> None:
 def test_command_text_extraction() -> None:
     """Command comes from the command key; description alone never matches."""
     assert _command_text({"command": "ls", "description": "x"}) == "ls"
+    # Antigravity run_command shape: CommandLine wins, toolSummary ignored.
+    assert (
+        _command_text(
+            {"CommandLine": "ls -la", "toolSummary": f"Inspect {RESET_HARD}"}
+        )
+        == "ls -la"
+    )
+    assert (
+        match_danger(
+            _command_text(
+                {"CommandLine": "ls -la", "toolSummary": f"Inspect {RESET_HARD}"}
+            )
+        )
+        == []
+    )
+    assert "git.reset_hard" in match_danger(
+        _command_text({"CommandLine": RESET_HARD, "toolSummary": "Reset branch"})
+    )
     # codex exec shape: list of argv strings.
     assert _command_text({"command": ["bash", "-lc", "ls"]}) == "bash -lc ls"
     assert _command_text("raw string") == "raw string"

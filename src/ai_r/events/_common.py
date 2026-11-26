@@ -28,13 +28,15 @@ from ai_r.security import coerce_tool_input as _coerce_tool_input_shared
 _EDIT_NAMES = frozenset({
     "edit", "multiedit", "multi_edit", "notebookedit",
     "str_replace", "patch", "apply_patch", "edit_file", "update_file",
-    "file_edit",
+    "file_edit", "replace_file_content", "multi_replace_file_content",
 })
 _WRITE_NAMES = frozenset({
-    "write", "write_file", "create_file", "file",
+    "write", "write_file", "write_to_file", "create_file", "file",
 })
 _READ_NAMES = frozenset({
     "read", "read_file", "view", "cat", "open",
+    "view_file", "view_file_outline", "view_code_item",
+    "grep_search", "find_by_name", "list_dir",
 })
 _BASH_NAMES = frozenset({
     "bash", "shell", "exec_command", "local_shell_call", "run_command",
@@ -43,7 +45,10 @@ _BASH_NAMES = frozenset({
 
 # Keys that carry a file path in a (parsed) tool input.  Superset of
 # ``find_file_edits.EDIT_PATH_KEYS`` so ``read``-style calls resolve too.
-_PATH_KEYS = ("file_path", "notebook_path", "path", "filePath", "abspath")
+_PATH_KEYS = (
+    "file_path", "notebook_path", "path", "filePath", "abspath",
+    "Path", "TargetFile", "AbsolutePath", "SearchPath", "DirectoryPath",
+)
 
 
 def classify_tool(name: str) -> str:
@@ -90,24 +95,31 @@ TOOL_SUBTYPE: frozenset[str] = frozenset(
 # a Task call is still ``tool_call(other)``; its kind lives in the refs.
 
 # Subagent-spawn wrapper names (lowercase) — Claude ``Task`` (legacy) /
-# ``Agent`` (current), OpenCode ``task``, Codex ``spawn_agent``.
-_TASK_NAMES = frozenset({"task", "agent", "spawn_agent"})
+# ``Agent`` (current), OpenCode ``task``, Codex ``spawn_agent``,
+# Antigravity ``invoke_subagent``.
+_TASK_NAMES = frozenset({"task", "agent", "spawn_agent", "invoke_subagent"})
 # Skill/slash-command wrapper names — Claude ``Skill``/``SlashCommand``,
 # OpenCode ``skill``.
 _SKILL_NAMES = frozenset({"skill", "slashcommand"})
 # Network-touching tool names (the F4.3 web-audit signal) — Claude
 # ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
 # (surfaced from ``web_search_call`` rollout records by the codex parser),
-# Gemini/Antigravity ``web_fetch``/``google_web_search`` (verified against
-# the vendored gemini-cli reference).  Name-based only; Pi records no web
-# tool — honest absence.
+# Gemini/Antigravity ``web_fetch``/``google_web_search``/``search_web``/
+# ``read_url_content``.  Name-based only; Pi records no web tool — honest
+# absence.
 _WEB_NAMES = frozenset({
-    "webfetch", "web_fetch", "websearch", "web_search", "google_web_search",
+    "webfetch", "web_fetch", "websearch", "web_search",
+    "google_web_search", "search_web", "read_url_content",
 })
 
 # Input keys that carry the real name under each wrapper, by preference.
-# Task: Claude/OpenCode ``subagent_type``, Codex ``agent_type``.
-_TASK_RESOLVE_KEYS = ("subagent_type", "agent_type", "subagent")
+# Task: Claude/OpenCode ``subagent_type``, Codex ``agent_type``,
+# Antigravity ``TypeName``/``type_name``/``Role``/``role`` (plus batch
+# ``Subagents[*].TypeName`` when uniform — see ``resolve_tool``).
+_TASK_RESOLVE_KEYS = (
+    "subagent_type", "agent_type", "subagent",
+    "TypeName", "type_name", "Role", "role",
+)
 # Skill: Claude ``skill``, OpenCode ``name``, SlashCommand ``command``.
 _SKILL_RESOLVE_KEYS = ("skill", "name", "command")
 
@@ -161,7 +173,23 @@ def resolve_tool(name: str, payload: object = None) -> Tuple[str, Optional[str]]
     if mcp_match:
         return "mcp", f"{mcp_match.group(1)}:{mcp_match.group(2)}"
     if low in _TASK_NAMES:
-        return "task", _first_str_value(payload, _TASK_RESOLVE_KEYS)
+        resolved = _first_str_value(payload, _TASK_RESOLVE_KEYS)
+        if resolved is None and isinstance(payload, dict):
+            subagents = payload.get("Subagents")
+            if isinstance(subagents, list) and all(
+                isinstance(el, dict) for el in subagents
+            ):
+                non_empty = [el for el in subagents if el]
+                if non_empty:
+                    types = {
+                        _first_str_value(el, ("TypeName", "type_name"))
+                        for el in non_empty
+                    }
+                    if len(types) == 1:
+                        only = next(iter(types))
+                        if only is not None:
+                            resolved = only
+        return "task", resolved
     if low in _SKILL_NAMES:
         resolved = _first_str_value(payload, _SKILL_RESOLVE_KEYS)
         if resolved:
@@ -214,7 +242,8 @@ class Event:
             from :attr:`~ai_r.parsers.models.Message.model` — an
             ``assistant_turn`` / ``tool_call`` / ``plan_event`` carries
             the model of the assistant message behind it.  ``None``
-            where the format records no signal (user turns, Antigravity)
+            where the format records no signal (user turns, legacy Antigravity
+            ``overview.txt`` sessions)
             — absence is honest, never fabricated.  Provenance metadata
             like ``agent``/``ts``: NOT part of the ``sha256`` content
             hash.
@@ -234,7 +263,8 @@ class Event:
             pull it on demand" without loading it — the thinking text stays
             out of the default output/search (opt-in via ``include_thinking``).
             Set on ``assistant_turn`` events; ``False`` elsewhere and where the
-            format has no reasoning signal (Antigravity).  Like :attr:`model` /
+            format has no reasoning signal (legacy Antigravity
+            ``overview.txt`` sessions).  Like :attr:`model` /
             :attr:`body`, NOT part of the ``sha256`` hash.
     """
 

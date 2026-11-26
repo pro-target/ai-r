@@ -5,8 +5,8 @@ those requests look?" in one call.  A *network event* is any tool call the
 wrapper-aware classifier marks ``tool_kind="web"`` (F3.1): Claude
 ``WebFetch``/``WebSearch``, OpenCode ``webfetch``, Codex ``web_search``
 (surfaced from ``web_search_call`` rollout records), Gemini/Antigravity
-``web_fetch``/``google_web_search``.  Pi records no web tool — honest
-absence, nothing fabricated.
+``web_fetch``/``google_web_search``/``search_web``/``read_url_content``.
+Pi records no web tool — honest absence, nothing fabricated.
 
 This is a preset over the existing core, NOT a second engine (project
 preset rule):
@@ -97,9 +97,9 @@ RISK_LABELS: Tuple[str, ...] = (
 )
 
 # Input keys that carry the request target, by preference (calibrated —
-# see module docstring).
-_URL_KEYS = ("url",)
-_QUERY_KEYS = ("query",)
+# see module docstring; includes PascalCase ``Url``/``Query`` for Antigravity).
+_URL_KEYS = ("url", "Url")
+_QUERY_KEYS = ("query", "Query")
 _PROMPT_KEYS = ("prompt",)
 
 # ``_URL_IN_TEXT_RE`` (first http(s) URL embedded in free text — the Gemini

@@ -176,8 +176,9 @@ _REACTION_HEAD_CONTEXT = 80   # chars kept before the regret hit
 _DEFAULT_LIMIT = 50
 
 # Input keys that carry the actual shell command in a parsed tool input,
-# by preference (Claude ``command``, codex exec variants, generic fallbacks).
-_COMMAND_KEYS = ("command", "cmd", "script", "code")
+# by preference (Claude ``command``, codex exec variants, Antigravity
+# ``CommandLine``, generic fallbacks).
+_COMMAND_KEYS = ("command", "cmd", "CommandLine", "script", "code")
 
 
 # --- dictionary matching (exposed for tests + calibration reuse) ------------

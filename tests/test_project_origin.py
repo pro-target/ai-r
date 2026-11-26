@@ -418,7 +418,7 @@ class TestPiOrigin:
 
 
 # ---------------------------------------------------------------------------
-# Antigravity — brain-root launch surface; NO project_dir signal
+# Antigravity — brain-root launch surface + .db trajectory_metadata project_dir
 # ---------------------------------------------------------------------------
 
 
@@ -438,8 +438,24 @@ def _write_brain(brain: Path) -> None:
     )
 
 
+def _ag_pb_varint(val: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = val & 0x7F
+        val >>= 7
+        if val:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _ag_pb_bytes(fn: int, raw: bytes) -> bytes:
+    return _ag_pb_varint((fn << 3) | 2) + _ag_pb_varint(len(raw)) + raw
+
+
 class TestAntigravityOrigin:
-    def test_ide_and_cli_roots_distinguished(
+    def test_legacy_brain_without_db_keeps_project_dir_none(
         self, tmp_sessions_dir: Path
     ) -> None:
         gemini = tmp_sessions_dir / ".gemini"
@@ -447,21 +463,54 @@ class TestAntigravityOrigin:
             gemini / "antigravity" / "brain"
             / "11111111-2222-3333-4444-555555555555"
         )
+        ide2_brain = (
+            gemini / "antigravity-ide" / "brain"
+            / "22222222-3333-4444-5555-666666666666"
+        )
         cli_brain = (
             gemini / "antigravity-cli" / "brain"
             / "66666666-7777-8888-9999-000000000000"
         )
         _write_brain(ide_brain)
+        _write_brain(ide2_brain)
         _write_brain(cli_brain)
         by_uuid = {s.uuid: s for s in antigravity.list_sessions()}
         ide = by_uuid["11111111-2222-3333-4444-555555555555"]
+        ide2 = by_uuid["22222222-3333-4444-5555-666666666666"]
         cli = by_uuid["66666666-7777-8888-9999-000000000000"]
         assert ide.launch_surface == "antigravity-ide"
+        assert ide2.launch_surface == "antigravity-ide"
         assert cli.launch_surface == "antigravity-cli"
-        # No structured cwd/directory field exists in the format —
-        # project_dir must stay honestly absent, never guessed from text.
+        # Legacy brain without .db / summaries carries no cwd signal -> None.
         assert ide.project_dir is None
+        assert ide2.project_dir is None
         assert cli.project_dir is None
+
+    def test_modern_brain_with_db_extracts_project_dir(
+        self, tmp_sessions_dir: Path
+    ) -> None:
+        gemini = tmp_sessions_dir / ".gemini" / "antigravity"
+        uid = "77777777-8888-4999-8000-111111111111"
+        _write_brain(gemini / "brain" / uid)
+        db_path = gemini / "conversations" / f"{uid}.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        uri_bytes = "file:///home/u/dev/ag-proj".encode("utf-8")
+        blob = _ag_pb_bytes(1, _ag_pb_bytes(1, uri_bytes))
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)"
+        )
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (blob,)
+        )
+        conn.commit()
+        conn.close()
+
+        sess = antigravity.read_session(uid)
+        assert sess.project_dir == "/home/u/dev/ag-proj"
+        assert sess.launch_surface == "antigravity-ide"
+        res = list_sessions(agent="antigravity", project_dir="/home/u/dev")
+        assert {s["uuid"] for s in res["sessions"]} == {uid}
 
     def test_arbitrary_base_dir_yields_no_surface(
         self, tmp_path: Path

@@ -54,12 +54,15 @@ EDIT_TOOLS: frozenset[str] = frozenset({
     "Edit", "edit", "Write", "write",
     "MultiEdit", "NotebookEdit",
     "str_replace", "patch", "file",
-    "file_edit", "write_file", "create_file", "apply_patch",
+    "file_edit", "write_file", "write_to_file", "create_file", "apply_patch",
     "edit_file", "update_file", "multi_edit",
+    "replace_file_content", "multi_replace_file_content",
 })
 
 
-EDIT_PATH_KEYS: tuple[str, ...] = ("file_path", "notebook_path", "path")
+EDIT_PATH_KEYS: tuple[str, ...] = (
+    "file_path", "notebook_path", "path", "Path", "TargetFile",
+)
 
 
 # Codex CLI routes file writes through a shell-exec tool (``exec_command`` /
