@@ -35,8 +35,11 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
         "resume_command": str|None, "candidates": [...], "verified": bool,
         "self": bool}`` where:
 
-        * ``session_id`` / ``agent`` describe the FIRST (highest-priority)
-          candidate — the same one the CLI's default ``list`` mode returns.
+        * ``session_id`` / ``agent`` describe the CHOSEN candidate: the
+          first self-marked one (``is_self=True``) when the cascade has
+          any — the same principle as the CLI's ``AI_SESSION_OUTPUT=self``
+          mode — else the FIRST (highest-priority) candidate, the same one
+          the CLI's default ``list`` mode returns.
         * ``model`` is the model of the current session — the LAST
           assistant ``model`` recorded in its transcript (the runtime
           environment itself carries no model signal, so this is a
@@ -56,7 +59,7 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
           incomplete — honest absence, never guessed.
         * ``candidates`` is the full cascade (each ``{id, agent, source,
           verified, self, fingerprint}``), so a caller can disambiguate.
-        * ``verified`` / ``self`` mirror the first candidate's flags.
+        * ``verified`` / ``self`` mirror the chosen candidate's flags.
     """
     from ai_r.agents import detect_agent as _detect_agent
     from ai_r.parsers import coerce_agent as _coerce_agent
@@ -84,12 +87,21 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
     env_agent = _detect_agent()
     env_agent_str = env_agent.value.lower() if env_agent is not None else None
 
-    first = candidates[0] if candidates else None
-    session_id = first.session_id if first is not None else None
-    # Agent of record: the first candidate's agent, else the env-detected
+    # Self-priority (L-15): a self-marked candidate is the caller's own
+    # session even when it is not the cascade head — the shared MCP HTTP
+    # daemon's store-recency fallback can put a NEIGHBOUR first.  Same
+    # principle as the ``AI_SESSION_OUTPUT=self`` mode of
+    # ``ai_r.session._select_from_candidates``; with no self-marked
+    # candidate the first one keeps the default list-mode semantics.
+    chosen = next(
+        (c for c in candidates if c.is_self),
+        candidates[0] if candidates else None,
+    )
+    session_id = chosen.session_id if chosen is not None else None
+    # Agent of record: the chosen candidate's agent, else the env-detected
     # agent, else the caller's hint.
-    if first is not None and first.agent is not None:
-        agent_str: Optional[str] = first.agent.value.lower()
+    if chosen is not None and chosen.agent is not None:
+        agent_str: Optional[str] = chosen.agent.value.lower()
     elif env_agent_str is not None:
         agent_str = env_agent_str
     else:
@@ -102,8 +114,8 @@ def detect_current(agent: Optional[str] = None) -> dict[str, Any]:
         "resume_command": _current_session_resume(session_id, agent_str),
         "liveness": _current_session_liveness(session_id, agent_str),
         "candidates": candidate_dicts,
-        "verified": first.verified if first is not None else False,
-        "self": first.is_self if first is not None else False,
+        "verified": chosen.verified if chosen is not None else False,
+        "self": chosen.is_self if chosen is not None else False,
     }
 
 

@@ -401,6 +401,79 @@ def test_detect_current_matches_cascade(
     assert [c["source"] for c in r["candidates"]] == [c.source for c in cascade]
 
 
+def _fake_candidate(
+    session_id: str, is_self: bool
+) -> Any:
+    """A deterministic ``SessionCandidate`` for cascade-seam tests."""
+    from ai_r.parsers.models import AgentName
+    from ai_r.session import SessionCandidate
+
+    return SessionCandidate(
+        session_id=session_id,
+        agent=AgentName.OPENCODE,
+        source="ts_file:opencode",
+        verified=True,
+        is_self=is_self,
+        fingerprint=None,
+    )
+
+
+def test_detect_current_prefers_self_marked_candidate(
+    _clean_detect_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L-15: a self-marked candidate wins over the cascade's head.
+
+    The shared MCP HTTP daemon sees no caller env, so the store-recency
+    fallback can put a NEIGHBOUR session first (``is_self=False``) while
+    the caller's own session sits later in the list.  Selection follows
+    the ``AI_SESSION_OUTPUT=self`` principle of ``_select_from_candidates``
+    (first ``is_self=True`` candidate), not blind ``candidates[0]``.
+    """
+    from ai_r import session as session_module
+
+    monkeypatch.setattr(
+        session_module,
+        "detect_session_candidates",
+        lambda: [
+            _fake_candidate("ses_other_neighbour", is_self=False),
+            _fake_candidate("ses_self_caller", is_self=True),
+        ],
+    )
+    r = detect_current()
+    assert r["session_id"] == "ses_self_caller"
+    assert r["agent"] == "opencode"
+    assert r["self"] is True
+    assert r["verified"] is True
+    # The full cascade is still reported untouched, head first.
+    assert [c["id"] for c in r["candidates"]] == [
+        "ses_other_neighbour", "ses_self_caller",
+    ]
+
+
+def test_detect_current_without_self_keeps_first_candidate(
+    _clean_detect_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No self-marked candidate → the default list-mode answer: the first.
+
+    Honest fallback semantics (mirrors ``detect_session_id``'s ``list``
+    mode): nothing distinguishes the caller's own session, so the first
+    candidate is reported with ``self=False`` — never guessed as self.
+    """
+    from ai_r import session as session_module
+
+    monkeypatch.setattr(
+        session_module,
+        "detect_session_candidates",
+        lambda: [
+            _fake_candidate("ses_first_plain", is_self=False),
+            _fake_candidate("ses_second_plain", is_self=False),
+        ],
+    )
+    r = detect_current()
+    assert r["session_id"] == "ses_first_plain"
+    assert r["self"] is False
+
+
 def test_detect_current_agent_hint_when_no_session_agent(
     _clean_detect_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
