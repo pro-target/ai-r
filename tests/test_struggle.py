@@ -271,6 +271,13 @@ def test_unknown_kind_rejected(struggle_db: Path) -> None:
         struggle(db=str(struggle_db), kinds=("nope",))
 
 
+def test_negative_top_rejected(struggle_db: Path) -> None:
+    # `top < 0` must fail loud, not silently drop every record
+    # (the old truthy check made `used >= top` keep nothing).
+    with pytest.raises(ValueError):
+        struggle(db=str(struggle_db), top=-1)
+
+
 # ------------------------------------------------------- stage 2: ll / br
 
 
@@ -393,3 +400,9 @@ def test_cli_unsupported_agent(struggle_db, capsys: pytest.CaptureFixture) -> No
     code = _run_cli("--db", str(struggle_db), "--agent", "claude")
     assert code == 2
     assert "zcode" in capsys.readouterr().err
+
+
+def test_cli_negative_top(struggle_db, capsys: pytest.CaptureFixture) -> None:
+    code = _run_cli("--db", str(struggle_db), "--top", "-1")
+    assert code == 2
+    assert "top" in capsys.readouterr().err

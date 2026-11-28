@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breakdown); the human output prints `needle | mentions | uses` plus the
   per-agent rows when no `--agent` was given.
 
+- **New `ai-r struggle` subcommand: agent struggle signatures from the ZCode
+  registry.** Four detectable signatures, alert-ready records
+  (`session | kind | severity | evidence | ts`, plus `reset_at` for quota
+  deaths): **sd** (silent death — an `error` turn with zero output tokens
+  after at least one model request), **qd** (quota death — the strict
+  `[1308][Usage limit reached …]` provider regex on tool *outputs* of errored
+  sessions; `--loose-markers` opt-in admits substring markers with the
+  documented false positives), **ll** (overspending builder — a turn with
+  `tool_call_count` above the corpus P95 preset) and **br** (blind retry —
+  consecutive same-tool calls with canonically identical input, at least one
+  of the pair errored; v1 cost bound: only errored/signalled sessions or a
+  pinned `--session` are scanned). `--kinds` selects a subset,
+  `--since`/`--until` bound turn starts, `--top` caps records per kind
+  (0 = unlimited, negatives rejected), `--json` feeds the TG-alerter
+  directly. v1 adapter covers `zcode` only. SSOT `ai_r.struggle`.
+
 ### Fixed
 
 - **`ai-r stats --with-tokens` no longer prints estimates as bare integers.**

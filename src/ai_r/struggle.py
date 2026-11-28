@@ -1,8 +1,7 @@
 """Cross-agent ``struggle`` core: detect agents dying silently or in loops.
 
 "Struggle" is what the operator sees from the outside — a session that
-burned tokens and died anyway.  This module turns the taxonomy from the
-struggle-detect spec (``tmp/struggle-detect/reports/report.md``) into
+burned tokens and died anyway.  This module turns the struggle-detect taxonomy into
 detectable signatures over the ZCode sqlite registry:
 
 * **sd** (silent death) — a turn ended ``error`` with zero output tokens
@@ -353,7 +352,7 @@ def struggle(
     start times (naive datetimes read as UTC); ``kinds`` selects a
     subset of :data:`STRUGGLE_KINDS` (default: all); ``top`` caps the
     per-kind record count.  Raises :class:`ValueError` on an unknown
-    kind or an agent without a v1 adapter.
+    kind, a negative ``top``, or an agent without a v1 adapter.
     """
     if agent != "zcode":
         raise ValueError(
@@ -367,6 +366,10 @@ def struggle(
             f"unknown struggle kind(s): {', '.join(sorted(unknown))}; "
             f"expected any of {', '.join(STRUGGLE_KINDS)}"
         )
+    if top < 0:
+        # `--top -1` must fail loud, not silently drop every record
+        # (the old truthy check made `used >= top` keep nothing).
+        raise ValueError(f"top must be >= 0 (got {top}); 0 = unlimited")
 
     if db is None:
         resolved = _resolve_db_paths()
