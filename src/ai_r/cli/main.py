@@ -27,6 +27,7 @@ from ai_r.cli.commands import (
     read_cmd,
     search_cmd,
     stats_cmd,
+    struggle_cmd,
     usage_cmd,
 )
 
@@ -64,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     stats_cmd.register(sub)
     audit_brief_cmd.register(sub)
     usage_cmd.register(sub)
+    struggle_cmd.register(sub)
     locate_cmd.register(sub)
     detect_agent.register(sub)
     detect_session.register(sub)
