@@ -432,17 +432,85 @@ def test_pi_no_model_field_is_none(
 
 
 # ---------------------------------------------------------------------------
-# Antigravity — no structured model signal, honest absence
+# Antigravity — legacy brain (absent) vs v1.5+ transcript_full.jsonl models
 # ---------------------------------------------------------------------------
 
 
-def test_antigravity_has_no_model_signal(fake_antigravity_brain: Path) -> None:
+def test_antigravity_legacy_brain_has_no_model_signal(
+    fake_antigravity_brain: Path,
+) -> None:
     base = str(fake_antigravity_brain.parent)
     session = antigravity.read_session("test-ag-1", base_dir=base)
     assert session.models == ()
     messages = antigravity.read_messages("test-ag-1", base_dir=base)
     assert messages, "fixture should yield messages"
     assert all(m.model is None for m in messages)
+
+
+def test_antigravity_modern_transcript_models(tmp_sessions_dir: Path) -> None:
+    uid = "ag-models-modern-1"
+    transcript = (
+        tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / uid
+        / ".system_generated" / "logs" / "transcript_full.jsonl"
+    )
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:00Z",
+                "content": "switch models",
+            },
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:02Z",
+                "content": "neon first",
+                "model": "gemini-4-neon-high",
+            },
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:04Z",
+                "content": "flash second",
+                "model": "gemini-4-flash",
+            },
+            {
+                "step_index": 3,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:06Z",
+                "content": "neon repeat",
+                "model": "gemini-4-neon-high",
+            },
+            {
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:08Z",
+                "content": "no model key",
+            },
+        ],
+    )
+    sess = antigravity.read_session(uid)
+    assert sess.models == ("gemini-4-neon-high", "gemini-4-flash")
+    msgs = antigravity.read_messages(uid)
+    assert [m.model for m in msgs] == [
+        None,
+        "gemini-4-neon-high",
+        "gemini-4-flash",
+        "gemini-4-neon-high",
+        None,
+    ]
 
 
 # ---------------------------------------------------------------------------

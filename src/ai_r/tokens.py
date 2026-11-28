@@ -18,7 +18,10 @@ Three honest tiers, per session (never mixed, never guessed):
    * **OpenCode** — per-assistant-message ``tokens`` blocks in the
      ``message.data`` JSON of the SQLite DB.
    * **Pi** — per-assistant-message ``usage`` blocks in the session JSONL.
-   * **Antigravity** — the brain format stores **no** usage → never exact.
+   * **Antigravity** — per-call ``input_tokens`` / ``output_tokens`` /
+     ``cache_read_tokens`` on ``MODEL/PLANNER_RESPONSE`` records in v1.5+
+     ``transcript_full.jsonl`` (legacy ``overview.txt`` sessions store no
+     usage and fall through to the estimate tier).
 
 2. ``source="estimate"`` — no exact record exists, so the transcript text
    volume (message text + tool inputs + tool results) is tokenized:

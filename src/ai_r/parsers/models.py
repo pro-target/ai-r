@@ -64,15 +64,19 @@ class Session:
             OpenCode (``session.parent_id``), Codex
             (``session_meta.payload.parent_thread_id`` or the nested
             ``source.subagent.thread_spawn.parent_thread_id``), Pi
-            (the ``parentSession`` header field).  ``None`` for top-level
-            sessions and for Antigravity (no parent signal in the format).
+            (the ``parentSession`` header field), Antigravity
+            (``conversations/<uuid>.db`` ``trajectory_metadata_blob``
+            field ``f5``, with fallbacks to ``.pb``,
+            ``conversation_summaries.db``, and parent-brain
+            ``subagents/<child>.json``).  ``None`` for top-level
+            sessions.
         kind: ``"agent"`` for a normal top-level session, ``"subagent"``
             for a spawned subagent (sidechain) session.  Defaults to
-            ``"agent"``.  Detected for Claude, OpenCode, Codex and Pi;
-            Antigravity has no subagent signal and always reports
-            ``"agent"``.  Kept consistent with ``parent_uuid`` (a session
-            with a parent is a subagent); the noise criterion lives in
-            :mod:`ai_r.parsers._noise`.
+            ``"agent"``.  Detected for Claude, OpenCode, Codex, Pi,
+            ZCode, and Antigravity (``parent_uuid`` or ``f6 != uuid``
+            in companion metadata).  Kept consistent with ``parent_uuid``
+            (a session with a parent is a subagent); the noise criterion
+            lives in :mod:`ai_r.parsers._noise`.
         project_dir: Absolute path of the project directory the session
             ran in, when the format records one; ``None`` when the
             format carries no signal (never fabricated).  Sources:
@@ -81,9 +85,11 @@ class Session:
             filesystem-verified decode of the ``projects/<slug>``
             storage encoding); Codex — ``session_meta.payload.cwd``;
             OpenCode — the ``session.directory`` column (absent on old
-            schemas → ``None``); Pi — the session-header ``cwd``.
-            Antigravity has no per-session directory signal → always
-            ``None``.
+            schemas → ``None``); Pi — the session-header ``cwd``;
+            Antigravity — ``conversations/<uuid>.db`` workspace URI
+            (``f1.1``/``f7``, fallback ``.pb`` /
+            ``conversation_summaries.db`` / ``subagents/*.json``;
+            ``None`` on legacy brains without companion metadata).
         launch_surface: The surface the session was driven from, when
             the format makes it distinguishable; ``None`` when it does
             not (never fabricated).  Values: Claude —
@@ -92,22 +98,24 @@ class Session:
             ``session_meta.payload.originator`` string (e.g.
             ``"codex_vscode"``, ``"Codex Desktop"``), passed through
             verbatim, no invented taxonomy; Antigravity —
-            ``"antigravity-ide"`` | ``"antigravity-cli"`` (from which
-            brain root holds the session); ZCode — the rollout model-io
-            record's raw ``querySource`` string (e.g. ``"main_turn"`` |
-            ``"subagent"``), passed through verbatim (DB-registered
-            sessions carry no equivalent signal → ``None``).  OpenCode
-            and Pi carry no launch-surface signal → always ``None``.
+            ``"antigravity-ide"`` (``antigravity`` / ``antigravity-ide``
+            roots) | ``"antigravity-cli"`` (``antigravity-cli`` root),
+            ``None`` for ``antigravity-backup`` or arbitrary ``base_dir``;
+            ZCode — the rollout model-io record's raw ``querySource``
+            string (e.g. ``"main_turn"`` | ``"subagent"``), passed
+            through verbatim (DB-registered sessions carry no equivalent
+            signal → ``None``).  OpenCode and Pi carry no launch-surface
+            signal → always ``None``.
         models: Unique model identifiers observed in the session, in
             order of first appearance — the session-level rollup of the
             per-message :attr:`Message.model` signal.  Sources: Claude —
             assistant-record ``message.model`` (the ``<synthetic>``
             placeholder is not a model and is skipped); Codex — the
             ``turn_context`` records' ``model``; OpenCode — assistant
-            ``message.data.modelID``; Pi — assistant ``message.model``.
-            Antigravity records no structured model signal → always
-            empty.  Empty when the format carries no signal (never
-            fabricated).
+            ``message.data.modelID``; Pi — assistant ``message.model``;
+            Antigravity — ``MODEL`` records' ``model`` field in
+            ``transcript_full.jsonl`` (empty on legacy brains).  Empty
+            when the format carries no signal (never fabricated).
         extra: Free-form metadata bag (project slug for Claude, cwd
             for Codex, etc.).  Optional and not part of the equality
             contract.
@@ -149,17 +157,20 @@ class Message:
             input serialized to a string (JSON for structured inputs).
             May additionally carry ``"tool_use_id": str`` when the source
             format exposes a stable call id (Claude ``tool_use.id``,
-            OpenCode ``callID``) so the event layer can correlate the
+            OpenCode ``callID``, Antigravity deterministic positional
+            ``ag-step-<step>-<k>``) so the event layer can correlate the
             call with its result; absent otherwise.
         tool_result: Tuple of ``{"content": str, "is_error": bool}`` dicts
             for tool return values.  ``is_error`` is ``True`` when the
             agent flagged the call as failed.  It is a *real* signal for
             Claude (the ``tool_result.is_error`` flag, else derived from a
             ``<tool_use_error>`` content prefix or a record-level
-            ``toolUseResult: "Error: …"``) and OpenCode
-            (``state.status == "error"``); for Codex, Antigravity and Pi
-            no per-result error flag exists in the source records, so it
-            is best-effort and defaults to ``False`` there.  May also carry
+            ``toolUseResult: "Error: …"``), OpenCode
+            (``state.status == "error"``), and Antigravity
+            (``MODEL/GENERIC`` ``status in ("ERROR", "INVALID")`` or
+            non-empty ``error``); for Codex and Pi no per-result error
+            flag exists in the source records, so it is best-effort and
+            defaults to ``False`` there.  May also carry
             ``"tool_use_id": str`` mirroring the ``tool_use`` id when the
             format exposes one, enabling call↔result correlation.
         qa: Tuple of ``{"question": str, "options": tuple[str, ...],
@@ -180,27 +191,28 @@ class Message:
             carries no plaintext and is skipped), Codex ``reasoning``
             response items (the plaintext ``summary`` — the
             ``encrypted_content`` blob is opaque), OpenCode ``reasoning``
-            parts, Pi ``thinking`` blocks.  Antigravity has no marked
-            reasoning signal → always ``""``.  Kept out of :attr:`text`
-            so narrative and reasoning are never conflated (nor
-            double-counted by token estimates).
+            parts, Pi ``thinking`` blocks, Antigravity
+            ``MODEL/PLANNER_RESPONSE.thinking`` (empty on legacy brains).
+            Kept out of :attr:`text` so narrative and reasoning are never
+            conflated (nor double-counted by token estimates).
         tokens: The format's own per-assistant-message usage, normalized
             to ``{"input", "output", "reasoning", "cache_read",
             "cache_write", "total"}`` (same shape as the session-level
             ``read_token_usage`` blocks; a counter the format does not
-            record is ``None``).  ``None`` where the format records no
-            per-message usage — Codex (cumulative session counter only),
-            Antigravity (no usage at all), user messages — absence is
-            honest, never fabricated.  Not part of the equality contract.
+            record is ``None`` or ``0`` per parser contract).  ``None``
+            where the format records no per-message usage — Codex
+            (cumulative session counter only), legacy Antigravity brains
+            without token fields, user messages — absence is honest,
+            never fabricated.  Not part of the equality contract.
         model: The model identifier that produced this message, where the
             format records one on assistant output: Claude — the assistant
             record's ``message.model`` (the ``<synthetic>`` placeholder is
             NOT a model and maps to ``None``); Codex — the ``model`` of the
             most recent preceding ``turn_context`` record; OpenCode — the
             assistant ``message.data.modelID``; Pi — the assistant
-            ``message.model``.  ``None`` for user/tool messages and where
-            the format carries no signal (Antigravity) — absence is
-            honest, never fabricated.
+            ``message.model``; Antigravity — ``MODEL/PLANNER_RESPONSE.model``.
+            ``None`` for user/tool messages and where the format carries
+            no signal — absence is honest, never fabricated.
         extra: Free-form parser-specific metadata bag for the message.
             Currently used by the ZCode parser for the structured input
             intent the DB records on user turns:
@@ -212,8 +224,8 @@ class Message:
         user_refs: Structured references the USER attached in this message —
             image/file/attachment content parts the format exposes as a
             distinct block (Claude ``image``, OpenCode ``file``/``patch``,
-            Codex ``input_image``), normalized to
-            :func:`ai_r.user_refs.make_user_ref` dicts with
+            Codex ``input_image``, Antigravity ``USER_INPUT.media``),
+            normalized to :func:`ai_r.user_refs.make_user_ref` dicts with
             ``origin="structured"``.  The event layer merges these with the
             ``origin="text"`` refs it extracts from :attr:`text`.  Empty where
             the format exposes no such part — honest absence.  Not part of the

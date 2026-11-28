@@ -693,7 +693,7 @@ def _messages_to_events(
     # Correlate tool_result outcomes back to their calls by ``tool_use_id``.
     # Only ids that appear on a result are recorded; a call whose id is not
     # in this map simply carries no outcome (unknown / no error signal —
-    # e.g. Codex/Pi/Antigravity, which expose no per-result flag).
+    # e.g. Codex/Pi, or legacy Antigravity ``overview.txt`` sessions).
     error_by_tool_id: dict[str, bool] = {}
     for _m in messages:
         for _tr in getattr(_m, "tool_result", ()) or ():

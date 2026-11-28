@@ -140,6 +140,12 @@ def web_session(tmp_sessions_dir: Path) -> str:
 def test_request_fields_url_and_query_keys() -> None:
     assert request_fields({"url": PLAIN_URL, "prompt": "x"}) == (PLAIN_URL, None)
     assert request_fields({"query": "hello world"}) == (None, "hello world")
+    # Antigravity PascalCase keys (read_url_content / search_web / grep-like).
+    assert request_fields({"Url": PLAIN_URL}) == (PLAIN_URL, None)
+    assert request_fields({"Query": "antigravity format"}) == (
+        None,
+        "antigravity format",
+    )
     # Both present (never happens today, but the contract is stable).
     assert request_fields({"url": PLAIN_URL, "query": "q"}) == (PLAIN_URL, "q")
 
@@ -206,6 +212,8 @@ def test_antigravity_web_names_classified() -> None:
     """Gemini/Antigravity web tool names resolve to the web kind."""
     assert resolve_tool("google_web_search", None)[0] == "web"
     assert resolve_tool("web_fetch", None)[0] == "web"
+    assert resolve_tool("search_web", None)[0] == "web"
+    assert resolve_tool("read_url_content", None)[0] == "web"
 
 
 # ---------------------------------------------------------------------------

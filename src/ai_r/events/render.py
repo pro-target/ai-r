@@ -100,6 +100,61 @@ def _hunk_from_tool(
             }
         ]
 
+    # Antigravity multi_replace_file_content: ReplacementChunks list.
+    chunks = input_obj.get("ReplacementChunks")
+    if isinstance(chunks, list) and chunks:
+        chunk_hunks: List[dict[str, Any]] = []
+        for entry in chunks:
+            if not isinstance(entry, dict):
+                continue
+            chunk_hunks.append(
+                {
+                    "kind": "replace",
+                    "old": str(entry.get("TargetContent", "")),
+                    "new": str(entry.get("ReplacementContent", "")),
+                }
+            )
+        if chunk_hunks:
+            return chunk_hunks
+
+    # Antigravity write_file: Content (without Target).
+    if "Content" in input_obj and "Target" not in input_obj:
+        return [
+            {
+                "kind": "write",
+                "content": str(input_obj.get("Content") or ""),
+            }
+        ]
+
+    # Antigravity write_to_file: CodeContent (without TargetContent).
+    if "CodeContent" in input_obj and "TargetContent" not in input_obj:
+        return [
+            {
+                "kind": "write",
+                "content": str(input_obj.get("CodeContent") or ""),
+            }
+        ]
+
+    # Antigravity edit_file: Target → Replacement.
+    if "Target" in input_obj or "Replacement" in input_obj:
+        return [
+            {
+                "kind": "replace",
+                "old": str(input_obj.get("Target", "")),
+                "new": str(input_obj.get("Replacement", "")),
+            }
+        ]
+
+    # Antigravity replace_file_content: TargetContent → ReplacementContent.
+    if "TargetContent" in input_obj or "ReplacementContent" in input_obj:
+        return [
+            {
+                "kind": "replace",
+                "old": str(input_obj.get("TargetContent", "")),
+                "new": str(input_obj.get("ReplacementContent", "")),
+            }
+        ]
+
     # Unknown edit-tool shape — keep it in the timeline, but mark it.
     return [{"kind": "unknown", "raw": input_obj}]
 

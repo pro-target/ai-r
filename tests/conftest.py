@@ -2150,6 +2150,8 @@ _REAL_PI_DIR = Path("~/.pi/agent/sessions").expanduser()
 _REAL_ANTIGRAVITY_DIRS: List[Path] = [
     Path("~/.gemini/antigravity/brain").expanduser(),
     Path("~/.gemini/antigravity-cli/brain").expanduser(),
+    Path("~/.gemini/antigravity-ide/brain").expanduser(),
+    Path("~/.gemini/antigravity-backup/brain").expanduser(),
 ]
 
 

@@ -45,7 +45,12 @@ data/
 # Agent-local memory/config (serena, claude code, etc.) — not for repo
 .serena/
 .claude/
+.zcode/
+.zcodeignore
 /.mimosa/
+
+# Scratch / temporary working directories
+tmp/
 
 # Internal working/audit notes — private, not for public repo
 _docs/

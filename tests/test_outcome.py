@@ -164,6 +164,18 @@ def test_zcode_error_flag_is_reliable() -> None:
     assert out["error_rate_reliable"] is False
 
 
+def test_antigravity_error_flag_is_reliable() -> None:
+    """Antigravity v1.5+ records MODEL/GENERIC status/error -> reliable flag."""
+    assert AgentName.ANTIGRAVITY in ERROR_FLAG_RELIABLE_AGENTS
+    msgs = _results(total=4, errors=3) + [_user("посмотрю позже")]
+    out = session_outcome(msgs, AgentName.ANTIGRAVITY)
+    assert out["status"] == "failure"
+    assert out["tool_results"] == 4
+    assert out["tool_errors"] == 3
+    assert out["error_rate"] == 0.75
+    assert out["error_rate_reliable"] is True
+
+
 def test_unreliable_agent_no_words_is_unknown() -> None:
     msgs = _results(total=8, errors=8) + [_user("продолжай дальше")]
     out = session_outcome(msgs, AgentName.PI)

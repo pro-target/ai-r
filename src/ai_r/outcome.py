@@ -4,11 +4,14 @@ Answers "did this session end well?" from two *cheap, honest* signals and
 returns ``"unknown"`` when neither is present — the status is never guessed:
 
 1. **Tool-call error rate** — the share of tool results the agent itself
-   flagged as failed.  The flag is a *real* source signal only for Claude
-   (``tool_result.is_error``) and OpenCode (``state.status == "error"``);
-   Codex / Pi / Antigravity records carry no per-result error flag, so for
-   them ``tool_errors`` / ``error_rate`` are ``None`` (absence is honest,
-   mirrors ``find_tool_calls.is_error_reliable``).
+   flagged as failed.  The flag is a *real* source signal for Claude
+   (``tool_result.is_error``), OpenCode/ZCode (``state.status == "error"``),
+   and Antigravity (v1.5+ ``MODEL/GENERIC`` status/error in
+   ``transcript_full.jsonl`` / ``conversations/<uuid>.db``; legacy
+   ``overview.txt`` sessions carry no tool results); Codex / Pi records
+   carry no per-result error flag, so for them ``tool_errors`` /
+   ``error_rate`` are ``None`` (absence is honest, mirrors
+   ``find_tool_calls.is_error_reliable``).
 2. **User-verdict dictionary** — bilingual (ru + en) success/failure
    markers matched against the *tail user turns* (the user's own closing
    words).  Only user text is scanned — assistant self-reports ("Готово,
@@ -57,10 +60,15 @@ __all__ = [
 
 
 # Agents whose parsers surface a *real* per-result error flag (see
-# ``parsers/models.py`` → ``Message.tool_result.is_error``).  Kept in sync
-# with ``find_tool_calls``'s ``is_error_reliable``.
+# ``parsers/models.py`` → ``Message.tool_result.is_error``).  Shared SSOT
+# imported by ``find_tool_calls`` for ``is_error_reliable``.
 ERROR_FLAG_RELIABLE_AGENTS: frozenset[AgentName] = frozenset(
-    {AgentName.CLAUDE, AgentName.OPENCODE, AgentName.ZCODE}
+    {
+        AgentName.CLAUDE,
+        AgentName.OPENCODE,
+        AgentName.ZCODE,
+        AgentName.ANTIGRAVITY,
+    }
 )
 
 # How many closing *human* user turns the verdict dictionary scans.  The

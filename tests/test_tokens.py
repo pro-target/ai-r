@@ -364,10 +364,70 @@ def test_pi_total_tokens_fallback(tmp_sessions_dir: Path) -> None:
     assert usage["input"] == 0 and usage["output"] == 0
 
 
-def test_antigravity_always_none(fake_antigravity_brain: Path) -> None:
+def test_antigravity_legacy_brain_without_tokens_returns_none(
+    fake_antigravity_brain: Path,
+) -> None:
     assert antigravity.read_token_usage("test-ag-1") is None
     with pytest.raises(FileNotFoundError):
         antigravity.read_token_usage("no-such-brain")
+
+
+def test_antigravity_modern_transcript_exact_usage_summed(
+    tmp_sessions_dir: Path,
+) -> None:
+    uid = "tok-ag-modern-1"
+    transcript = (
+        tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / uid
+        / ".system_generated" / "logs" / "transcript_full.jsonl"
+    )
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:00Z",
+                "content": "count antigravity tokens",
+            },
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:02Z",
+                "content": "step one",
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "cache_read_tokens": 400,
+            },
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "created_at": "2026-08-01T10:00:05Z",
+                "content": "step two",
+                "input_tokens": 50,
+                "output_tokens": 15,
+                "cache_read_tokens": 525,
+            },
+        ],
+    )
+    usage = antigravity.read_token_usage(uid)
+    assert usage == {
+        "input": 150,
+        "output": 40,
+        "reasoning": 0,
+        "cache_read": 925,
+        "cache_write": 0,
+        "total": 1115,
+    }
+    sess = antigravity.read_session(uid)
+    block = session_tokens(sess)
+    assert block["source"] == "exact"
+    assert block["total"] == 1115
 
 
 # ---------------------------------------------------------------------------
